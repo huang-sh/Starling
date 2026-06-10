@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la /data20T/dev/webioinfo/aweshelf/tests/*.py)",
+      "Bash(python3 -c \"import sys,json; [print\\(json.dumps\\(json.loads\\(l\\), indent=2\\)[:500]\\) for l in sys.stdin]\")",
+      "Bash(npm --version)",
+      "Bash(npx --version)",
+      "Bash(find ~/.codex/sessions/2026 -name *.jsonl -type f)",
+      "Bash(npm ls:*)",
+      "Bash(tsc --version)",
+      "Bash(npm install:*)",
+      "Bash(STARLING_CONFIG=/tmp/starling-test.json node /data20T/dev/Starling/dist/index.js session list 2>&1)",
+      "Bash(npx tsup:*)",
+      "Bash(rm -f /tmp/starling-test.json)",
+      "Bash(rm -rf /tmp/.starling-tmp)"
+    ]
+  }
+}
