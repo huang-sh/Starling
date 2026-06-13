@@ -1,0 +1,292 @@
+# Starling
+
+Agent session manager for Claude Code and OpenAI Codex. Starling discovers local agent sessions, groups them by project, organizes them into hierarchical catalogs, and provides a VS Code sidebar for browsing, resuming, and managing sessions.
+
+## Features
+
+- Discover Claude Code and Codex sessions from local session files.
+- Browse sessions by catalog, project, or recent activity.
+- Create hierarchical catalogs such as `work/research/paper`.
+- Add session metadata, titles, tags, notes, and catalog assignments.
+- Resume Claude Code and Codex sessions from one command.
+- Track token usage when it is available in the session file.
+- Maintain a local session index at `~/.starling/session-index.json` for faster project and catalog views.
+- Launch Claude Code or Codex through `starling run` and automatically assign the created session to a catalog.
+- Manage Claude and Codex model profiles under `~/.starling/settings`.
+- Use the included VS Code extension sidebar for Catalog, Projects, and Sessions.
+
+## Installation
+
+```bash
+npm install -g starling-ai
+```
+
+The npm package is named `starling-ai`, but the installed command is:
+
+```bash
+starling --help
+```
+
+Starling requires Node.js 20 or newer.
+
+## Quick Start
+
+List recent sessions:
+
+```bash
+starling session ls
+```
+
+Show session details, including catalog metadata and token usage:
+
+```bash
+starling session show <session-id>
+```
+
+Resume a session:
+
+```bash
+starling resume <session-id>
+```
+
+Create a catalog and add a session:
+
+```bash
+starling catalog create research/paper
+starling catalog add research/paper <session-id> --title "Figure review"
+```
+
+Launch Codex and assign the new session to a catalog:
+
+```bash
+starling run --catalog research/paper codex
+```
+
+Launch Claude Code with a Starling config profile:
+
+```bash
+starling run --config ds --catalog research/paper claude
+```
+
+Starling options must be placed before the agent name. Everything after `claude` or `codex` is passed directly to that agent:
+
+```bash
+starling run --catalog research/paper codex exec "summarize this repo"
+starling run --catalog research/paper claude --dangerously-skip-permissions
+```
+
+## Commands
+
+### Sessions
+
+```bash
+starling session ls
+starling session ls --all
+starling session ls --agent claude
+starling session ls --cataloged
+starling session ls --catalog research/paper
+starling session show <session-id>
+starling session resume <session-id>
+starling session meta <session-id> --title "New title" --tags review,important
+starling session note <session-id> "Follow up on benchmark results"
+starling session unpin <session-id>
+starling session delete <session-id> --yes
+```
+
+Catalog assignment can also be managed from the session namespace:
+
+```bash
+starling session catalog add <session-id> research/paper --title "Important run"
+starling session catalog remove <session-id> research/paper
+starling session catalog clear <session-id>
+```
+
+### Catalogs
+
+```bash
+starling catalog create <name>
+starling catalog create parent/child/grandchild
+starling catalog create child --parent parent
+starling catalog ls
+starling catalog tree
+starling catalog show <catalog>
+starling catalog add <catalog> <session-id>
+starling catalog detach <catalog> <session-id>
+starling catalog clear <catalog>
+starling catalog delete <catalog>
+starling catalog del <catalog>
+starling catalog edit <catalog> --rename <new-name>
+starling catalog tag <catalog> tag1 tag2
+```
+
+`starling cat` is an alias for `starling catalog`.
+
+Catalog names may repeat when they live under different parents. Use a path such as `parent/child` or a catalog ID when a name is ambiguous.
+
+### Projects
+
+```bash
+starling project ls
+starling project ls --all
+starling project ls --agent codex
+starling project show /path/to/project
+```
+
+`starling prj` is an alias for `starling project`.
+
+Project commands use the local session index by default. Rebuild or bypass it when needed:
+
+```bash
+starling session index status
+starling session index rebuild
+starling session index clear
+starling project ls --refresh-index
+starling project ls --no-index
+```
+
+### Model Profiles
+
+Model profiles are stored under:
+
+```text
+~/.starling/settings/claude
+~/.starling/settings/codex
+```
+
+List current and Starling-managed profiles:
+
+```bash
+starling model ls
+starling model ls --agent claude
+starling model ls --agent codex
+```
+
+Create a Claude profile:
+
+```bash
+starling model add ds --agent claude \
+  --model deepseek-v4-pro \
+  --base-url https://api.example.com \
+  --api-key "$API_KEY"
+```
+
+Create a Codex profile:
+
+```bash
+starling model add demo --agent codex \
+  --model gpt-5.2 \
+  --base-url https://api.example.com/v1 \
+  --api-key "$OPENAI_API_KEY" \
+  --reasoning high \
+  --wire-api responses
+```
+
+Use a profile when launching an agent:
+
+```bash
+starling run --config demo --catalog research/paper codex
+starling run --config ds --catalog research/paper claude
+```
+
+If `--config` is not provided, Starling uses the agent's normal default configuration.
+
+## Configuration Files
+
+Starling stores its own data in `~/.starling`:
+
+```text
+~/.starling/
+  session-index.json
+  settings/
+    claude/
+      <profile>.json
+    codex/
+      <profile>.json
+```
+
+Claude profiles are JSON files that Starling passes to Claude Code as settings.
+
+Codex profiles are JSON files with `auth` and `config` sections. Starling converts them into a temporary Codex config for the run, so `starling run --config <name> codex` does not overwrite the user's default `~/.codex/config.toml`.
+
+Example Codex profile:
+
+```json
+{
+  "auth": {
+    "OPENAI_API_KEY": "sk-..."
+  },
+  "config": {
+    "model_provider": "custom",
+    "model": "gpt-5.2",
+    "model_reasoning_effort": "high",
+    "disable_response_storage": true,
+    "model_providers": {
+      "custom": {
+        "name": "custom",
+        "base_url": "https://api.example.com/v1",
+        "wire_api": "responses",
+        "requires_openai_auth": true
+      }
+    }
+  }
+}
+```
+
+## VS Code Extension
+
+The repository includes a VS Code extension in `vscode-extension/`.
+
+The Starling sidebar contains three views:
+
+- Catalog: hierarchical catalog tree with sessions.
+- Projects: project directory tree with session counts.
+- Sessions: recent sessions with incremental loading.
+
+The extension supports common right-click actions:
+
+- Resume session.
+- Show session details.
+- Pin to catalog.
+- Remove pin metadata.
+- Delete session.
+- Open project in a new VS Code window.
+- Copy project path.
+- Copy session ID.
+
+The extension calls the `starling` CLI. If VS Code cannot find it on `PATH`, set `starling.cliPath` to an absolute path in VS Code settings.
+
+Useful extension settings:
+
+```json
+{
+  "starling.cliPath": "starling",
+  "starling.cacheTtlSeconds": 30,
+  "starling.projectSessionLimit": 30,
+  "starling.sessionTreeLimit": 50
+}
+```
+
+## Development
+
+```bash
+npm install
+npm run build
+npm run lint
+npm test
+```
+
+Build the CLI into `dist/index.js`:
+
+```bash
+npm run build
+```
+
+Run locally from the repository:
+
+```bash
+node dist/index.js --help
+```
+
+## License
+
+MIT

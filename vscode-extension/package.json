@@ -1,9 +1,15 @@
 {
-  "name": "starling",
-  "displayName": "Starling",
+  "name": "starling-ai",
+  "displayName": "Starling Agent",
   "description": "Agent session manager — discover, pin, and organize AI coding sessions",
   "version": "0.0.1",
-  "publisher": "starling",
+  "publisher": "huangsh",
+  "icon": "icons/starling.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/huang-sh/Starling"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },

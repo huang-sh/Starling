@@ -1,0 +1,10 @@
+.vscode/**
+node_modules/**
+src/**
+*.vsix
+package-lock.json
+tsconfig.json
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
