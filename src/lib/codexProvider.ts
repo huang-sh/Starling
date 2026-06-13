@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync, chmodSync, unlink
 import { basename, extname, isAbsolute, join, resolve } from "path";
 import { DEFAULT_CODEX_HOME, DEFAULT_CODEX_SETTINGS_DIR, DEFAULT_STARLING_HOME } from "../constants.js";
 import { atomicWriteJSON, ensureDir } from "../utils/fs.js";
+import { hasKnownConfigExtension } from "./configPaths.js";
 
 export interface CodexProviderProfileSummary {
   name: string;
@@ -190,10 +191,9 @@ export function resolveCodexConfigPath(nameOrPath?: string): string | null {
   }
 
   const base = join(DEFAULT_CODEX_SETTINGS_DIR, basename(nameOrPath));
-  const extension = extname(base);
 
-  if (extension && existsSync(base)) return base;
-  if (extension) return null;
+  if (hasKnownConfigExtension(base, CODEX_PROVIDER_EXTENSIONS) && existsSync(base)) return base;
+  if (hasKnownConfigExtension(base, CODEX_PROVIDER_EXTENSIONS)) return null;
 
   for (const ext of CODEX_PROVIDER_EXTENSIONS) {
     const candidate = `${base}${ext}`;

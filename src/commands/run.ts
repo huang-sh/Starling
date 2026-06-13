@@ -34,6 +34,7 @@ import {
 import { upsertSessionInIndex } from "../lib/sessionIndex.js";
 import { shortSessionId } from "../lib/sessionDisplay.js";
 import { catalogPath, resolveCatalogReference } from "../lib/catalogResolver.js";
+import { hasKnownConfigExtension } from "../lib/configPaths.js";
 import type { SessionMeta, Space } from "../types.js";
 
 type AgentProvider = "claude" | "codex";
@@ -1040,7 +1041,7 @@ function resolveConfigFilePath(provider: AgentProvider, configFile?: string): st
   if (existsSync(candidate)) return candidate;
 
   const candidatesTried = [candidate];
-  if (!extname(fileName)) {
+  if (!hasKnownConfigExtension(fileName, CONFIG_FILE_EXTENSIONS)) {
     for (const ext of CONFIG_FILE_EXTENSIONS) {
       const candidateWithExtension = `${candidate}${ext}`;
       candidatesTried.push(candidateWithExtension);

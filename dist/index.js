@@ -1955,11 +1955,20 @@ import { randomUUID as randomUUID2 } from "crypto";
 import { chmodSync as chmodSync4, existsSync as existsSync6, readFileSync as readFileSync5, readdirSync as readdirSync4, statSync as statSync4, unlinkSync as unlinkSync6, writeFileSync as writeFileSync4 } from "fs";
 import { createInterface as createInterface3 } from "readline/promises";
 import { spawn as spawn2 } from "child_process";
-import { basename as basename2, extname as extname2, isAbsolute as isAbsolute2, join as join7, resolve as resolve2 } from "path";
+import { basename as basename2, extname as extname3, isAbsolute as isAbsolute2, join as join7, resolve as resolve2 } from "path";
 
 // src/lib/codexProvider.ts
 import { existsSync as existsSync4, readFileSync as readFileSync3, readdirSync as readdirSync3, writeFileSync as writeFileSync2, chmodSync as chmodSync2, unlinkSync as unlinkSync4, renameSync as renameSync2 } from "fs";
-import { basename, extname, isAbsolute, join as join5, resolve } from "path";
+import { basename, extname as extname2, isAbsolute, join as join5, resolve } from "path";
+
+// src/lib/configPaths.ts
+import { extname } from "path";
+function hasKnownConfigExtension(fileName, extensions) {
+  const extension = extname(fileName).toLowerCase();
+  return extension.length > 0 && extensions.includes(extension);
+}
+
+// src/lib/codexProvider.ts
 var CODEX_PROVIDER_HISTORY_PATH = join5(DEFAULT_STARLING_HOME, "codex-provider.json");
 var CODEX_PROVIDER_EXTENSIONS = [".toml", ".json", ".jsonc"];
 function resolveCodexConfigPath(nameOrPath) {
@@ -1971,9 +1980,8 @@ function resolveCodexConfigPath(nameOrPath) {
     return resolve(nameOrPath);
   }
   const base = join5(DEFAULT_CODEX_SETTINGS_DIR, basename(nameOrPath));
-  const extension = extname(base);
-  if (extension && existsSync4(base)) return base;
-  if (extension) return null;
+  if (hasKnownConfigExtension(base, CODEX_PROVIDER_EXTENSIONS) && existsSync4(base)) return base;
+  if (hasKnownConfigExtension(base, CODEX_PROVIDER_EXTENSIONS)) return null;
   for (const ext of CODEX_PROVIDER_EXTENSIONS) {
     const candidate = `${base}${ext}`;
     if (existsSync4(candidate)) return candidate;
@@ -3227,7 +3235,7 @@ var CLAUDE_SETTINGS_SYNC_KEYS = [
 ];
 function syncClaudeProfileSettingsFromRunSettings(sourceConfigPath, runSettingsPath) {
   if (!sourceConfigPath || !runSettingsPath || !existsSync6(runSettingsPath)) return false;
-  const sourceExt = extname2(sourceConfigPath).toLowerCase();
+  const sourceExt = extname3(sourceConfigPath).toLowerCase();
   if (sourceExt !== ".json" && sourceExt !== ".jsonc") return false;
   try {
     const sourceSettings = readSettingsJsonObject(sourceConfigPath, sourceExt === ".jsonc");
@@ -3252,7 +3260,7 @@ async function createCodexRunConfig(configPath) {
   if (!configPath) {
     return null;
   }
-  const ext = extname2(configPath).toLowerCase();
+  const ext = extname3(configPath).toLowerCase();
   if (ext === ".toml") {
     const profileName = `starling-run-${randomUUID2()}`;
     const profilePath = join7(DEFAULT_CODEX_HOME, `${profileName}.config.toml`);
@@ -3366,7 +3374,7 @@ async function cleanupCodexRunConfig(config) {
 }
 function syncCodexProfileProjectTrustFromRunConfig(sourceConfigPath, runConfig) {
   if (!sourceConfigPath || !runConfig) return;
-  const sourceExt = extname2(sourceConfigPath).toLowerCase();
+  const sourceExt = extname3(sourceConfigPath).toLowerCase();
   if (sourceExt !== ".json" && sourceExt !== ".jsonc") return;
   const trustedProjects = /* @__PURE__ */ new Set();
   for (const path of runConfig.cleanupPaths) {
@@ -3699,7 +3707,7 @@ function readSessionIdFromHookEntry(value) {
 function readClaudeSettingsObject(configPath) {
   if (!configPath) return {};
   try {
-    const parsed = readSettingsJsonObject(configPath, extname2(configPath).toLowerCase() === ".jsonc");
+    const parsed = readSettingsJsonObject(configPath, extname3(configPath).toLowerCase() === ".jsonc");
     if (parsed) return parsed;
   } catch {
     console.log(chalk6.yellow("Could not add Claude SessionStart hook because settings is not parseable JSON."));
@@ -3737,7 +3745,7 @@ function resolveConfigFilePath(provider, configFile) {
   const candidate = join7(baseDir, fileName);
   if (existsSync6(candidate)) return candidate;
   const candidatesTried = [candidate];
-  if (!extname2(fileName)) {
+  if (!hasKnownConfigExtension(fileName, CONFIG_FILE_EXTENSIONS)) {
     for (const ext of CONFIG_FILE_EXTENSIONS) {
       const candidateWithExtension = `${candidate}${ext}`;
       candidatesTried.push(candidateWithExtension);
@@ -4350,7 +4358,7 @@ import { Command as Command6 } from "commander";
 import chalk7 from "chalk";
 import Table4 from "cli-table3";
 import { existsSync as existsSync7, readFileSync as readFileSync6, readdirSync as readdirSync5 } from "fs";
-import { basename as basename3, extname as extname3, join as join8 } from "path";
+import { basename as basename3, extname as extname4, join as join8 } from "path";
 import { homedir as homedir2 } from "os";
 var SUPPORTED_EXTENSIONS = /* @__PURE__ */ new Set([".json", ".jsonc", ".toml"]);
 function registerModelCommand(program2) {
@@ -4488,7 +4496,7 @@ function collectClaudeConfigs() {
   return [
     summarizeClaudeJson(currentPath, "current", "current"),
     ...listProfileFiles(DEFAULT_CLAUDE_SETTINGS_DIR).map(
-      (filePath) => summarizeClaudeProfile(filePath, basename3(filePath, extname3(filePath)))
+      (filePath) => summarizeClaudeProfile(filePath, basename3(filePath, extname4(filePath)))
     )
   ];
 }
@@ -4497,16 +4505,16 @@ function collectCodexConfigs() {
   return [
     summarizeCodexToml(currentPath, "current", "current", readCodexAuthState()),
     ...listProfileFiles(DEFAULT_CODEX_SETTINGS_DIR).map(
-      (filePath) => summarizeCodexProfile(filePath, basename3(filePath, extname3(filePath)))
+      (filePath) => summarizeCodexProfile(filePath, basename3(filePath, extname4(filePath)))
     )
   ];
 }
 function listProfileFiles(dir) {
   if (!existsSync7(dir)) return [];
-  return readdirSync5(dir, { withFileTypes: true }).filter((entry) => entry.isFile()).map((entry) => join8(dir, entry.name)).filter((filePath) => SUPPORTED_EXTENSIONS.has(extname3(filePath).toLowerCase())).sort((a, b) => a.localeCompare(b));
+  return readdirSync5(dir, { withFileTypes: true }).filter((entry) => entry.isFile()).map((entry) => join8(dir, entry.name)).filter((filePath) => SUPPORTED_EXTENSIONS.has(extname4(filePath).toLowerCase())).sort((a, b) => a.localeCompare(b));
 }
 function summarizeClaudeProfile(filePath, name) {
-  const extension = extname3(filePath).toLowerCase();
+  const extension = extname4(filePath).toLowerCase();
   if (extension !== ".json" && extension !== ".jsonc") {
     return {
       agent: "claude",
@@ -4546,7 +4554,7 @@ function summarizeClaudeJson(filePath, name, scope) {
   }
 }
 function summarizeCodexProfile(filePath, name) {
-  const extension = extname3(filePath).toLowerCase();
+  const extension = extname4(filePath).toLowerCase();
   if (extension === ".toml") {
     return summarizeCodexToml(filePath, name, "profile", "profile");
   }
