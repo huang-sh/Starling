@@ -1,6 +1,6 @@
 {
   "name": "starling-ai",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Agent session manager — discover, bookmark, and organize AI coding sessions",
   "type": "module",
   "repository": {
@@ -12,6 +12,8 @@
   },
   "files": [
     "dist",
+    "skills",
+    "scripts/install-agent-skills.js",
     "package.json",
     "README.md",
     "LICENSE"
@@ -19,6 +21,8 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
+    "postinstall": "node scripts/install-agent-skills.js",
+    "install:skill": "node scripts/install-agent-skills.js",
     "prepack": "npm run build",
     "test": "vitest run",
     "lint": "tsc --noEmit"

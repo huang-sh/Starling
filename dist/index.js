@@ -2988,6 +2988,7 @@ function registerRunCommand(program2) {
     const beforeRun = hookRun ? /* @__PURE__ */ new Map() : await snapshotSessions(provider);
     const beforeRunProjectFiles = provider === "claude" && !hookRun ? snapshotProjectSessions(normalizedCwd) : /* @__PURE__ */ new Map();
     const cleanupRunState = async () => {
+      syncClaudeProfileSettingsFromRunSettings(resolvedConfig, hookRun?.settingsPath ?? null);
       cleanupClaudeRunHookSettings(hookRun);
       await cleanupCodexRunConfig(codexConfig);
       restoreCodexDefaultConfig(codexDefaultSnapshot);
@@ -3211,6 +3212,38 @@ function cleanupClaudeRunHookSettings(hookRun) {
       unlinkSync6(path);
     } catch {
     }
+  }
+}
+var CLAUDE_SETTINGS_SYNC_KEYS = [
+  "permissions",
+  "projects",
+  "trust",
+  "trustedProjects",
+  "enableAllProjectMcpServers",
+  "enabledMcpjsonServers",
+  "disabledMcpjsonServers"
+];
+function syncClaudeProfileSettingsFromRunSettings(sourceConfigPath, runSettingsPath) {
+  if (!sourceConfigPath || !runSettingsPath || !existsSync6(runSettingsPath)) return false;
+  const sourceExt = extname2(sourceConfigPath).toLowerCase();
+  if (sourceExt !== ".json" && sourceExt !== ".jsonc") return false;
+  try {
+    const sourceSettings = readSettingsJsonObject(sourceConfigPath, sourceExt === ".jsonc");
+    const runSettings = readSettingsJsonObject(runSettingsPath, false);
+    if (!sourceSettings || !runSettings) return false;
+    let changed = false;
+    for (const key of CLAUDE_SETTINGS_SYNC_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(runSettings, key)) continue;
+      if (jsonStable(sourceSettings[key]) === jsonStable(runSettings[key])) continue;
+      sourceSettings[key] = cloneJsonValue(runSettings[key]);
+      changed = true;
+    }
+    if (!changed) return false;
+    atomicWriteJSON(sourceConfigPath, sourceSettings);
+    return true;
+  } catch (error) {
+    console.error(chalk6.yellow(`Could not sync Claude settings to ${sourceConfigPath}: ${String(error)}`));
+    return false;
   }
 }
 async function createCodexRunConfig(configPath) {
@@ -3664,13 +3697,23 @@ function readSessionIdFromHookEntry(value) {
 function readClaudeSettingsObject(configPath) {
   if (!configPath) return {};
   try {
-    const raw = readFileSync5(configPath, "utf-8");
-    const parsed = JSON.parse(raw);
-    if (isRecord4(parsed)) return parsed;
+    const parsed = readSettingsJsonObject(configPath, extname2(configPath).toLowerCase() === ".jsonc");
+    if (parsed) return parsed;
   } catch {
     console.log(chalk6.yellow("Could not add Claude SessionStart hook because settings is not parseable JSON."));
   }
   return null;
+}
+function readSettingsJsonObject(filePath, allowComments) {
+  const raw = readFileSync5(filePath, "utf-8");
+  const parsed = JSON.parse(allowComments ? stripJsonComments(raw) : raw);
+  return isRecord4(parsed) ? parsed : null;
+}
+function jsonStable(value) {
+  return JSON.stringify(value);
+}
+function cloneJsonValue(value) {
+  return value === void 0 ? void 0 : JSON.parse(JSON.stringify(value));
 }
 function isRecord4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -4700,7 +4743,7 @@ function escapeRegex(value) {
 // src/index.ts
 var program = new Command7();
 program.enablePositionalOptions();
-program.name("starling").description("Agent session manager \u2014 discover, pin, and organize AI coding sessions").version("0.0.3");
+program.name("starling").description("Agent session manager \u2014 discover, pin, and organize AI coding sessions").version("0.0.4");
 registerSessionCommand(program);
 registerPinCommand(program);
 registerSpaceCommand(program);

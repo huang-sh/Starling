@@ -31,6 +31,19 @@ The npm package is named `starling-ai`, but the installed command is:
 starling --help
 ```
 
+The npm install step also installs the bundled Starling skill to:
+
+```text
+~/.codex/skills/starling/SKILL.md
+~/.claude/skills/starling/SKILL.md
+```
+
+If npm lifecycle scripts were disabled with `--ignore-scripts`, install the skill manually from the package directory:
+
+```bash
+npm explore -g starling-ai -- npm run install:skill
+```
+
 Starling requires Node.js 20 or newer.
 
 ## Quick Start

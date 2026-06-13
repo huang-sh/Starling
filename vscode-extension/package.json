@@ -2,7 +2,7 @@
   "name": "starling-ai",
   "displayName": "Starling Agent",
   "description": "Agent session manager — discover, pin, and organize AI coding sessions",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "publisher": "huangsh",
   "icon": "icons/starling.png",
   "license": "MIT",
@@ -218,47 +218,27 @@
       "view/item/context": [
         {
           "command": "starling.resume",
-          "when": "viewItem =~ /session/ || viewItem =~ /pin/",
-          "group": "inline@1"
-        },
-        {
-          "command": "starling.showSession",
-          "when": "viewItem =~ /session/",
-          "group": "inline@2"
-        },
-        {
-          "command": "starling.pin",
-          "when": "viewItem =~ /session/ && viewItem =~ /unpinned/",
-          "group": "inline@3"
-        },
-        {
-          "command": "starling.pinToSpace",
-          "when": "viewItem =~ /session/ || viewItem =~ /pin/",
-          "group": "inline@4"
-        },
-        {
-          "command": "starling.resume",
-          "when": "viewItem == session-unpinned || viewItem == session-pinned || viewItem == session-pin || viewItem == project-session",
+          "when": "viewItem == session-unpinned || viewItem == session-pinned || viewItem == project-session",
           "group": "sessionContext@1"
         },
         {
           "command": "starling.showSession",
-          "when": "viewItem == session-unpinned || viewItem == session-pinned || viewItem == session-pin || viewItem == project-session",
+          "when": "viewItem == session-unpinned || viewItem == session-pinned || viewItem == project-session",
           "group": "sessionContext@2"
         },
         {
           "command": "starling.openProject",
-          "when": "viewItem == session-unpinned || viewItem == session-pinned || viewItem == session-pin || viewItem == project-session",
+          "when": "viewItem == session-unpinned || viewItem == session-pinned || viewItem == project-session",
           "group": "sessionContext@3"
         },
         {
           "command": "starling.copyProject",
-          "when": "viewItem == session-unpinned || viewItem == session-pinned || viewItem == session-pin || viewItem == project-session",
+          "when": "viewItem == session-unpinned || viewItem == session-pinned || viewItem == project-session",
           "group": "sessionContext@4"
         },
         {
           "command": "starling.copySessionId",
-          "when": "viewItem == session-unpinned || viewItem == session-pinned || viewItem == session-pin || viewItem == project-session",
+          "when": "viewItem == session-unpinned || viewItem == session-pinned || viewItem == project-session",
           "group": "sessionContext@5"
         },
         {
@@ -268,33 +248,18 @@
         },
         {
           "command": "starling.pinToSpace",
-          "when": "viewItem == session-unpinned || viewItem == session-pinned || viewItem == session-pin || viewItem == project-session",
+          "when": "viewItem == session-unpinned || viewItem == session-pinned || viewItem == project-session",
           "group": "sessionContext@8"
         },
         {
           "command": "starling.removePin",
-          "when": "viewItem == session-pinned || viewItem == session-pin",
+          "when": "viewItem == session-pinned",
           "group": "sessionContext@9"
         },
         {
           "command": "starling.deleteSession",
-          "when": "viewItem == session-unpinned || viewItem == session-pinned || viewItem == session-pin || viewItem == project-session",
+          "when": "viewItem == session-unpinned || viewItem == session-pinned || viewItem == project-session",
           "group": "sessionContext@10"
-        },
-        {
-          "command": "starling.projectShow",
-          "when": "viewItem == project",
-          "group": "inline@1"
-        },
-        {
-          "command": "starling.openProject",
-          "when": "viewItem == project",
-          "group": "inline@2"
-        },
-        {
-          "command": "starling.copyProject",
-          "when": "viewItem == project",
-          "group": "inline@3"
         },
         {
           "command": "starling.openProject",
@@ -305,11 +270,6 @@
           "command": "starling.copyProject",
           "when": "viewItem == project",
           "group": "projectContext@2"
-        },
-        {
-          "command": "starling.openProject",
-          "when": "viewItem =~ /session/",
-          "group": "inline@2"
         },
         {
           "command": "starling.catalogCreateChild",

@@ -118,6 +118,7 @@ export function registerRunCommand(program: Command): void {
       const beforeRunProjectFiles =
         provider === "claude" && !hookRun ? snapshotProjectSessions(normalizedCwd) : new Map<string, number>();
       const cleanupRunState = async () => {
+        syncClaudeProfileSettingsFromRunSettings(resolvedConfig, hookRun?.settingsPath ?? null);
         cleanupClaudeRunHookSettings(hookRun);
         await cleanupCodexRunConfig(codexConfig);
         restoreCodexDefaultConfig(codexDefaultSnapshot);
@@ -394,6 +395,47 @@ function cleanupClaudeRunHookSettings(hookRun: ClaudeRunHook | null): void {
     } catch {
       // best-effort cleanup
     }
+  }
+}
+
+const CLAUDE_SETTINGS_SYNC_KEYS = [
+  "permissions",
+  "projects",
+  "trust",
+  "trustedProjects",
+  "enableAllProjectMcpServers",
+  "enabledMcpjsonServers",
+  "disabledMcpjsonServers",
+];
+
+export function syncClaudeProfileSettingsFromRunSettings(
+  sourceConfigPath: string | null,
+  runSettingsPath: string | null
+): boolean {
+  if (!sourceConfigPath || !runSettingsPath || !existsSync(runSettingsPath)) return false;
+
+  const sourceExt = extname(sourceConfigPath).toLowerCase();
+  if (sourceExt !== ".json" && sourceExt !== ".jsonc") return false;
+
+  try {
+    const sourceSettings = readSettingsJsonObject(sourceConfigPath, sourceExt === ".jsonc");
+    const runSettings = readSettingsJsonObject(runSettingsPath, false);
+    if (!sourceSettings || !runSettings) return false;
+
+    let changed = false;
+    for (const key of CLAUDE_SETTINGS_SYNC_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(runSettings, key)) continue;
+      if (jsonStable(sourceSettings[key]) === jsonStable(runSettings[key])) continue;
+      sourceSettings[key] = cloneJsonValue(runSettings[key]);
+      changed = true;
+    }
+
+    if (!changed) return false;
+    atomicWriteJSON(sourceConfigPath, sourceSettings);
+    return true;
+  } catch (error) {
+    console.error(chalk.yellow(`Could not sync Claude settings to ${sourceConfigPath}: ${String(error)}`));
+    return false;
   }
 }
 
@@ -951,13 +993,26 @@ function readSessionIdFromHookEntry(value: unknown): string | null {
 function readClaudeSettingsObject(configPath: string | null): Record<string, unknown> | null {
   if (!configPath) return {};
   try {
-    const raw = readFileSync(configPath, "utf-8");
-    const parsed = JSON.parse(raw) as unknown;
-    if (isRecord(parsed)) return parsed;
+    const parsed = readSettingsJsonObject(configPath, extname(configPath).toLowerCase() === ".jsonc");
+    if (parsed) return parsed;
   } catch {
     console.log(chalk.yellow("Could not add Claude SessionStart hook because settings is not parseable JSON."));
   }
   return null;
+}
+
+function readSettingsJsonObject(filePath: string, allowComments: boolean): Record<string, unknown> | null {
+  const raw = readFileSync(filePath, "utf-8");
+  const parsed = JSON.parse(allowComments ? stripJsonComments(raw) : raw) as unknown;
+  return isRecord(parsed) ? parsed : null;
+}
+
+function jsonStable(value: unknown): string {
+  return JSON.stringify(value);
+}
+
+function cloneJsonValue(value: unknown): unknown {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
