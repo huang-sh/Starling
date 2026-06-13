@@ -683,15 +683,21 @@ function removeSpace(id) {
   const idx = store.spaces.findIndex((s) => s.id === id || s.name === id);
   if (idx === -1) return false;
   const space = store.spaces[idx];
-  for (const b of store.bookmarks) {
-    b.space_ids = b.space_ids.filter((sid) => sid !== space.id);
-  }
-  for (const s of store.spaces) {
-    if (s.parent_id === space.id) {
-      s.parent_id = space.parent_id;
+  const idsToRemove = /* @__PURE__ */ new Set([space.id]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const candidate of store.spaces) {
+      if (candidate.parent_id && idsToRemove.has(candidate.parent_id) && !idsToRemove.has(candidate.id)) {
+        idsToRemove.add(candidate.id);
+        changed = true;
+      }
     }
   }
-  store.spaces.splice(idx, 1);
+  for (const b of store.bookmarks) {
+    b.space_ids = b.space_ids.filter((sid) => !idsToRemove.has(sid));
+  }
+  store.spaces = store.spaces.filter((s) => !idsToRemove.has(s.id));
   saveStore(store);
   return true;
 }

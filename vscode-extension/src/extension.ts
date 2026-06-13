@@ -374,7 +374,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!space) return;
 
       const confirm = await vscode.window.showWarningMessage(
-        `Delete catalog "${space.name}"? Sessions are not deleted. Child catalogs will be moved up one level.`,
+        `Delete catalog "${space.name}"? Child catalogs will also be deleted. Sessions are not deleted.`,
         { modal: true },
         "Delete Catalog"
       );

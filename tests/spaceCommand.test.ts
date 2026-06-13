@@ -95,6 +95,44 @@ describe("catalog command", () => {
     expect(store.spaces.map((space) => space.name)).toEqual(["claude", "codex"]);
   });
 
+  it("deletes child catalogs when removing a parent catalog", async () => {
+    writeFileSync(
+      storePath,
+      JSON.stringify({
+        version: STORE_VERSION,
+        bookmarks: [
+          bookmark("pin_0001", "session-1", ["cat_0003", "cat_0005"]),
+          bookmark("pin_0002", "session-2", ["cat_0004"]),
+        ],
+        spaces: [
+          catalog("cat_0001", "claude"),
+          catalog("cat_0002", "codex"),
+          catalog("cat_0003", "parent"),
+          catalog("cat_0004", "child", "cat_0003"),
+          catalog("cat_0005", "sibling"),
+          catalog("cat_0006", "grandchild", "cat_0004"),
+        ],
+        categories: [],
+      })
+    );
+
+    const program = new Command();
+    program.exitOverride();
+    registerSpaceCommand(program);
+
+    await program.parseAsync(["node", "starling", "catalog", "delete", "parent"]);
+
+    const store = JSON.parse(readFileSync(storePath, "utf-8")) as {
+      spaces: Array<{ id: string; name: string }>;
+      bookmarks: Array<{ session_id: string; space_ids: string[] }>;
+    };
+    expect(store.spaces.map((space) => space.name)).toEqual(["claude", "codex", "sibling"]);
+    expect(store.bookmarks).toEqual([
+      expect.objectContaining({ session_id: "session-1", space_ids: ["cat_0005"] }),
+      expect.objectContaining({ session_id: "session-2", space_ids: [] }),
+    ]);
+  });
+
   it("adds an existing session pin to a catalog", async () => {
     writeFileSync(
       storePath,
