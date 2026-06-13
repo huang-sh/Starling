@@ -12,7 +12,7 @@ program.enablePositionalOptions();
 program
   .name("starling")
   .description("Agent session manager — discover, pin, and organize AI coding sessions")
-  .version("0.1.0");
+  .version("0.0.2");
 
 registerSessionCommand(program);
 registerPinCommand(program);
