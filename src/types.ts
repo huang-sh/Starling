@@ -14,12 +14,12 @@ export interface Bookmark {
   project_path: string;
   first_prompt: string;
   notes: Note[];
-  nest_ids: string[];
+  space_ids: string[];
   created_at: string;
   updated_at: string;
 }
 
-export interface Nest {
+export interface Space {
   id: string;
   name: string;
   description: string;
@@ -32,7 +32,7 @@ export interface Nest {
 export interface Store {
   version: number;
   bookmarks: Bookmark[];
-  nests: Nest[];
+  spaces: Space[];
   categories: string[];
 }
 
@@ -45,4 +45,10 @@ export interface SessionMeta {
   file_path: string;
   created_at: string;
   modified_at: string;
+  token_usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+    cache_tokens?: number;
+  };
 }

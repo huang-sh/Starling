@@ -1,4 +1,4 @@
-import type { Bookmark, Nest } from "../types.js";
+import type { Bookmark, Space } from "../types.js";
 
 export function generateBookmarkId(bookmarks: Bookmark[]): string {
   let max = 0;
@@ -9,13 +9,14 @@ export function generateBookmarkId(bookmarks: Bookmark[]): string {
   return `starling_${String(max + 1).padStart(4, "0")}`;
 }
 
-export function generateNestId(nests: Nest[]): string {
+export function generateSpaceId(spaces: Space[]): string {
   let max = 0;
-  for (const n of nests) {
-    const num = parseInt(n.id.replace("nest_", ""), 10);
+  for (const s of spaces) {
+    const normalizedId = s.id.replace(/^cat_/, "").replace(/^space_/, "");
+    const num = parseInt(normalizedId, 10);
     if (!isNaN(num) && num > max) max = num;
   }
-  return `nest_${String(max + 1).padStart(4, "0")}`;
+  return `cat_${String(max + 1).padStart(4, "0")}`;
 }
 
 export function generateNoteId(): string {

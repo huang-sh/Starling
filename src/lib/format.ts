@@ -1,18 +1,44 @@
 import chalk from "chalk";
 import Table from "cli-table3";
-import type { Bookmark, Nest, SessionMeta } from "../types.js";
+import type { Bookmark, Space, SessionMeta } from "../types.js";
+import { shortSessionId } from "./sessionDisplay.js";
 
 export function formatSessionTable(sessions: SessionMeta[]): string {
+  const formatToken = (value: number | undefined): string => {
+    return value === undefined ? "-" : String(value);
+  };
+
   const table = new Table({
-    head: [chalk.cyan("Session ID"), chalk.cyan("Model"), chalk.cyan("Project"), chalk.cyan("Modified")],
-    colWidths: [40, 25, 40, 22],
+    head: [
+      chalk.cyan("Session ID"),
+      chalk.cyan("Agent"),
+      chalk.cyan("Model"),
+      chalk.cyan("Project"),
+      chalk.cyan("Modified"),
+      chalk.cyan("Input"),
+      chalk.cyan("Output"),
+      chalk.cyan("Total"),
+      chalk.cyan("Cache"),
+    ],
+    colWidths: [15, 8, 16, 30, 20, 10, 10, 10, 10],
     style: { head: [] },
   });
   for (const s of sessions) {
-    const shortId = s.session_id.length > 36 ? s.session_id.slice(0, 36) + "…" : s.session_id;
-    const shortProject = s.project_path ? (s.project_path.length > 38 ? "…" + s.project_path.slice(-37) : s.project_path) : "-";
+    const shortId = shortSessionId(s.session_id);
+    const agent = s.provider === "codex" ? "codex" : "claude";
+    const shortProject = s.project_path ? (s.project_path.length > 36 ? "…" + s.project_path.slice(-35) : s.project_path) : "-";
     const shortDate = s.modified_at.slice(0, 19).replace("T", " ");
-    table.push([shortId, s.model || "-", shortProject, shortDate]);
+    table.push([
+      shortId,
+      agent,
+      s.model || "-",
+      shortProject,
+      shortDate,
+      formatToken(s.token_usage?.input_tokens),
+      formatToken(s.token_usage?.output_tokens),
+      formatToken(s.token_usage?.total_tokens),
+      formatToken(s.token_usage?.cache_tokens),
+    ]);
   }
   return table.toString();
 }
@@ -34,7 +60,7 @@ export function formatBookmarkTable(bookmarks: Bookmark[]): string {
 
 export function formatBookmarkDetail(b: Bookmark): string {
   const lines: string[] = [
-    chalk.bold.green(`Bookmark: ${b.id}`),
+    chalk.bold.green(`Pin: ${b.id}`),
     `  Title:       ${b.title}`,
     `  Provider:    ${b.provider}`,
     `  Session:     ${b.session_id}`,
@@ -46,8 +72,8 @@ export function formatBookmarkDetail(b: Bookmark): string {
     `  Updated:     ${b.updated_at}`,
   ];
 
-  if (b.nest_ids.length > 0) {
-    lines.push(`  Nests:       ${b.nest_ids.join(", ")}`);
+  if (b.space_ids.length > 0) {
+    lines.push(`  Catalogs:    ${b.space_ids.join(", ")}`);
   }
 
   if (b.notes.length > 0) {
@@ -61,43 +87,40 @@ export function formatBookmarkDetail(b: Bookmark): string {
   return lines.join("\n");
 }
 
-export function formatNestTree(nests: Nest[], bookmarks: Bookmark[]): string {
-  if (nests.length === 0) return chalk.yellow("No nests created yet.");
+export function formatSpaceTree(spaces: Space[], bookmarks: Bookmark[]): string {
+  if (spaces.length === 0) return chalk.yellow("No catalogs created yet.");
 
-  // Build lookup maps
-  const childrenMap = new Map<string | null, Nest[]>();
-  for (const n of nests) {
-    const parent = n.parent_id ?? null;
+  const childrenMap = new Map<string | null, Space[]>();
+  for (const s of spaces) {
+    const parent = s.parent_id ?? null;
     if (!childrenMap.has(parent)) childrenMap.set(parent, []);
-    childrenMap.get(parent)!.push(n);
+    childrenMap.get(parent)!.push(s);
   }
 
-  const bookmarkByNest = new Map<string, string[]>();
+  const bookmarkBySpace = new Map<string, Bookmark[]>();
   for (const b of bookmarks) {
-    for (const nid of b.nest_ids) {
-      if (!bookmarkByNest.has(nid)) bookmarkByNest.set(nid, []);
-      bookmarkByNest.get(nid)!.push(b.title);
+    for (const sid of b.space_ids) {
+      if (!bookmarkBySpace.has(sid)) bookmarkBySpace.set(sid, []);
+      bookmarkBySpace.get(sid)!.push(b);
     }
   }
 
-  function renderNode(nest: Nest, prefix: string, isLast: boolean): string[] {
+  function renderNode(space: Space, prefix: string, isLast: boolean): string[] {
     const connector = isLast ? "└── " : "├── ";
     const lines: string[] = [];
-    const tagStr = nest.tags.length > 0 ? chalk.gray(` [${nest.tags.join(", ")}]`) : "";
-    lines.push(`${prefix}${connector}${chalk.bold(nest.name)}${tagStr}`);
+    const tagStr = space.tags.length > 0 ? chalk.gray(` [${space.tags.join(", ")}]`) : "";
+    lines.push(`${prefix}${connector}${chalk.bold(space.name)}${tagStr}`);
 
     const childPrefix = prefix + (isLast ? "    " : "│   ");
 
-    // Show bookmarks in this nest
-    const bk = bookmarkByNest.get(nest.id) || [];
+    const bk = bookmarkBySpace.get(space.id) || [];
     for (let i = 0; i < bk.length; i++) {
-      const bIsLast = i === bk.length - 1 && !childrenMap.has(nest.id);
+      const bIsLast = i === bk.length - 1 && !childrenMap.has(space.id);
       const bConn = bIsLast ? "└── " : "├── ";
-      lines.push(`${childPrefix}${bConn}${chalk.cyan(bk[i])}`);
+      lines.push(`${childPrefix}${bConn}${chalk.cyan(bk[i]!.title)} ${chalk.gray(`[${bk[i]!.session_id}]`)}`);
     }
 
-    // Show child nests
-    const children = childrenMap.get(nest.id) || [];
+    const children = childrenMap.get(space.id) || [];
     for (let i = 0; i < children.length; i++) {
       lines.push(...renderNode(children[i], childPrefix, i === children.length - 1 && bk.length === 0));
     }
