@@ -1,5 +1,9 @@
 # Starling
 
+<p align="center">
+  <img src="assets/starling.png" alt="Starling logo" width="160">
+</p>
+
 Agent session manager for Claude Code and OpenAI Codex. Starling discovers local agent sessions, groups them by project, organizes them into hierarchical catalogs, and exposes fast CLI workflows for browsing, resuming, and managing sessions.
 
 ## Features
