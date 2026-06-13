@@ -3,6 +3,10 @@
   "version": "0.0.1",
   "description": "Agent session manager — discover, bookmark, and organize AI coding sessions",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/huang-sh/Starling"
+  },
   "bin": {
     "starling": "dist/index.js"
   },
