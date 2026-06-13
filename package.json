@@ -4,7 +4,7 @@
   "description": "Agent session manager — discover, bookmark, and organize AI coding sessions",
   "type": "module",
   "bin": {
-    "starling": "./dist/index.js"
+    "starling": "dist/index.js"
   },
   "files": [
     "dist",
