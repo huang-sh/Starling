@@ -3031,7 +3031,7 @@ function registerRunCommand(program2) {
           }
           hintedSessionId = sessionId;
           const candidate = hookRun && provider === "claude" ? await findClaudeSessionInProjectById(sessionId, normalizedCwd) : await findKnownSessionForRun(sessionId, provider, normalizedCwd, i);
-          if (candidate && candidate.provider === provider && wasSessionTouchedAfterRun(candidate, startedTime, beforeRun)) {
+          if (isRunSessionCandidate(candidate, provider, startedTime, beforeRun, sessionId)) {
             await pinSessionToCatalog(candidate, opts, catalog);
             catalogPinned = true;
             return;
@@ -3900,6 +3900,11 @@ function wasSessionTouchedAfterRun(session, startedAt, beforeRun) {
   const previousModifiedAt = beforeRun.get(session.session_id);
   if (previousModifiedAt === void 0) return true;
   return modifiedAt > previousModifiedAt;
+}
+function isRunSessionCandidate(session, provider, startedAt, beforeRun, reportedSessionId) {
+  if (!session || session.provider !== provider) return false;
+  if (reportedSessionId && session.session_id === reportedSessionId) return true;
+  return wasSessionTouchedAfterRun(session, startedAt, beforeRun);
 }
 async function detectSessionStartedAfterRun(provider, startedAt, beforeRun, cwd, beforeRunProjectFiles = /* @__PURE__ */ new Map(), knownSessionId) {
   const startedTime = Date.parse(startedAt);

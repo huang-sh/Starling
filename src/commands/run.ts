@@ -157,7 +157,7 @@ export function registerRunCommand(program: Command): void {
             const candidate: SessionMeta | null = hookRun && provider === "claude"
               ? await findClaudeSessionInProjectById(sessionId, normalizedCwd)
               : await findKnownSessionForRun(sessionId, provider, normalizedCwd, i);
-            if (candidate && candidate.provider === provider && wasSessionTouchedAfterRun(candidate, startedTime, beforeRun)) {
+            if (isRunSessionCandidate(candidate, provider, startedTime, beforeRun, sessionId)) {
               await pinSessionToCatalog(candidate, opts, catalog);
               catalogPinned = true;
               return;
@@ -1247,6 +1247,18 @@ function wasSessionTouchedAfterRun(
   const previousModifiedAt = beforeRun.get(session.session_id);
   if (previousModifiedAt === undefined) return true;
   return modifiedAt > previousModifiedAt;
+}
+
+function isRunSessionCandidate(
+  session: SessionMeta | null,
+  provider: AgentProvider,
+  startedAt: number,
+  beforeRun: SessionSnapshot,
+  reportedSessionId?: string
+): session is SessionMeta {
+  if (!session || session.provider !== provider) return false;
+  if (reportedSessionId && session.session_id === reportedSessionId) return true;
+  return wasSessionTouchedAfterRun(session, startedAt, beforeRun);
 }
 
 async function detectSessionStartedAfterRun(
