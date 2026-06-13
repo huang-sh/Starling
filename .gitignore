@@ -16,7 +16,7 @@ node_modules/.vite/
 
 # Local Starling / agent state
 .starling/
-.claude/settings.local.json
+.claude/
 
 # Environment files
 .env
@@ -35,8 +35,6 @@ pnpm-debug.log*
 # OS/editor noise
 .DS_Store
 Thumbs.db
-
-.claude
 
 Starling.png
 starling_logo.svg
