@@ -20,6 +20,14 @@ starling --help
 
 If VS Code cannot find `starling` on `PATH`, set `starling.cliPath` to an absolute executable path in VS Code settings.
 
+When the extension starts and cannot find the Starling CLI, it prompts you to install it with:
+
+```bash
+npm install -g starling-ai
+```
+
+You can also use the prompt to open the `starling.cliPath` setting.
+
 ## Views
 
 ### Catalog

@@ -7,6 +7,7 @@ import * as cli from "./cli";
 import { shortSessionId } from "./sessionDisplay";
 
 const outputChannel = vscode.window.createOutputChannel("Starling");
+let starlingInstallPromptVisible = false;
 
 interface QuickPickItem<T> extends vscode.QuickPickItem {
   value: T;
@@ -35,6 +36,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("starling.refresh", refreshHandler)
   );
 
+  void checkStarlingCliOnActivation();
+
   // Core actions
   context.subscriptions.push(
     vscode.commands.registerCommand("starling.resume", async (node: unknown) => {
@@ -43,7 +46,7 @@ export function activate(context: vscode.ExtensionContext): void {
       try {
         await resumeSessionInTerminal(sessionId);
       } catch (err) {
-        vscode.window.showErrorMessage(`Resume failed: ${errorMessage(err)}`);
+        await showCommandError("Resume", err);
       }
     })
   );
@@ -71,7 +74,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage(`Pinned session ${shortSessionId(sessionId)}…`);
         refreshAllViews();
       } catch (err) {
-        vscode.window.showErrorMessage(`Pin failed: ${errorMessage(err)}`);
+        await showCommandError("Pin", err);
       }
     })
   );
@@ -89,7 +92,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage(`Pinned session ${shortSessionId(sessionId)}… to "${space}"`);
         refreshAllViews();
       } catch (err) {
-        vscode.window.showErrorMessage(`Pin to catalog failed: ${errorMessage(err)}`);
+        await showCommandError("Pin to catalog", err);
       }
     })
   );
@@ -104,7 +107,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage(`Removed pin for ${shortSessionId(sessionId)}…`);
         refreshAllViews();
       } catch (err) {
-        vscode.window.showErrorMessage(`Remove pin failed: ${errorMessage(err)}`);
+        await showCommandError("Remove pin", err);
       }
     })
   );
@@ -126,7 +129,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage(`Deleted session ${shortSessionId(sessionId)}…`);
         refreshAllViews();
       } catch (err) {
-        vscode.window.showErrorMessage(`Delete session failed: ${errorMessage(err)}`);
+        await showCommandError("Delete session", err);
       }
     })
   );
@@ -360,7 +363,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage(`Renamed catalog "${space.name}" to "${nextName}".`);
         refreshAllViews();
       } catch (err) {
-        vscode.window.showErrorMessage(`Rename catalog failed: ${errorMessage(err)}`);
+        await showCommandError("Rename catalog", err);
       }
     })
   );
@@ -382,7 +385,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage(`Deleted catalog "${space.name}".`);
         refreshAllViews();
       } catch (err) {
-        vscode.window.showErrorMessage(`Delete catalog failed: ${errorMessage(err)}`);
+        await showCommandError("Delete catalog", err);
       }
     })
   );
@@ -506,7 +509,7 @@ export function activate(context: vscode.ExtensionContext): void {
       try {
         await openProjectFolderInNewWindow(selected);
       } catch (err) {
-        vscode.window.showErrorMessage(`Open project failed: ${errorMessage(err)}`);
+        await showCommandError("Open project", err);
       }
     })
   );
@@ -521,7 +524,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await vscode.env.clipboard.writeText(selected);
         vscode.window.showInformationMessage(`Copied project path: ${selected}`);
       } catch (err) {
-        vscode.window.showErrorMessage(`Copy project path failed: ${errorMessage(err)}`);
+        await showCommandError("Copy project path", err);
       }
     })
   );
@@ -535,7 +538,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await vscode.env.clipboard.writeText(sessionId);
         vscode.window.showInformationMessage(`Copied session ID: ${sessionId}`);
       } catch (err) {
-        vscode.window.showErrorMessage(`Copy session ID failed: ${errorMessage(err)}`);
+        await showCommandError("Copy session ID", err);
       }
     })
   );
@@ -554,8 +557,48 @@ async function runCliCommandOutput(title: string, command: () => Promise<string>
     outputChannel.appendLine(text.trim());
     outputChannel.show(true);
   } catch (err) {
+    if (await maybePromptStarlingInstall(err)) return;
     vscode.window.showErrorMessage(`${title} failed: ${errorMessage(err)}`);
   }
+}
+
+async function showCommandError(action: string, err: unknown): Promise<void> {
+  if (await maybePromptStarlingInstall(err)) return;
+  vscode.window.showErrorMessage(`${action} failed: ${errorMessage(err)}`);
+}
+
+async function checkStarlingCliOnActivation(): Promise<void> {
+  try {
+    await cli.checkStarlingAvailable();
+  } catch (err) {
+    await maybePromptStarlingInstall(err);
+  }
+}
+
+async function maybePromptStarlingInstall(err: unknown): Promise<boolean> {
+  if (!(err instanceof cli.StarlingCliNotFoundError)) return false;
+  if (starlingInstallPromptVisible) return true;
+
+  starlingInstallPromptVisible = true;
+  try {
+    const selected = await vscode.window.showWarningMessage(
+      `Starling CLI was not found (${err.cliPath}). Install it with npm or set starling.cliPath.`,
+      "Install in Terminal",
+      "Set CLI Path"
+    );
+
+    if (selected === "Install in Terminal") {
+      const terminal = vscode.window.createTerminal("Install Starling CLI");
+      terminal.show();
+      terminal.sendText("npm install -g starling-ai");
+    } else if (selected === "Set CLI Path") {
+      await vscode.commands.executeCommand("workbench.action.openSettings", "starling.cliPath");
+    }
+  } finally {
+    starlingInstallPromptVisible = false;
+  }
+
+  return true;
 }
 
 async function openProjectFolderInNewWindow(projectPath: string): Promise<void> {

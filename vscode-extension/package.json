@@ -2,7 +2,7 @@
   "name": "starling-ai",
   "displayName": "Starling Agent",
   "description": "Agent session manager — discover, pin, and organize AI coding sessions",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "huangsh",
   "icon": "icons/starling.png",
   "license": "MIT",

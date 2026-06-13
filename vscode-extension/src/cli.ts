@@ -14,6 +14,13 @@ type CliExecOptions = {
   maxBuffer?: number;
 };
 
+export class StarlingCliNotFoundError extends Error {
+  constructor(public readonly cliPath: string) {
+    super(`Starling CLI was not found: ${cliPath}`);
+    this.name = "StarlingCliNotFoundError";
+  }
+}
+
 export interface TokenUsage {
   input_tokens?: number;
   output_tokens?: number;
@@ -162,6 +169,9 @@ async function execStarlingRaw(args: string[], options: Partial<CliExecOptions> 
     });
     return stdout as string;
   } catch (err) {
+    if (isCommandNotFoundError(err)) {
+      throw new StarlingCliNotFoundError(command.file);
+    }
     const message = err instanceof Error ? err.message : String(err);
     const anyError = err as {
       stdout?: string;
@@ -177,6 +187,13 @@ async function execStarlingRaw(args: string[], options: Partial<CliExecOptions> 
     if (anyError?.code !== undefined) details.push(`code=${anyError.code}`);
     throw new Error(`starling command failed: ${commandText}${details.length ? `: ${details.join(" | ")}` : ""}`);
   }
+}
+
+function isCommandNotFoundError(err: unknown): boolean {
+  const anyError = err as { code?: unknown; errno?: unknown; syscall?: unknown; path?: unknown; message?: unknown };
+  if (anyError?.code === "ENOENT") return true;
+  const message = typeof anyError?.message === "string" ? anyError.message : "";
+  return message.includes("ENOENT") || message.includes("not found");
 }
 
 function sanitizeCliOutput(value: string | undefined): string {
@@ -294,6 +311,13 @@ export async function listSessions(
     if (agent) args.push("--agent", agent);
     return getCachedResult<SessionMeta[]>(`sessionList:${cacheKeyForCommand(args)}`, () => execStarlingJson<SessionMeta[]>(args));
   }
+}
+
+export async function checkStarlingAvailable(): Promise<void> {
+  await execStarlingRaw(["--version"], {
+    timeout: 5_000,
+    maxBuffer: 1024 * 1024,
+  });
 }
 
 export async function listSessionsText(opts: {

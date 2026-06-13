@@ -1,6 +1,6 @@
 {
   "name": "starling-ai",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Agent session manager — discover, bookmark, and organize AI coding sessions",
   "type": "module",
   "repository": {
