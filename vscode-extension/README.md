@@ -36,6 +36,11 @@ Right-click a catalog session to:
 - Remove pin metadata.
 - Delete the session.
 
+Right-click a catalog folder to:
+
+- Rename the catalog.
+- Delete the catalog without deleting session files.
+
 ### Projects
 
 Browse projects as a directory tree with session counts.
@@ -80,6 +85,8 @@ Common commands:
 - `Starling: Session Index Status`
 - `Starling: Rebuild Session Index`
 - `Starling: List Models`
+- `Starling: Rename Catalog`
+- `Starling: Delete Catalog`
 - `Starling: Catalog Tree`
 - `Starling: List Projects`
 - `Starling: Open Project in New Window`

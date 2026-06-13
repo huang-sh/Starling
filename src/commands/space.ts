@@ -269,6 +269,15 @@ export function registerSpaceCommand(program: Command): void {
       console.log(chalk.green(`Tagged "${s.name}": ${merged.join(", ")}`));
     });
 
+  // catalog rename
+  space
+    .command("rename <catalog> <new-name>")
+    .description("Rename a catalog")
+    .action((catalog: string, newName: string) => {
+      const updated = renameCatalog(catalog, newName);
+      console.log(chalk.green(`Renamed catalog: "${updated.name}" (${updated.id})`));
+    });
+
   // catalog edit
   space
     .command("edit <name>")
@@ -280,7 +289,10 @@ export function registerSpaceCommand(program: Command): void {
       const s = resolveCatalogRef(name);
       const patch: Partial<Space> = {};
       if (opts.description) patch.description = opts.description;
-      if (opts.rename) patch.name = opts.rename;
+      if (opts.rename) {
+        const nextName = validateCatalogName(opts.rename);
+        patch.name = nextName;
+      }
       if (opts.parent) {
         const parent = resolveCatalogRef(opts.parent);
         if (parent.id === s.id) {
@@ -307,6 +319,35 @@ export function registerSpaceCommand(program: Command): void {
     });
 
   program.addCommand(space);
+}
+
+function renameCatalog(catalog: string, newName: string): Space {
+  const s = resolveCatalogRef(catalog);
+  const trimmedName = validateCatalogName(newName);
+  if (hasSiblingSpaceName(trimmedName, s.parent_id, s.id)) {
+    console.error(chalk.red(`Catalog already exists under this parent: ${trimmedName}`));
+    process.exit(1);
+  }
+
+  const updated = updateSpace(s.id, { name: trimmedName });
+  if (!updated) {
+    console.error(chalk.red(`Catalog not found: ${catalog}`));
+    process.exit(1);
+  }
+  return updated;
+}
+
+function validateCatalogName(newName: string): string {
+  const trimmedName = newName.trim();
+  if (!trimmedName) {
+    console.error(chalk.red("Catalog name cannot be empty."));
+    process.exit(1);
+  }
+  if (trimmedName.includes("/")) {
+    console.error(chalk.red("Catalog rename expects a single catalog name, not a path."));
+    process.exit(1);
+  }
+  return trimmedName;
 }
 
 function isDescendantCatalog(candidate: Space, root: Space, spaces: Space[]): boolean {

@@ -231,6 +231,55 @@ describe("catalog command", () => {
     ]);
   });
 
+  it("renames a catalog", async () => {
+    writeFileSync(
+      storePath,
+      JSON.stringify({
+        version: STORE_VERSION,
+        bookmarks: [],
+        spaces: [catalog("cat_0001", "old-name")],
+        categories: [],
+      })
+    );
+
+    const program = new Command();
+    program.exitOverride();
+    registerSpaceCommand(program);
+
+    await program.parseAsync(["node", "starling", "catalog", "rename", "old-name", "new-name"]);
+
+    const store = JSON.parse(readFileSync(storePath, "utf-8")) as {
+      spaces: Array<{ id: string; name: string }>;
+    };
+    expect(store.spaces).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "cat_0001", name: "new-name" }),
+    ]));
+  });
+
+  it("rejects renaming a catalog to an existing sibling name", async () => {
+    writeFileSync(
+      storePath,
+      JSON.stringify({
+        version: STORE_VERSION,
+        bookmarks: [],
+        spaces: [
+          catalog("cat_0001", "parent"),
+          catalog("cat_0002", "source", "cat_0001"),
+          catalog("cat_0003", "target", "cat_0001"),
+        ],
+        categories: [],
+      })
+    );
+
+    const program = new Command();
+    program.exitOverride();
+    registerSpaceCommand(program);
+
+    await expect(
+      program.parseAsync(["node", "starling", "catalog", "rename", "parent/source", "target"])
+    ).rejects.toThrow();
+  });
+
   it("allows duplicate catalog names under different parents", async () => {
     writeFileSync(
       storePath,

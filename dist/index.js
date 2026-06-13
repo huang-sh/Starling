@@ -1637,11 +1637,18 @@ ${chalk4.yellow(`Pins in ${row.name} (${row.id})`)}`);
     updateSpace(s.id, { tags: merged });
     console.log(chalk4.green(`Tagged "${s.name}": ${merged.join(", ")}`));
   });
+  space.command("rename <catalog> <new-name>").description("Rename a catalog").action((catalog, newName) => {
+    const updated = renameCatalog(catalog, newName);
+    console.log(chalk4.green(`Renamed catalog: "${updated.name}" (${updated.id})`));
+  });
   space.command("edit <name>").description("Edit catalog metadata").option("-d, --description <desc>", "new description").option("--rename <new-name>", "rename the catalog").option("--parent <parent>", "set parent catalog").action((name, opts) => {
     const s = resolveCatalogRef2(name);
     const patch = {};
     if (opts.description) patch.description = opts.description;
-    if (opts.rename) patch.name = opts.rename;
+    if (opts.rename) {
+      const nextName2 = validateCatalogName(opts.rename);
+      patch.name = nextName2;
+    }
     if (opts.parent) {
       const parent = resolveCatalogRef2(opts.parent);
       if (parent.id === s.id) {
@@ -1666,6 +1673,32 @@ ${chalk4.yellow(`Pins in ${row.name} (${row.id})`)}`);
     }
   });
   program2.addCommand(space);
+}
+function renameCatalog(catalog, newName) {
+  const s = resolveCatalogRef2(catalog);
+  const trimmedName = validateCatalogName(newName);
+  if (hasSiblingSpaceName(trimmedName, s.parent_id, s.id)) {
+    console.error(chalk4.red(`Catalog already exists under this parent: ${trimmedName}`));
+    process.exit(1);
+  }
+  const updated = updateSpace(s.id, { name: trimmedName });
+  if (!updated) {
+    console.error(chalk4.red(`Catalog not found: ${catalog}`));
+    process.exit(1);
+  }
+  return updated;
+}
+function validateCatalogName(newName) {
+  const trimmedName = newName.trim();
+  if (!trimmedName) {
+    console.error(chalk4.red("Catalog name cannot be empty."));
+    process.exit(1);
+  }
+  if (trimmedName.includes("/")) {
+    console.error(chalk4.red("Catalog rename expects a single catalog name, not a path."));
+    process.exit(1);
+  }
+  return trimmedName;
 }
 function isDescendantCatalog(candidate, root, spaces) {
   let current = candidate;

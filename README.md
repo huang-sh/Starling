@@ -1,5 +1,9 @@
 # Starling
 
+<p align="center">
+  <img src="vscode-extension/icons/starling.png" alt="Starling logo" width="160">
+</p>
+
 Agent session manager for Claude Code and OpenAI Codex. Starling discovers local agent sessions, groups them by project, organizes them into hierarchical catalogs, and provides a VS Code sidebar for browsing, resuming, and managing sessions.
 
 ## Features
@@ -115,6 +119,7 @@ starling catalog detach <catalog> <session-id>
 starling catalog clear <catalog>
 starling catalog delete <catalog>
 starling catalog del <catalog>
+starling catalog rename <catalog> <new-name>
 starling catalog edit <catalog> --rename <new-name>
 starling catalog tag <catalog> tag1 tag2
 ```

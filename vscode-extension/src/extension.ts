@@ -337,6 +337,57 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand("starling.catalogRename", async (node: unknown) => {
+      const space = await pickSpaceFromNode(node);
+      if (!space) return;
+
+      const nextName = normalizeOptionalInput(
+        await vscode.window.showInputBox({
+          title: `Rename catalog ${space.name}`,
+          value: space.name,
+          validateInput: (value) => {
+            const trimmed = value.trim();
+            if (!trimmed) return "Catalog name is required";
+            if (trimmed.includes("/")) return "Enter a single catalog name, not a path";
+            return undefined;
+          },
+        })
+      );
+      if (!nextName || nextName === space.name) return;
+
+      try {
+        await cli.renameCatalog(space.id, nextName);
+        vscode.window.showInformationMessage(`Renamed catalog "${space.name}" to "${nextName}".`);
+        refreshAllViews();
+      } catch (err) {
+        vscode.window.showErrorMessage(`Rename catalog failed: ${errorMessage(err)}`);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("starling.catalogDelete", async (node: unknown) => {
+      const space = await pickSpaceFromNode(node);
+      if (!space) return;
+
+      const confirm = await vscode.window.showWarningMessage(
+        `Delete catalog "${space.name}"? Sessions are not deleted. Child catalogs will be moved up one level.`,
+        { modal: true },
+        "Delete Catalog"
+      );
+      if (confirm !== "Delete Catalog") return;
+
+      try {
+        await cli.removeCatalog(space.id);
+        vscode.window.showInformationMessage(`Deleted catalog "${space.name}".`);
+        refreshAllViews();
+      } catch (err) {
+        vscode.window.showErrorMessage(`Delete catalog failed: ${errorMessage(err)}`);
+      }
+    })
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand("starling.catalogTag", async () => {
       const space = await pickSpace();
       if (!space) return;
@@ -630,6 +681,12 @@ async function pickSpace(): Promise<cli.Space | undefined> {
   return selected?.value as cli.Space | undefined;
 }
 
+async function pickSpaceFromNode(node: unknown): Promise<cli.Space | undefined> {
+  const direct = extractSpace(node);
+  if (direct) return direct;
+  return pickSpace();
+}
+
 async function selectProjectPath(nodePath?: string): Promise<string | undefined> {
   if (nodePath) return nodePath;
 
@@ -766,6 +823,7 @@ interface HasSessionMeta {
     project_path?: string | null;
   };
   project?: { project_path: string };
+  space?: cli.Space;
 }
 
 function extractSessionId(node: unknown): string | undefined {
@@ -784,4 +842,10 @@ function extractProjectPath(node: unknown): string | undefined {
   if (obj.meta?.project_path) return obj.meta.project_path;
   if (obj.summary?.project_path) return obj.summary.project_path;
   return undefined;
+}
+
+function extractSpace(node: unknown): cli.Space | undefined {
+  if (!node) return undefined;
+  const obj = node as HasSessionMeta;
+  return obj.space;
 }

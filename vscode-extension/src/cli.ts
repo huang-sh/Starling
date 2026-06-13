@@ -431,6 +431,10 @@ export async function removeCatalog(name: string): Promise<string> {
   return execStarlingRaw(["catalog", "delete", name], { timeout: DEFAULT_TEXT_TIMEOUT });
 }
 
+export async function renameCatalog(name: string, newName: string): Promise<string> {
+  return execStarlingRaw(["catalog", "rename", name, newName], { timeout: DEFAULT_TEXT_TIMEOUT });
+}
+
 export async function removeSessionFromCatalog(name: string, sessionId: string): Promise<string> {
   return execStarlingRaw(["catalog", "detach", name, sessionId], { timeout: DEFAULT_TEXT_TIMEOUT });
 }

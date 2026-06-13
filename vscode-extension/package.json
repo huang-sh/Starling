@@ -40,6 +40,8 @@
     "onCommand:starling.catalogShow",
     "onCommand:starling.catalogCreate",
     "onCommand:starling.catalogRemove",
+    "onCommand:starling.catalogRename",
+    "onCommand:starling.catalogDelete",
     "onCommand:starling.catalogTag",
     "onCommand:starling.catalogEdit",
     "onCommand:starling.projectList",
@@ -162,6 +164,16 @@
       {
         "command": "starling.catalogRemove",
         "title": "Starling: Remove Catalog"
+      },
+      {
+        "command": "starling.catalogRename",
+        "title": "Starling: Rename Catalog",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "starling.catalogDelete",
+        "title": "Starling: Delete Catalog",
+        "icon": "$(trash)"
       },
       {
         "command": "starling.catalogTag",
@@ -291,6 +303,21 @@
           "command": "starling.openProject",
           "when": "viewItem =~ /session/",
           "group": "inline@2"
+        },
+        {
+          "command": "starling.catalogRename",
+          "when": "viewItem == catalog",
+          "group": "catalogContext@1"
+        },
+        {
+          "command": "starling.catalogDelete",
+          "when": "viewItem == catalog",
+          "group": "catalogContext@2"
+        },
+        {
+          "command": "starling.catalogEdit",
+          "when": "viewItem == catalog",
+          "group": "catalogContext@3"
         },
         {
           "command": "starling.resume",
