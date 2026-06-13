@@ -10,7 +10,7 @@ Agent session manager for Claude Code and OpenAI Codex. Starling discovers local
 
 - Discover Claude Code and Codex sessions from local session files.
 - Browse sessions by catalog, project, or recent activity.
-- Create hierarchical catalogs such as `work/research/paper`.
+- Create catalogs such as `paper-review`, with optional hierarchical paths when needed.
 - Add session metadata, titles, tags, notes, and catalog assignments.
 - Resume Claude Code and Codex sessions from one command.
 - Track token usage when it is available in the session file.
@@ -56,27 +56,27 @@ starling resume <session-id>
 Create a catalog and add a session:
 
 ```bash
-starling catalog create research/paper
-starling catalog add research/paper <session-id> --title "Figure review"
+starling catalog create paper-review
+starling catalog add paper-review <session-id> --title "Figure review"
 ```
 
 Launch Codex and assign the new session to a catalog:
 
 ```bash
-starling run --catalog research/paper codex
+starling run --catalog paper-review codex
 ```
 
 Launch Claude Code with a Starling config profile:
 
 ```bash
-starling run --config ds --catalog research/paper claude
+starling run --config ds --catalog paper-review claude
 ```
 
 Starling options must be placed before the agent name. Everything after `claude` or `codex` is passed directly to that agent:
 
 ```bash
-starling run --catalog research/paper codex exec "summarize this repo"
-starling run --catalog research/paper claude --dangerously-skip-permissions
+starling run --catalog paper-review codex exec "summarize this repo"
+starling run --catalog paper-review claude --dangerously-skip-permissions
 ```
 
 ## Commands
@@ -88,7 +88,7 @@ starling session ls
 starling session ls --all
 starling session ls --agent claude
 starling session ls --cataloged
-starling session ls --catalog research/paper
+starling session ls --catalog paper-review
 starling session show <session-id>
 starling session resume <session-id>
 starling session meta <session-id> --title "New title" --tags review,important
@@ -100,8 +100,8 @@ starling session delete <session-id> --yes
 Catalog assignment can also be managed from the session namespace:
 
 ```bash
-starling session catalog add <session-id> research/paper --title "Important run"
-starling session catalog remove <session-id> research/paper
+starling session catalog add <session-id> paper-review --title "Important run"
+starling session catalog remove <session-id> paper-review
 starling session catalog clear <session-id>
 ```
 
@@ -189,8 +189,8 @@ starling model add demo --agent codex \
 Use a profile when launching an agent:
 
 ```bash
-starling run --config demo --catalog research/paper codex
-starling run --config ds --catalog research/paper claude
+starling run --config demo --catalog paper-review codex
+starling run --config ds --catalog paper-review claude
 ```
 
 If `--config` is not provided, Starling uses the agent's normal default configuration.
