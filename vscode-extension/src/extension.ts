@@ -256,7 +256,17 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("starling.catalogTree", async () => {
-      await runCliCommandOutput("Starling: catalog tree", () => cli.catalogTreeText());
+      const sessionsOption = await vscode.window.showQuickPick(
+        [
+          { label: "Catalogs only", value: false },
+          { label: "Catalogs and sessions", value: true },
+        ],
+        { placeHolder: "Catalog tree output" }
+      );
+      if (!sessionsOption) return;
+      await runCliCommandOutput("Starling: catalog tree", () =>
+        cli.catalogTreeText({ sessions: sessionsOption.value })
+      );
     })
   );
 

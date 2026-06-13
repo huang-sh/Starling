@@ -1552,9 +1552,9 @@ ${chalk4.yellow(`Pins in ${row.name} (${row.id})`)}`);
       }
     }
   });
-  space.command("tree").description("Display catalogs as a hierarchical tree").action(() => {
+  space.command("tree").description("Display catalogs as a hierarchical tree").option("--sessions", "show sessions assigned to each catalog").action((opts) => {
     const spaces = listSpaces();
-    const bookmarks = listBookmarks();
+    const bookmarks = opts.sessions ? listBookmarks() : [];
     console.log(formatSpaceTree(spaces, bookmarks));
   });
   space.command("add <catalog> <session-id>").description("Add a session to a catalog").option("-t, --title <title>", "pin title when creating a new pin").option("--tags <tags>", "comma-separated tags when creating a new pin").action(async (catalog, sessionId, opts) => {

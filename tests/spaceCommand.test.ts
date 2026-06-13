@@ -269,6 +269,50 @@ describe("catalog command", () => {
     ]);
   });
 
+  it("hides catalog sessions from tree output by default", async () => {
+    writeFileSync(
+      storePath,
+      JSON.stringify({
+        version: STORE_VERSION,
+        bookmarks: [bookmark("pin_0001", "session-1", ["cat_0001"])],
+        spaces: [catalog("cat_0001", "target")],
+        categories: [],
+      })
+    );
+
+    const program = new Command();
+    program.exitOverride();
+    registerSpaceCommand(program);
+
+    await program.parseAsync(["node", "starling", "catalog", "tree"]);
+
+    const output = vi.mocked(console.log).mock.calls.map((call) => String(call[0])).join("\n");
+    expect(output).toContain("target");
+    expect(output).not.toContain("session-1");
+  });
+
+  it("shows catalog sessions in tree output when requested", async () => {
+    writeFileSync(
+      storePath,
+      JSON.stringify({
+        version: STORE_VERSION,
+        bookmarks: [bookmark("pin_0001", "session-1", ["cat_0001"])],
+        spaces: [catalog("cat_0001", "target")],
+        categories: [],
+      })
+    );
+
+    const program = new Command();
+    program.exitOverride();
+    registerSpaceCommand(program);
+
+    await program.parseAsync(["node", "starling", "catalog", "tree", "--sessions"]);
+
+    const output = vi.mocked(console.log).mock.calls.map((call) => String(call[0])).join("\n");
+    expect(output).toContain("target");
+    expect(output).toContain("session-1");
+  });
+
   it("renames a catalog", async () => {
     writeFileSync(
       storePath,

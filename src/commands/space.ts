@@ -136,9 +136,10 @@ export function registerSpaceCommand(program: Command): void {
   space
     .command("tree")
     .description("Display catalogs as a hierarchical tree")
-    .action(() => {
+    .option("--sessions", "show sessions assigned to each catalog")
+    .action((opts: { sessions?: boolean }) => {
       const spaces = listSpaces();
-      const bookmarks = listBookmarks();
+      const bookmarks = opts.sessions ? listBookmarks() : [];
       console.log(formatSpaceTree(spaces, bookmarks));
     });
 

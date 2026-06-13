@@ -421,8 +421,10 @@ export async function catalogListText(opts: { pins?: boolean } = {}): Promise<st
   return execStarlingRaw(args);
 }
 
-export async function catalogTreeText(): Promise<string> {
-  return execStarlingRaw(["catalog", "tree"]);
+export async function catalogTreeText(opts: { sessions?: boolean } = {}): Promise<string> {
+  const args = ["catalog", "tree"];
+  if (opts.sessions) args.push("--sessions");
+  return execStarlingRaw(args);
 }
 
 export async function modelListText(agent?: string): Promise<string> {

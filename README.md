@@ -113,6 +113,7 @@ starling catalog create parent/child/grandchild
 starling catalog create child --parent parent
 starling catalog ls
 starling catalog tree
+starling catalog tree --sessions
 starling catalog show <catalog>
 starling catalog add <catalog> <session-id>
 starling catalog detach <catalog> <session-id>
@@ -243,7 +244,7 @@ The repository includes a VS Code extension in `vscode-extension/`.
 
 The Starling sidebar contains three views:
 
-- Catalog: hierarchical catalog tree with sessions.
+- Catalog: hierarchical catalog tree, with sessions shown on request.
 - Projects: project directory tree with session counts.
 - Sessions: recent sessions with incremental loading.
 
