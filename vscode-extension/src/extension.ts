@@ -267,6 +267,32 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
+  const createCatalogFromInput = async (parent?: cli.Space): Promise<void> => {
+    const name = await vscode.window.showInputBox({
+      title: parent ? `Child catalog under ${parent.name}` : "Catalog name",
+      prompt: parent ? "Required. Use A/B/C to create nested child catalogs." : "Required",
+      validateInput: (value) => (value.trim() ? undefined : "Catalog name is required"),
+    });
+    if (!name) return;
+
+    const description = await vscode.window.showInputBox({
+      title: "Description (optional)",
+    });
+    const tags = await vscode.window.showInputBox({
+      title: "Tags (comma-separated, optional)",
+    });
+    const selectedParent = parent ? parent.id : await pickSpaceName("Parent catalog (optional)");
+
+    await runCliCommandOutput("Starling: catalog create", () =>
+      cli.createCatalog(name.trim(), {
+        description: normalizeOptionalInput(description),
+        tags: normalizeOptionalInput(tags),
+        parent: normalizeOptionalInput(selectedParent),
+      })
+    );
+    refreshAllViews();
+  };
+
   context.subscriptions.push(
     vscode.commands.registerCommand("starling.catalogShow", async () => {
       const space = await pickSpace();
@@ -277,29 +303,15 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("starling.catalogCreate", async () => {
-      const name = await vscode.window.showInputBox({
-        title: "Catalog name",
-        prompt: "Required",
-        validateInput: (value) => (value.trim() ? undefined : "Catalog name is required"),
-      });
-      if (!name) return;
+      await createCatalogFromInput();
+    })
+  );
 
-      const description = await vscode.window.showInputBox({
-        title: "Description (optional)",
-      });
-      const tags = await vscode.window.showInputBox({
-        title: "Tags (comma-separated, optional)",
-      });
-      const parent = await pickSpaceName("Parent catalog (optional)");
-
-      await runCliCommandOutput("Starling: catalog create", () =>
-        cli.createCatalog(name.trim(), {
-          description: normalizeOptionalInput(description),
-          tags: normalizeOptionalInput(tags),
-          parent: normalizeOptionalInput(parent),
-        })
-      );
-      refreshAllViews();
+  context.subscriptions.push(
+    vscode.commands.registerCommand("starling.catalogCreateChild", async (node: unknown) => {
+      const parent = await pickSpaceFromNode(node);
+      if (!parent) return;
+      await createCatalogFromInput(parent);
     })
   );
 

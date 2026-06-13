@@ -2,7 +2,7 @@
   "name": "starling-ai",
   "displayName": "Starling Agent",
   "description": "Agent session manager — discover, pin, and organize AI coding sessions",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "huangsh",
   "icon": "icons/starling.png",
   "license": "MIT",
@@ -39,6 +39,7 @@
     "onCommand:starling.catalogTree",
     "onCommand:starling.catalogShow",
     "onCommand:starling.catalogCreate",
+    "onCommand:starling.catalogCreateChild",
     "onCommand:starling.catalogRemove",
     "onCommand:starling.catalogRename",
     "onCommand:starling.catalogDelete",
@@ -159,7 +160,13 @@
       },
       {
         "command": "starling.catalogCreate",
-        "title": "Starling: Create Catalog"
+        "title": "Starling: Create Catalog",
+        "icon": "$(add)"
+      },
+      {
+        "command": "starling.catalogCreateChild",
+        "title": "Starling: Create Child Catalog",
+        "icon": "$(add)"
       },
       {
         "command": "starling.catalogRemove",
@@ -305,19 +312,24 @@
           "group": "inline@2"
         },
         {
-          "command": "starling.catalogRename",
+          "command": "starling.catalogCreateChild",
           "when": "viewItem == catalog",
           "group": "catalogContext@1"
         },
         {
-          "command": "starling.catalogDelete",
+          "command": "starling.catalogRename",
           "when": "viewItem == catalog",
           "group": "catalogContext@2"
         },
         {
-          "command": "starling.catalogEdit",
+          "command": "starling.catalogDelete",
           "when": "viewItem == catalog",
           "group": "catalogContext@3"
+        },
+        {
+          "command": "starling.catalogEdit",
+          "when": "viewItem == catalog",
+          "group": "catalogContext@4"
         },
         {
           "command": "starling.resume",
@@ -357,9 +369,14 @@
       ],
       "view/title": [
         {
+          "command": "starling.catalogCreate",
+          "when": "view == starling-spaces",
+          "group": "navigation@1"
+        },
+        {
           "command": "starling.refresh",
           "when": "view == starling-sessions || view == starling-spaces || view == starling-projects",
-          "group": "navigation"
+          "group": "navigation@9"
         }
       ]
     },

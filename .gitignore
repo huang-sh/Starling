@@ -26,6 +26,7 @@ node_modules/.vite/
 
 # VS Code extension packages
 *.vsix
+*.tgz
 
 # Logs
 *.log
@@ -41,3 +42,4 @@ Thumbs.db
 Starling.png
 starling_logo.svg
 !vscode-extension/icons/starling_logo.svg
+note.md

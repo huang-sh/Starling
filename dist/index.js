@@ -4700,7 +4700,7 @@ function escapeRegex(value) {
 // src/index.ts
 var program = new Command7();
 program.enablePositionalOptions();
-program.name("starling").description("Agent session manager \u2014 discover, pin, and organize AI coding sessions").version("0.0.2");
+program.name("starling").description("Agent session manager \u2014 discover, pin, and organize AI coding sessions").version("0.0.3");
 registerSessionCommand(program);
 registerPinCommand(program);
 registerSpaceCommand(program);
