@@ -6,9 +6,16 @@
   "bin": {
     "starling": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "package.json",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
+    "prepack": "npm run build",
     "test": "vitest run",
     "lint": "tsc --noEmit"
   },
