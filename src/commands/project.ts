@@ -31,7 +31,8 @@ async function aggregateByProject(
 
   for await (const meta of streamSessions(providerFilter)) {
     if (limit && ++count > limit) break;
-    const key = meta.project_path || "(unknown)";
+    if (!meta.project_path) continue;
+    const key = meta.project_path;
     let stats = map.get(key);
     if (!stats) {
       stats = {

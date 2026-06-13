@@ -168,7 +168,8 @@ export function aggregateProjectsFromSessions(
 
   for (const meta of sessions) {
     if (providerFilter && meta.provider !== providerFilter) continue;
-    const key = meta.project_path || "(unknown)";
+    if (!meta.project_path) continue;
+    const key = meta.project_path;
     let stats = map.get(key);
     if (!stats) {
       stats = {

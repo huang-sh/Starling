@@ -1,13 +1,11 @@
 # Dependencies
 node_modules/
-vscode-extension/node_modules/
 
 # Build output
 dist/
 !dist/
 !dist/index.js
 out/
-vscode-extension/out/
 *.tsbuildinfo
 
 # Test and tooling caches
@@ -41,5 +39,4 @@ Thumbs.db
 
 Starling.png
 starling_logo.svg
-!vscode-extension/icons/starling_logo.svg
 note.md

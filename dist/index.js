@@ -822,7 +822,8 @@ function aggregateProjectsFromSessions(sessions, providerFilter) {
   const map = /* @__PURE__ */ new Map();
   for (const meta of sessions) {
     if (providerFilter && meta.provider !== providerFilter) continue;
-    const key = meta.project_path || "(unknown)";
+    if (!meta.project_path) continue;
+    const key = meta.project_path;
     let stats = map.get(key);
     if (!stats) {
       stats = {
@@ -1806,7 +1807,8 @@ async function aggregateByProject(providerFilter, limit, useIndex = true, refres
   let count = 0;
   for await (const meta of streamSessions(providerFilter)) {
     if (limit && ++count > limit) break;
-    const key = meta.project_path || "(unknown)";
+    if (!meta.project_path) continue;
+    const key = meta.project_path;
     let stats = map.get(key);
     if (!stats) {
       stats = {

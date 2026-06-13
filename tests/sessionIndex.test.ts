@@ -8,6 +8,7 @@ describe("aggregateProjectsFromSessions", () => {
       session("old", "claude", "/work/a", "2025-01-01T00:00:00.000Z", "claude-3"),
       session("new", "codex", "/work/a", "2025-01-03T00:00:00.000Z", "gpt-5"),
       session("b", "codex", "/work/b", "2025-01-02T00:00:00.000Z", "gpt-5"),
+      session("missing-project", "codex", "", "2025-01-04T00:00:00.000Z", "gpt-5"),
     ];
 
     const projects = aggregateProjectsFromSessions(sessions);

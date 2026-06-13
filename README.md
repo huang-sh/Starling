@@ -1,10 +1,6 @@
 # Starling
 
-<p align="center">
-  <img src="vscode-extension/icons/starling.png" alt="Starling logo" width="160">
-</p>
-
-Agent session manager for Claude Code and OpenAI Codex. Starling discovers local agent sessions, groups them by project, organizes them into hierarchical catalogs, and provides a VS Code sidebar for browsing, resuming, and managing sessions.
+Agent session manager for Claude Code and OpenAI Codex. Starling discovers local agent sessions, groups them by project, organizes them into hierarchical catalogs, and exposes fast CLI workflows for browsing, resuming, and managing sessions.
 
 ## Features
 
@@ -17,7 +13,7 @@ Agent session manager for Claude Code and OpenAI Codex. Starling discovers local
 - Maintain a local session index at `~/.starling/session-index.json` for faster project and catalog views.
 - Launch Claude Code or Codex through `starling run` and automatically assign the created session to a catalog.
 - Manage Claude and Codex model profiles under `~/.starling/settings`.
-- Use the included VS Code extension sidebar for Catalog, Projects, and Sessions.
+- Use the separate VS Code extension for Catalog, Projects, Models, and Sessions.
 
 ## Installation
 
@@ -253,12 +249,17 @@ Example Codex profile:
 
 ## VS Code Extension
 
-The repository includes a VS Code extension in `vscode-extension/`.
+The VS Code extension is maintained separately at:
 
-The Starling sidebar contains three views:
+```text
+https://github.com/huang-sh/Starling-ext
+```
+
+The Starling sidebar contains four views:
 
 - Catalog: hierarchical catalog tree, with sessions shown on request.
 - Projects: project directory tree with session counts.
+- Models: Claude and Codex model profile settings.
 - Sessions: recent sessions with incremental loading.
 
 The extension supports common right-click actions:
