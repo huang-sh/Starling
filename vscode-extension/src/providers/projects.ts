@@ -496,7 +496,7 @@ function projectTreeSegments(projectPath: string, displayRoot: string): string[]
   }
 
   const segments = projectPath.split("/").filter(Boolean);
-  return ["Other", ...segments];
+  return segments;
 }
 
 function workspaceRelativeProjectSegments(projectPath: string): string[] {
