@@ -54,7 +54,11 @@ vi.mock("../src/utils/fs.js", () => ({
 
 vi.mock("../src/lib/session.js", () => ({
   parseJsonlHead: vi.fn(async (filePath: string) => {
-    parsedFiles.push(filePath);
+    parsedFiles.push(`head:${filePath}`);
+    return [];
+  }),
+  parseJsonlFile: vi.fn(async (filePath: string) => {
+    parsedFiles.push(`full:${filePath}`);
     return [];
   }),
   extractClaudeSessionMeta: vi.fn((_entries, filePath: string, modifiedAt: string) => ({
@@ -122,7 +126,7 @@ describe("loadSessionIndexWithNewFiles", () => {
 
     const index = await loadSessionIndexWithNewFiles();
 
-    expect(parsedFiles).toEqual(["/sessions/claude/project/new.jsonl"]);
+    expect(parsedFiles).toEqual(["head:/sessions/claude/project/new.jsonl"]);
     expect(index.session_count).toBe(2);
     expect(index.project_count).toBe(2);
     expect(index.sessions.map((session) => session.session_id).sort()).toEqual(["existing", "new"]);
@@ -140,7 +144,7 @@ describe("loadSessionIndexWithNewFiles", () => {
 
     const index = await refreshIndexedSessionsById(["existing"]);
 
-    expect(parsedFiles).toEqual(["/sessions/claude/project/existing.jsonl"]);
+    expect(parsedFiles).toEqual(["head:/sessions/claude/project/existing.jsonl"]);
     expect(index.session_count).toBe(1);
     expect(index.sessions[0].modified_at).toBe("2026-01-02T00:00:00.000Z");
     expect(writtenJson).toMatchObject({
@@ -194,5 +198,49 @@ describe("loadSessionIndexWithNewFiles", () => {
     expect(parsedFiles).toEqual([]);
     expect(statCalls).not.toContain("/sessions/claude/project/existing.jsonl");
     expect(writtenJson).toBeNull();
+  });
+
+  it("fully parses matched sessions when refreshing exact session candidates", async () => {
+    files.set(
+      "/starling/session-index.json",
+      JSON.stringify({
+        version: 1,
+        built_at: "2026-01-01T00:00:00.000Z",
+        session_count: 1,
+        project_count: 1,
+        sessions: [
+          {
+            session_id: "existing",
+            provider: "claude",
+            model: "claude-old",
+            project_path: "/work/old",
+            first_prompt: "",
+            file_path: "/sessions/claude/project/existing.jsonl",
+            created_at: "2026-01-01T00:00:00.000Z",
+            modified_at: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        files: [
+          {
+            session_id: "existing",
+            provider: "claude",
+            path: "/sessions/claude/project/existing.jsonl",
+            mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+          },
+        ],
+        directories: [
+          { provider: "claude", path: "/sessions/claude", mtimeMs: 1 },
+          { provider: "claude", path: "/sessions/claude/project", mtimeMs: 1 },
+        ],
+      })
+    );
+    addDir("/sessions/claude/project", ["existing.jsonl"]);
+    addFile("/sessions/claude/project/existing.jsonl", Date.parse("2026-01-01T00:00:00.000Z"));
+    const { findIndexedSessionById } = await import("../src/lib/sessionIndex.js");
+
+    const session = await findIndexedSessionById("existing");
+
+    expect(session?.session_id).toBe("existing");
+    expect(parsedFiles).toEqual(["full:/sessions/claude/project/existing.jsonl"]);
   });
 });

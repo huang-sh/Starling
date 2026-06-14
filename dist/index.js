@@ -56,8 +56,32 @@ function mergeTokenUsage(target, source) {
     target.cache_tokens = source.cache_tokens;
   }
 }
+function hasNonZeroTokenUsage(usage) {
+  if (!usage) return false;
+  return Boolean(
+    (usage.input_tokens ?? 0) > 0 || (usage.output_tokens ?? 0) > 0 || (usage.total_tokens ?? 0) > 0 || (usage.cache_tokens ?? 0) > 0
+  );
+}
+function addTokenUsage(target, source) {
+  if (typeof source.input_tokens === "number") {
+    target.input_tokens = (target.input_tokens ?? 0) + source.input_tokens;
+  }
+  if (typeof source.output_tokens === "number") {
+    target.output_tokens = (target.output_tokens ?? 0) + source.output_tokens;
+  }
+  if (typeof source.cache_tokens === "number") {
+    target.cache_tokens = (target.cache_tokens ?? 0) + source.cache_tokens;
+  }
+  const input = target.input_tokens ?? 0;
+  const output = target.output_tokens ?? 0;
+  if (target.input_tokens !== void 0 || target.output_tokens !== void 0) {
+    target.total_tokens = input + output;
+  } else if (typeof source.total_tokens === "number") {
+    target.total_tokens = (target.total_tokens ?? 0) + source.total_tokens;
+  }
+}
 function normalizeCacheTokens(raw) {
-  const direct = asNumber(raw.cache_tokens) ?? asNumber(raw.cacheTokens);
+  const direct = asNumber(raw.cache_tokens) ?? asNumber(raw.cacheTokens) ?? asNumber(raw.cached_input_tokens) ?? asNumber(raw.cachedInputTokens);
   if (typeof direct === "number") return direct;
   const fromCreation = asNumber(raw.cache_creation_input_tokens) ?? asNumber(raw.cacheCreationInputTokens);
   const fromRead = asNumber(raw.cache_read_input_tokens) ?? asNumber(raw.cacheReadInputTokens);
@@ -81,6 +105,14 @@ function extractTokenUsageFromValue(value, depth = 0) {
     return found ? usage2 : null;
   }
   if (!isRecord(value)) return null;
+  const totalUsageSource = isRecord(value.total_token_usage) ? value.total_token_usage : isRecord(value.totalTokenUsage) ? value.totalTokenUsage : null;
+  if (totalUsageSource) {
+    const totalUsage = extractTokenUsageFromValue(totalUsageSource, depth + 1);
+    if (hasNonZeroTokenUsage(totalUsage)) return totalUsage;
+    const lastUsageSource = isRecord(value.last_token_usage) ? value.last_token_usage : isRecord(value.lastTokenUsage) ? value.lastTokenUsage : null;
+    const lastUsage = lastUsageSource ? extractTokenUsageFromValue(lastUsageSource, depth + 1) : null;
+    return hasNonZeroTokenUsage(lastUsage) ? lastUsage : totalUsage;
+  }
   const input = asNumber(value.input_tokens) ?? asNumber(value.inputTokens) ?? asNumber(value.prompt_tokens) ?? asNumber(value.promptTokens);
   const output = asNumber(value.output_tokens) ?? asNumber(value.outputTokens) ?? asNumber(value.completion_tokens) ?? asNumber(value.completionTokens);
   const total = asNumber(value.total_tokens) ?? asNumber(value.totalTokens) ?? (typeof input === "number" && typeof output === "number" ? input + output : void 0);
@@ -105,6 +137,13 @@ function extractTokenUsageFromValue(value, depth = 0) {
 function extractTokenUsage(entry) {
   return extractTokenUsageFromValue(entry);
 }
+function hasCumulativeTokenUsage(value, depth = 0) {
+  if (depth > 16) return false;
+  if (Array.isArray(value)) return value.some((item) => hasCumulativeTokenUsage(item, depth + 1));
+  if (!isRecord(value)) return false;
+  if (isRecord(value.total_token_usage) || isRecord(value.totalTokenUsage)) return true;
+  return Object.values(value).some((candidate) => hasCumulativeTokenUsage(candidate, depth + 1));
+}
 async function parseJsonlHead(filePath, maxLines = 500) {
   const entries = [];
   const rl = createInterface({ input: createReadStream(filePath, "utf-8"), crlfDelay: Infinity });
@@ -119,6 +158,9 @@ async function parseJsonlHead(filePath, maxLines = 500) {
     if (count >= maxLines) break;
   }
   return entries;
+}
+async function parseJsonlFile(filePath) {
+  return parseJsonlHead(filePath, Infinity);
 }
 function extractClaudeSessionMeta(entries, filePath, modifiedAt) {
   let sessionId = "";
@@ -163,7 +205,11 @@ function extractClaudeSessionMeta(entries, filePath, modifiedAt) {
     }
     const entryUsage = extractTokenUsage(entry);
     if (entryUsage) {
-      mergeTokenUsage(tokenUsage, entryUsage);
+      if (hasCumulativeTokenUsage(entry)) {
+        mergeTokenUsage(tokenUsage, entryUsage);
+      } else {
+        addTokenUsage(tokenUsage, entryUsage);
+      }
       hasTokenUsage = true;
     }
   }
@@ -780,7 +826,7 @@ async function loadSessionIndexWithNewFiles(provider, options = {}) {
   }
   return writeSessionIndex(sessions, mergeDirectoryEntries(index.directories ?? [], discovery.directories, provider));
 }
-async function refreshIndexedSessionsById(sessionIds, provider) {
+async function refreshIndexedSessionsById(sessionIds, provider, options = {}) {
   const index = await loadSessionIndexWithNewFiles(provider);
   const wantedIds = new Set(sessionIds.map((sessionId) => sessionId.toLowerCase()));
   if (wantedIds.size === 0) return index;
@@ -792,12 +838,14 @@ async function refreshIndexedSessionsById(sessionIds, provider) {
     if (!session.file_path) continue;
     try {
       const stat = statSync2(session.file_path);
-      if (new Date(stat.mtimeMs).toISOString() <= session.modified_at) continue;
+      const indexedMtime = indexedFileMtime(index, session) ?? Date.parse(session.modified_at);
+      const sessionHasFileIndex = Boolean(session.file_path && index.files?.some((file) => file.path === session.file_path));
+      if (!options.refreshMatchedFiles && sessionHasFileIndex && Number.isFinite(indexedMtime) && stat.mtimeMs <= indexedMtime) continue;
       const refreshed = await parseSessionFileEntry({
         provider: session.provider === "codex" ? "codex" : "claude",
         path: session.file_path,
         mtimeMs: stat.mtimeMs
-      });
+      }, { full: options.refreshMatchedFiles });
       if (!refreshed) continue;
       upsertSession(sessions, refreshed);
       changed = true;
@@ -870,7 +918,7 @@ async function findIndexedSessionById(sessionId, provider) {
   return matches.find((session) => session.session_id === sessionId) ?? matches[0] ?? null;
 }
 async function findIndexedSessionCandidates(sessionId, provider) {
-  const index = await refreshIndexedSessionsById([sessionId], provider);
+  const index = await refreshIndexedSessionsById([sessionId], provider, { refreshMatchedFiles: true });
   const matches = index.sessions.filter((session) => {
     if (provider && session.provider !== provider) return false;
     return matchesSessionId(/* @__PURE__ */ new Set([sessionId.toLowerCase()]), session.session_id);
@@ -913,9 +961,9 @@ function matchesSessionId(wantedIds, sessionId) {
   }
   return false;
 }
-async function parseSessionFileEntry(entry) {
+async function parseSessionFileEntry(entry, options = {}) {
   try {
-    const entries = await parseJsonlHead(entry.path);
+    const entries = options.full ? await parseJsonlFile(entry.path) : await parseJsonlHead(entry.path);
     const modifiedAt = new Date(entry.mtimeMs).toISOString();
     if (entry.provider === "claude") {
       return extractClaudeSessionMeta(entries, entry.path, modifiedAt);

@@ -37,8 +37,41 @@ function mergeTokenUsage(target: TokenUsage, source: TokenUsage): void {
   }
 }
 
+function hasNonZeroTokenUsage(usage: TokenUsage | null): usage is TokenUsage {
+  if (!usage) return false;
+  return Boolean(
+    (usage.input_tokens ?? 0) > 0 ||
+    (usage.output_tokens ?? 0) > 0 ||
+    (usage.total_tokens ?? 0) > 0 ||
+    (usage.cache_tokens ?? 0) > 0
+  );
+}
+
+function addTokenUsage(target: TokenUsage, source: TokenUsage): void {
+  if (typeof source.input_tokens === "number") {
+    target.input_tokens = (target.input_tokens ?? 0) + source.input_tokens;
+  }
+  if (typeof source.output_tokens === "number") {
+    target.output_tokens = (target.output_tokens ?? 0) + source.output_tokens;
+  }
+  if (typeof source.cache_tokens === "number") {
+    target.cache_tokens = (target.cache_tokens ?? 0) + source.cache_tokens;
+  }
+  const input = target.input_tokens ?? 0;
+  const output = target.output_tokens ?? 0;
+  if (target.input_tokens !== undefined || target.output_tokens !== undefined) {
+    target.total_tokens = input + output;
+  } else if (typeof source.total_tokens === "number") {
+    target.total_tokens = (target.total_tokens ?? 0) + source.total_tokens;
+  }
+}
+
 function normalizeCacheTokens(raw: Record<string, unknown>): number | undefined {
-  const direct = asNumber(raw.cache_tokens) ?? asNumber(raw.cacheTokens);
+  const direct =
+    asNumber(raw.cache_tokens) ??
+    asNumber(raw.cacheTokens) ??
+    asNumber(raw.cached_input_tokens) ??
+    asNumber(raw.cachedInputTokens);
   if (typeof direct === "number") return direct;
 
   const fromCreation = asNumber(raw.cache_creation_input_tokens) ?? asNumber(raw.cacheCreationInputTokens);
@@ -67,6 +100,24 @@ function extractTokenUsageFromValue(value: unknown, depth = 0): TokenUsage | nul
   }
 
   if (!isRecord(value)) return null;
+
+  const totalUsageSource = isRecord(value.total_token_usage)
+    ? value.total_token_usage
+    : isRecord(value.totalTokenUsage)
+      ? value.totalTokenUsage
+      : null;
+  if (totalUsageSource) {
+    const totalUsage = extractTokenUsageFromValue(totalUsageSource, depth + 1);
+    if (hasNonZeroTokenUsage(totalUsage)) return totalUsage;
+
+    const lastUsageSource = isRecord(value.last_token_usage)
+      ? value.last_token_usage
+      : isRecord(value.lastTokenUsage)
+        ? value.lastTokenUsage
+        : null;
+    const lastUsage = lastUsageSource ? extractTokenUsageFromValue(lastUsageSource, depth + 1) : null;
+    return hasNonZeroTokenUsage(lastUsage) ? lastUsage : totalUsage;
+  }
 
   const input =
     asNumber(value.input_tokens) ??
@@ -118,6 +169,14 @@ function extractTokenUsage(entry: JsonlEntry): TokenUsage | null {
   return extractTokenUsageFromValue(entry);
 }
 
+function hasCumulativeTokenUsage(value: unknown, depth = 0): boolean {
+  if (depth > 16) return false;
+  if (Array.isArray(value)) return value.some((item) => hasCumulativeTokenUsage(item, depth + 1));
+  if (!isRecord(value)) return false;
+  if (isRecord(value.total_token_usage) || isRecord(value.totalTokenUsage)) return true;
+  return Object.values(value).some((candidate) => hasCumulativeTokenUsage(candidate, depth + 1));
+}
+
 export async function parseJsonlHead(filePath: string, maxLines = 500): Promise<JsonlEntry[]> {
   const entries: JsonlEntry[] = [];
   const rl = createInterface({ input: createReadStream(filePath, "utf-8"), crlfDelay: Infinity });
@@ -133,6 +192,10 @@ export async function parseJsonlHead(filePath: string, maxLines = 500): Promise<
     if (count >= maxLines) break;
   }
   return entries;
+}
+
+export async function parseJsonlFile(filePath: string): Promise<JsonlEntry[]> {
+  return parseJsonlHead(filePath, Infinity);
 }
 
 export function extractClaudeSessionMeta(
@@ -189,7 +252,11 @@ export function extractClaudeSessionMeta(
 
     const entryUsage = extractTokenUsage(entry);
     if (entryUsage) {
-      mergeTokenUsage(tokenUsage, entryUsage);
+      if (hasCumulativeTokenUsage(entry)) {
+        mergeTokenUsage(tokenUsage, entryUsage);
+      } else {
+        addTokenUsage(tokenUsage, entryUsage);
+      }
       hasTokenUsage = true;
     }
   }

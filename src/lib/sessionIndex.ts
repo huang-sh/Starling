@@ -3,7 +3,7 @@ import { dirname, join } from "path";
 import { CLAUDE_SESSIONS_DIR, CODEX_SESSIONS_DIR, DEFAULT_STARLING_HOME } from "../constants.js";
 import { atomicWriteJSON } from "../utils/fs.js";
 import { streamSessions } from "./discovery.js";
-import { extractClaudeSessionMeta, extractCodexSessionMeta, parseJsonlHead } from "./session.js";
+import { extractClaudeSessionMeta, extractCodexSessionMeta, parseJsonlFile, parseJsonlHead } from "./session.js";
 import type { SessionMeta } from "../types.js";
 
 type Provider = "claude" | "codex";
@@ -117,7 +117,8 @@ export async function loadSessionIndexWithNewFiles(
 
 export async function refreshIndexedSessionsById(
   sessionIds: string[],
-  provider?: Provider
+  provider?: Provider,
+  options: { refreshMatchedFiles?: boolean } = {}
 ): Promise<SessionIndex> {
   const index = await loadSessionIndexWithNewFiles(provider);
   const wantedIds = new Set(sessionIds.map((sessionId) => sessionId.toLowerCase()));
@@ -133,12 +134,14 @@ export async function refreshIndexedSessionsById(
 
     try {
       const stat = statSync(session.file_path);
-      if (new Date(stat.mtimeMs).toISOString() <= session.modified_at) continue;
+      const indexedMtime = indexedFileMtime(index, session) ?? Date.parse(session.modified_at);
+      const sessionHasFileIndex = Boolean(session.file_path && index.files?.some((file) => file.path === session.file_path));
+      if (!options.refreshMatchedFiles && sessionHasFileIndex && Number.isFinite(indexedMtime) && stat.mtimeMs <= indexedMtime) continue;
       const refreshed = await parseSessionFileEntry({
         provider: session.provider === "codex" ? "codex" : "claude",
         path: session.file_path,
         mtimeMs: stat.mtimeMs,
-      });
+      }, { full: options.refreshMatchedFiles });
       if (!refreshed) continue;
       upsertSession(sessions, refreshed);
       changed = true;
@@ -251,7 +254,7 @@ export async function findIndexedSessionCandidates(
   sessionId: string,
   provider?: Provider
 ): Promise<SessionMeta[]> {
-  const index = await refreshIndexedSessionsById([sessionId], provider);
+  const index = await refreshIndexedSessionsById([sessionId], provider, { refreshMatchedFiles: true });
   const matches = index.sessions.filter((session) => {
     if (provider && session.provider !== provider) return false;
     return matchesSessionId(new Set([sessionId.toLowerCase()]), session.session_id);
@@ -302,9 +305,12 @@ function matchesSessionId(wantedIds: Set<string>, sessionId: string): boolean {
   return false;
 }
 
-async function parseSessionFileEntry(entry: SessionFileEntry): Promise<SessionMeta | null> {
+async function parseSessionFileEntry(
+  entry: SessionFileEntry,
+  options: { full?: boolean } = {}
+): Promise<SessionMeta | null> {
   try {
-    const entries = await parseJsonlHead(entry.path);
+    const entries = options.full ? await parseJsonlFile(entry.path) : await parseJsonlHead(entry.path);
     const modifiedAt = new Date(entry.mtimeMs).toISOString();
     if (entry.provider === "claude") {
       return extractClaudeSessionMeta(entries, entry.path, modifiedAt);

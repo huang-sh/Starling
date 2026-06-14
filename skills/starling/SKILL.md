@@ -70,6 +70,25 @@ starling session show <session-id>
 starling resume <session-id>
 ```
 
+### Current Session
+
+When the user asks to operate on the current running Codex session, first check the environment:
+
+```bash
+echo "$CODEX_THREAD_ID"
+```
+
+If `CODEX_THREAD_ID` is set, treat it as the current Codex session/thread ID:
+
+```bash
+starling session show "$CODEX_THREAD_ID"
+starling catalog add paper-review "$CODEX_THREAD_ID" --title "Current session"
+```
+
+Do not guess the current session from `starling session ls`, recent file mtimes, or the latest rollout file when `CODEX_THREAD_ID` is available. Recent sessions may belong to unrelated running agents or benchmarks.
+
+If `CODEX_THREAD_ID` is not set, say that the current session ID is not directly exposed and ask the user for the session ID or another reliable identifier. Do not silently pick the newest session.
+
 Manage session metadata:
 
 ```bash
