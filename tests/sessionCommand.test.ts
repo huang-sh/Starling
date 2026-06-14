@@ -17,6 +17,7 @@ vi.mock("../src/lib/discovery.js", () => ({
   ]),
   findSessionById: vi.fn(async (input: string) => sessionMeta(input)),
   findSessions: vi.fn(async () => discoveryState.sessions),
+  looksLikeSessionIdQuery: vi.fn((input: string) => /^[0-9a-f-]{8,}$/i.test(input)),
   streamSessions: vi.fn(async function* () {
     for (const session of discoveryState.sessions) yield session;
   }),
@@ -25,6 +26,12 @@ vi.mock("../src/lib/discovery.js", () => ({
 vi.mock("../src/lib/sessionIndex.js", () => ({
   SESSION_INDEX_PATH: "/tmp/session-index.json",
   clearSessionIndex: vi.fn(() => false),
+  findIndexedSessionCandidates: vi.fn(async (input: string) => (
+    discoveryState.indexSessions.filter((session) => session.session_id === input || session.session_id.startsWith(input))
+  )),
+  findIndexedSessionById: vi.fn(async (input: string) => (
+    discoveryState.indexSessions.find((session) => session.session_id === input || session.session_id.startsWith(input)) ?? null
+  )),
   loadSessionIndex: vi.fn(() => null),
   loadSessionIndexWithNewFiles: vi.fn(async () => ({
     version: 1,
@@ -192,6 +199,19 @@ describe("session metadata commands", () => {
       tags: ["x", "y"],
       space_ids: ["cat_0001"],
     });
+  });
+
+  it("keeps ambiguous indexed session prefixes from mutating catalog metadata", async () => {
+    discoveryState.indexSessions = [sessionMeta("abcdef120000"), sessionMeta("abcdef12ffff")];
+    writeStore([], [catalog("cat_0001", "target")]);
+    vi.spyOn(process, "exit").mockImplementation(((code?: string | number | null | undefined) => {
+      throw new Error(`exit ${code}`);
+    }) as never);
+    const program = programWithSession();
+
+    await expect(program.parseAsync(["node", "starling", "session", "catalog", "add", "abcdef12", "target"])).rejects.toThrow("exit 1");
+
+    expect(readStore().bookmarks).toHaveLength(0);
   });
 
   it("removes a session from one catalog through session catalog remove", async () => {

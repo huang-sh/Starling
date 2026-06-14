@@ -2,7 +2,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { spawn, spawnSync } from "child_process";
 import { existsSync, unlinkSync } from "fs";
-import { findSessionCandidates, findSessions, findSessionById, streamSessions } from "../lib/discovery.js";
+import { findSessionCandidates, findSessions, looksLikeSessionIdQuery, streamSessions } from "../lib/discovery.js";
 import { formatSessionTable } from "../lib/format.js";
 import { addBookmark, listBookmarks, listSpaces, removeBookmark, updateBookmark } from "../lib/store.js";
 import { generateBookmarkId, generateNoteId } from "../lib/id.js";
@@ -10,6 +10,8 @@ import { shortSessionId } from "../lib/sessionDisplay.js";
 import { catalogPath, resolveCatalogReference } from "../lib/catalogResolver.js";
 import {
   clearSessionIndex,
+  findIndexedSessionCandidates,
+  findIndexedSessionById,
   loadSessionIndex,
   refreshIndexedSessionsById,
   removeSessionFromIndex,
@@ -184,7 +186,7 @@ export function registerSessionCommand(program: Command): void {
     .description("Show session details")
     .option("--json", "output as JSON")
     .action(async (sessionId: string, opts: { json?: boolean }) => {
-      const meta = await findSessionById(sessionId);
+      const meta = await resolveSessionById(sessionId);
       if (!meta) {
         console.error(chalk.red(`Session not found: ${sessionId}`));
         process.exit(1);
@@ -489,19 +491,34 @@ function parseTags(value: string): string[] {
 }
 
 async function resolveSessionMeta(input: string): Promise<SessionMeta> {
+  const inputLooksLikeSessionId = looksLikeSessionIdQuery(input);
+  if (inputLooksLikeSessionId) {
+    const indexedCandidates = await findIndexedSessionCandidates(input);
+    if (indexedCandidates.length > 0) return pickSessionCandidate(input, indexedCandidates);
+    console.error(chalk.red(`No session matches: ${input}`));
+    process.exit(1);
+  }
+
   const candidates = await findSessionCandidates(input);
   if (candidates.length === 0) {
     console.error(chalk.red(`No session matches: ${input}`));
     process.exit(1);
   }
-  if (candidates.length > 1) {
-    const exact = candidates.find((candidate) => candidate.session_id === input);
-    if (exact) return exact;
-    console.error(chalk.red(`Ambiguous session id: ${input}`));
-    console.error(chalk.red("Please rerun with full session id."));
-    process.exit(1);
-  }
-  return candidates[0];
+  return pickSessionCandidate(input, candidates);
+}
+
+async function resolveSessionById(input: string): Promise<SessionMeta | null> {
+  if (!looksLikeSessionIdQuery(input)) return null;
+  return findIndexedSessionById(input);
+}
+
+function pickSessionCandidate(input: string, candidates: SessionMeta[]): SessionMeta {
+  if (candidates.length === 1) return candidates[0];
+  const exact = candidates.find((candidate) => candidate.session_id === input);
+  if (exact) return exact;
+  console.error(chalk.red(`Ambiguous session id: ${input}`));
+  console.error(chalk.red("Please rerun with full session id."));
+  process.exit(1);
 }
 
 function ensureSessionBookmark(
@@ -529,7 +546,7 @@ function ensureSessionBookmark(
 }
 
 export async function resumeSession(sessionId: string): Promise<void> {
-  const meta = await findSessionById(sessionId);
+  const meta = await resolveSessionById(sessionId);
   if (!meta) {
     console.error(chalk.red(`Session not found: ${sessionId}`));
     process.exit(1);

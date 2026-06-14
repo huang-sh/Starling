@@ -6,6 +6,7 @@ import {
   aggregateProjectsFromSessions,
   loadSessionIndexWithNewFiles,
   rebuildSessionIndex,
+  type ProjectSummary,
   type ProjectStats,
 } from "../lib/sessionIndex.js";
 import { shortSessionId } from "../lib/sessionDisplay.js";
@@ -22,6 +23,9 @@ async function aggregateByProject(
   if (useIndex) {
     const index = refreshIndex ? await rebuildSessionIndex(providerFilter) : await loadSessionIndexWithNewFiles(providerFilter);
     if (index) {
+      if (!providerFilter && index.projects) {
+        return index.projects.map(projectSummaryToStats);
+      }
       return aggregateProjectsFromSessions(index.sessions, providerFilter);
     }
   }
@@ -61,6 +65,46 @@ async function aggregateByProject(
   projects.sort((a, b) => b.last_active.localeCompare(a.last_active));
 
   return projects;
+}
+
+async function findProjectStats(
+  path: string,
+  providerFilter?: Provider,
+  useIndex = true,
+  refreshIndex = false
+): Promise<ProjectStats | null> {
+  if (useIndex) {
+    const index = refreshIndex ? await rebuildSessionIndex(providerFilter) : await loadSessionIndexWithNewFiles(providerFilter);
+    const projectSessions = index.sessions.filter((session) => {
+      if (providerFilter && session.provider !== providerFilter) return false;
+      return Boolean(session.project_path && matchesProjectPath(session.project_path, path));
+    });
+    return pickProjectMatch(aggregateProjectsFromSessions(projectSessions, providerFilter), path);
+  }
+
+  const projectSessions: SessionMeta[] = [];
+  for await (const meta of streamSessions(providerFilter)) {
+    if (meta.project_path && matchesProjectPath(meta.project_path, path)) {
+      projectSessions.push(meta);
+    }
+  }
+  return pickProjectMatch(aggregateProjectsFromSessions(projectSessions, providerFilter), path);
+}
+
+function projectSummaryToStats(summary: ProjectSummary): ProjectStats {
+  return {
+    ...summary,
+    sessions: [],
+  };
+}
+
+function matchesProjectPath(projectPath: string, input: string): boolean {
+  return projectPath === input || projectPath.endsWith(input) || projectPath.endsWith("/" + input);
+}
+
+function pickProjectMatch(projects: ProjectStats[], input: string): ProjectStats | null {
+  const exact = projects.find((project) => project.project_path === input);
+  return exact ?? projects[0] ?? null;
 }
 
 function shortPath(p: string, maxLen: number): string {
@@ -172,13 +216,7 @@ export function registerProjectCommand(program: Command): void {
     .action(
       async (path: string, opts: { agent?: string; refreshIndex?: boolean; index?: boolean; json?: boolean }) => {
         const provider = opts.agent as Provider | undefined;
-        const projects = await aggregateByProject(provider, undefined, opts.index !== false, Boolean(opts.refreshIndex));
-        const p = projects.find(
-          (pr) =>
-            pr.project_path === path ||
-            pr.project_path.endsWith(path) ||
-            pr.project_path.endsWith("/" + path)
-        );
+        const p = await findProjectStats(path, provider, opts.index !== false, Boolean(opts.refreshIndex));
 
         if (!p) {
           console.error(chalk.red(`Project not found: ${path}`));

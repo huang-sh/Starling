@@ -741,14 +741,14 @@ function catalogPath(space, spaces = listSpaces()) {
 
 // src/lib/sessionIndex.ts
 import { existsSync as existsSync2, readFileSync as readFileSync2, readdirSync as readdirSync2, statSync as statSync2, unlinkSync as unlinkSync2 } from "fs";
-import { join as join4 } from "path";
+import { dirname as dirname2, join as join4 } from "path";
 var SESSION_INDEX_PATH = join4(DEFAULT_STARLING_HOME, "session-index.json");
 async function rebuildSessionIndex(provider) {
   const sessions = [];
   for await (const session of streamSessions(provider, Infinity)) {
     sessions.push(session);
   }
-  return writeSessionIndex(sessions);
+  return writeSessionIndex(sessions, collectSessionDirectoryEntries(provider));
 }
 function loadSessionIndex() {
   if (!existsSync2(SESSION_INDEX_PATH)) return null;
@@ -764,20 +764,21 @@ function loadSessionIndex() {
     return null;
   }
 }
-async function loadSessionIndexWithNewFiles(provider) {
+async function loadSessionIndexWithNewFiles(provider, options = {}) {
   const index = loadSessionIndex();
   if (!index) {
     return rebuildSessionIndex();
   }
-  const indexedPaths = new Set(index.sessions.map((session) => session.file_path).filter(Boolean));
-  const newFiles = collectSessionFileEntries(provider).filter((entry) => !indexedPaths.has(entry.path));
-  if (newFiles.length === 0) return index;
-  const sessions = [...index.sessions];
-  for (const entry of newFiles) {
+  const refresh = options.refreshKnownFiles ? await refreshIndexedSessionFiles(index, provider) : { index, sessions: index.sessions, changed: false };
+  const indexedPaths = new Set(refresh.sessions.map((session) => session.file_path).filter(Boolean));
+  const discovery = collectNewSessionFileEntries(provider, index, indexedPaths);
+  if (discovery.newFiles.length === 0 && !refresh.changed) return refresh.index;
+  const sessions = [...refresh.sessions];
+  for (const entry of discovery.newFiles) {
     const session = await parseSessionFileEntry(entry);
     if (session) upsertSession(sessions, session);
   }
-  return writeSessionIndex(sessions);
+  return writeSessionIndex(sessions, mergeDirectoryEntries(index.directories ?? [], discovery.directories, provider));
 }
 async function refreshIndexedSessionsById(sessionIds, provider) {
   const index = await loadSessionIndexWithNewFiles(provider);
@@ -803,7 +804,7 @@ async function refreshIndexedSessionsById(sessionIds, provider) {
     } catch {
     }
   }
-  return changed ? writeSessionIndex(sessions) : index;
+  return changed ? writeSessionIndex(sessions, index.directories ?? []) : index;
 }
 function clearSessionIndex() {
   if (!existsSync2(SESSION_INDEX_PATH)) return false;
@@ -815,7 +816,7 @@ function upsertSessionInIndex(session) {
   if (!index) return false;
   const sessions = [...index.sessions];
   upsertSession(sessions, session);
-  writeSessionIndex(sessions);
+  writeSessionIndex(sessions, index.directories ?? []);
   return true;
 }
 function removeSessionFromIndex(sessionId) {
@@ -824,7 +825,7 @@ function removeSessionFromIndex(sessionId) {
   const normalized = sessionId.toLowerCase();
   const sessions = index.sessions.filter((session) => session.session_id.toLowerCase() !== normalized);
   if (sessions.length === index.sessions.length) return false;
-  writeSessionIndex(sessions);
+  writeSessionIndex(sessions, index.directories ?? []);
   return true;
 }
 function aggregateProjectsFromSessions(sessions, providerFilter) {
@@ -861,18 +862,37 @@ function aggregateProjectsFromSessions(sessions, providerFilter) {
   projects.sort((a, b) => b.last_active.localeCompare(a.last_active));
   return projects;
 }
+function aggregateProjectSummariesFromSessions(sessions, providerFilter) {
+  return aggregateProjectsFromSessions(sessions, providerFilter).map(({ sessions: _sessions, ...project }) => project);
+}
+async function findIndexedSessionById(sessionId, provider) {
+  const matches = await findIndexedSessionCandidates(sessionId, provider);
+  return matches.find((session) => session.session_id === sessionId) ?? matches[0] ?? null;
+}
+async function findIndexedSessionCandidates(sessionId, provider) {
+  const index = await refreshIndexedSessionsById([sessionId], provider);
+  const matches = index.sessions.filter((session) => {
+    if (provider && session.provider !== provider) return false;
+    return matchesSessionId(/* @__PURE__ */ new Set([sessionId.toLowerCase()]), session.session_id);
+  });
+  matches.sort((a, b) => b.modified_at.localeCompare(a.modified_at));
+  return matches;
+}
 function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function writeSessionIndex(sessions) {
+function writeSessionIndex(sessions, directories = []) {
   sessions.sort((a, b) => b.modified_at.localeCompare(a.modified_at));
-  const projects = aggregateProjectsFromSessions(sessions);
+  const projects = aggregateProjectSummariesFromSessions(sessions);
   const index = {
     version: 1,
     built_at: (/* @__PURE__ */ new Date()).toISOString(),
     session_count: sessions.length,
     project_count: projects.length,
-    sessions
+    sessions,
+    files: indexedFilesFromSessions(sessions),
+    directories,
+    projects
   };
   atomicWriteJSON(SESSION_INDEX_PATH, index);
   return index;
@@ -905,17 +925,141 @@ async function parseSessionFileEntry(entry) {
     return null;
   }
 }
-function collectSessionFileEntries(provider) {
+async function refreshIndexedSessionFiles(index, provider) {
+  const sessions = [];
+  let changed = false;
+  for (const session of index.sessions) {
+    if (provider && session.provider !== provider) {
+      sessions.push(session);
+      continue;
+    }
+    if (!session.file_path) {
+      sessions.push(session);
+      continue;
+    }
+    try {
+      const stat = statSync2(session.file_path);
+      const indexedMtime = indexedFileMtime(index, session) ?? Date.parse(session.modified_at);
+      if (Number.isFinite(indexedMtime) && stat.mtimeMs <= indexedMtime) {
+        sessions.push(session);
+        continue;
+      }
+      const refreshed = await parseSessionFileEntry({
+        provider: session.provider === "codex" ? "codex" : "claude",
+        path: session.file_path,
+        mtimeMs: stat.mtimeMs
+      });
+      if (refreshed) {
+        sessions.push(refreshed);
+        changed = true;
+      } else {
+        sessions.push(session);
+      }
+    } catch {
+      changed = true;
+    }
+  }
+  if (!changed) return { index, sessions: index.sessions, changed: false };
+  return { index, sessions, changed: true };
+}
+function indexedFileMtime(index, session) {
+  const filePath = session.file_path;
+  if (!filePath) return null;
+  const entry = index.files?.find((file) => file.path === filePath);
+  if (entry && Number.isFinite(entry.mtimeMs)) return entry.mtimeMs;
+  const parsed = Date.parse(session.modified_at);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+function indexedFilesFromSessions(sessions) {
+  return sessions.filter((session) => Boolean(session.file_path)).map((session) => ({
+    session_id: session.session_id,
+    provider: session.provider === "codex" ? "codex" : "claude",
+    path: session.file_path,
+    mtimeMs: Date.parse(session.modified_at) || 0
+  }));
+}
+function collectSessionDirectoryEntries(provider) {
   const roots = [];
   if (!provider || provider === "claude") roots.push({ provider: "claude", path: CLAUDE_SESSIONS_DIR });
   if (!provider || provider === "codex") roots.push({ provider: "codex", path: CODEX_SESSIONS_DIR });
-  const files = [];
+  const directories = [];
   for (const root of roots) {
-    collectSessionFileEntriesInDir(root.provider, root.path, files);
+    collectSessionDirectoryEntriesInDir(root.provider, root.path, directories);
   }
-  return files;
+  return directories;
 }
-function collectSessionFileEntriesInDir(provider, dir, files) {
+function collectSessionDirectoryEntriesInDir(provider, dir, directories) {
+  let stat;
+  try {
+    stat = statSync2(dir);
+  } catch {
+    return;
+  }
+  if (!stat.isDirectory()) return;
+  directories.push({ provider, path: dir, mtimeMs: stat.mtimeMs });
+  let entries;
+  try {
+    entries = readdirSync2(dir);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry === "subagents") continue;
+    const full = join4(dir, entry);
+    try {
+      const childStat = statSync2(full);
+      if (childStat.isDirectory()) {
+        collectSessionDirectoryEntriesInDir(provider, full, directories);
+      }
+    } catch {
+    }
+  }
+}
+function collectNewSessionFileEntries(provider, index, indexedPaths) {
+  const roots = [];
+  if (!provider || provider === "claude") roots.push({ provider: "claude", path: CLAUDE_SESSIONS_DIR });
+  if (!provider || provider === "codex") roots.push({ provider: "codex", path: CODEX_SESSIONS_DIR });
+  const previousDirectories = index.directories ?? [];
+  const previousDirMtimes = new Map(previousDirectories.map((entry) => [entry.path, entry.mtimeMs]));
+  const previousChildDirs = mapIndexedChildDirectories(previousDirectories);
+  const newFiles = [];
+  const directories = [];
+  for (const root of roots) {
+    collectNewSessionFileEntriesInDir(root.provider, root.path, previousDirMtimes, previousChildDirs, indexedPaths, newFiles, directories);
+  }
+  return { newFiles, directories };
+}
+function mapIndexedChildDirectories(directories) {
+  const children = /* @__PURE__ */ new Map();
+  for (const entry of directories) {
+    const parent = dirname2(entry.path);
+    const paths = children.get(parent) ?? [];
+    paths.push(entry.path);
+    children.set(parent, paths);
+  }
+  return children;
+}
+function mergeDirectoryEntries(existing, refreshed, provider) {
+  if (!provider) return refreshed;
+  return [...existing.filter((entry) => entry.provider !== provider), ...refreshed];
+}
+function collectNewSessionFileEntriesInDir(provider, dir, previousDirMtimes, previousChildDirs, indexedPaths, files, directories) {
+  let dirStat;
+  try {
+    dirStat = statSync2(dir);
+  } catch {
+    return;
+  }
+  if (!dirStat.isDirectory()) return;
+  directories.push({ provider, path: dir, mtimeMs: dirStat.mtimeMs });
+  const previousMtime = previousDirMtimes.get(dir);
+  const directoryChanged = previousMtime === void 0 || dirStat.mtimeMs > previousMtime;
+  if (!directoryChanged) {
+    for (const childDir of previousChildDirs.get(dir) ?? []) {
+      collectNewSessionFileEntriesInDir(provider, childDir, previousDirMtimes, previousChildDirs, indexedPaths, files, directories);
+    }
+    return;
+  }
   let entries;
   try {
     entries = readdirSync2(dir);
@@ -928,8 +1072,8 @@ function collectSessionFileEntriesInDir(provider, dir, files) {
     try {
       const stat = statSync2(full);
       if (stat.isDirectory()) {
-        collectSessionFileEntriesInDir(provider, full, files);
-      } else if (entry.endsWith(".jsonl")) {
+        collectNewSessionFileEntriesInDir(provider, full, previousDirMtimes, previousChildDirs, indexedPaths, files, directories);
+      } else if (directoryChanged && entry.endsWith(".jsonl") && !indexedPaths.has(full)) {
         files.push({ provider, path: full, mtimeMs: stat.mtimeMs });
       }
     } catch {
@@ -1054,7 +1198,7 @@ Total: ${count} sessions`));
   });
   session.addCommand(index);
   session.command("show <session-id>").description("Show session details").option("--json", "output as JSON").action(async (sessionId, opts) => {
-    const meta = await findSessionById(sessionId);
+    const meta = await resolveSessionById(sessionId);
     if (!meta) {
       console.error(chalk2.red(`Session not found: ${sessionId}`));
       process.exit(1);
@@ -1284,19 +1428,31 @@ function parseTags(value) {
   return value.split(",").map((tag) => tag.trim()).filter(Boolean);
 }
 async function resolveSessionMeta(input) {
+  const inputLooksLikeSessionId = looksLikeSessionIdQuery(input);
+  if (inputLooksLikeSessionId) {
+    const indexedCandidates = await findIndexedSessionCandidates(input);
+    if (indexedCandidates.length > 0) return pickSessionCandidate(input, indexedCandidates);
+    console.error(chalk2.red(`No session matches: ${input}`));
+    process.exit(1);
+  }
   const candidates = await findSessionCandidates(input);
   if (candidates.length === 0) {
     console.error(chalk2.red(`No session matches: ${input}`));
     process.exit(1);
   }
-  if (candidates.length > 1) {
-    const exact = candidates.find((candidate) => candidate.session_id === input);
-    if (exact) return exact;
-    console.error(chalk2.red(`Ambiguous session id: ${input}`));
-    console.error(chalk2.red("Please rerun with full session id."));
-    process.exit(1);
-  }
-  return candidates[0];
+  return pickSessionCandidate(input, candidates);
+}
+async function resolveSessionById(input) {
+  if (!looksLikeSessionIdQuery(input)) return null;
+  return findIndexedSessionById(input);
+}
+function pickSessionCandidate(input, candidates) {
+  if (candidates.length === 1) return candidates[0];
+  const exact = candidates.find((candidate) => candidate.session_id === input);
+  if (exact) return exact;
+  console.error(chalk2.red(`Ambiguous session id: ${input}`));
+  console.error(chalk2.red("Please rerun with full session id."));
+  process.exit(1);
 }
 function ensureSessionBookmark(meta, defaults = {}) {
   const existing = findSessionBookmark(meta.session_id);
@@ -1318,7 +1474,7 @@ function ensureSessionBookmark(meta, defaults = {}) {
   });
 }
 async function resumeSession(sessionId) {
-  const meta = await findSessionById(sessionId);
+  const meta = await resolveSessionById(sessionId);
   if (!meta) {
     console.error(chalk2.red(`Session not found: ${sessionId}`));
     process.exit(1);
@@ -1657,7 +1813,12 @@ ${chalk4.yellow(`Pins in ${row.name} (${row.id})`)}`);
     const updated = renameCatalog(catalog, newName);
     console.log(chalk4.green(`Renamed catalog: "${updated.name}" (${updated.id})`));
   });
-  space.command("edit <name>").description("Edit catalog metadata").option("-d, --description <desc>", "new description").option("--rename <new-name>", "rename the catalog").option("--parent <parent>", "set parent catalog").action((name, opts) => {
+  space.command("move <catalog>").description("Move a catalog under another parent catalog").option("-p, --parent <parent>", "new parent catalog name, path, or id").option("--root", "move catalog to the root level").action((catalog, opts) => {
+    const updated = moveCatalog(catalog, opts);
+    console.log(chalk4.green(`Moved catalog: "${updated.name}" (${updated.id})`));
+    console.log(chalk4.gray(`  Path: ${catalogPath(updated)}`));
+  });
+  space.command("edit <name>").description("Edit catalog metadata").option("-d, --description <desc>", "new description").option("--rename <new-name>", "rename the catalog").option("--parent <parent>", "set parent catalog").option("--root", "move catalog to the root level").action((name, opts) => {
     const s = resolveCatalogRef2(name);
     const patch = {};
     if (opts.description) patch.description = opts.description;
@@ -1665,20 +1826,15 @@ ${chalk4.yellow(`Pins in ${row.name} (${row.id})`)}`);
       const nextName2 = validateCatalogName(opts.rename);
       patch.name = nextName2;
     }
-    if (opts.parent) {
-      const parent = resolveCatalogRef2(opts.parent);
-      if (parent.id === s.id) {
-        console.error(chalk4.red("A catalog cannot be its own parent."));
-        process.exit(1);
-      }
-      if (isDescendantCatalog(parent, s, listSpaces())) {
-        console.error(chalk4.red("A catalog cannot use its descendant as parent."));
-        process.exit(1);
-      }
-      patch.parent_id = parent.id;
+    if (opts.parent && opts.root) {
+      console.error(chalk4.red("Use either --parent or --root, not both."));
+      process.exit(1);
+    }
+    if (opts.parent || opts.root) {
+      patch.parent_id = resolveMoveParentId(s, opts);
     }
     const nextName = patch.name ?? s.name;
-    const nextParentId = patch.parent_id ?? s.parent_id;
+    const nextParentId = Object.prototype.hasOwnProperty.call(patch, "parent_id") ? patch.parent_id ?? null : s.parent_id;
     if (hasSiblingSpaceName(nextName, nextParentId, s.id)) {
       console.error(chalk4.red(`Catalog already exists under this parent: ${nextName}`));
       process.exit(1);
@@ -1703,6 +1859,43 @@ function renameCatalog(catalog, newName) {
     process.exit(1);
   }
   return updated;
+}
+function moveCatalog(catalog, opts) {
+  const s = resolveCatalogRef2(catalog);
+  const parentId = resolveMoveParentId(s, opts);
+  if (hasSiblingSpaceName(s.name, parentId, s.id)) {
+    console.error(chalk4.red(`Catalog already exists under this parent: ${s.name}`));
+    process.exit(1);
+  }
+  const updated = updateSpace(s.id, { parent_id: parentId });
+  if (!updated) {
+    console.error(chalk4.red(`Catalog not found: ${catalog}`));
+    process.exit(1);
+  }
+  return updated;
+}
+function resolveMoveParentId(catalog, opts) {
+  if (opts.parent && opts.root) {
+    console.error(chalk4.red("Use either --parent or --root, not both."));
+    process.exit(1);
+  }
+  if (!opts.parent && !opts.root) {
+    console.error(chalk4.red("Specify --parent <catalog> or --root."));
+    process.exit(1);
+  }
+  if (opts.root) {
+    return null;
+  }
+  const parent = resolveCatalogRef2(opts.parent);
+  if (parent.id === catalog.id) {
+    console.error(chalk4.red("A catalog cannot be its own parent."));
+    process.exit(1);
+  }
+  if (isDescendantCatalog(parent, catalog, listSpaces())) {
+    console.error(chalk4.red("A catalog cannot use its descendant as parent."));
+    process.exit(1);
+  }
+  return parent.id;
 }
 function validateCatalogName(newName) {
   const trimmedName = newName.trim();
@@ -1809,6 +2002,9 @@ async function aggregateByProject(providerFilter, limit, useIndex = true, refres
   if (useIndex) {
     const index = refreshIndex ? await rebuildSessionIndex(providerFilter) : await loadSessionIndexWithNewFiles(providerFilter);
     if (index) {
+      if (!providerFilter && index.projects) {
+        return index.projects.map(projectSummaryToStats);
+      }
       return aggregateProjectsFromSessions(index.sessions, providerFilter);
     }
   }
@@ -1842,6 +2038,36 @@ async function aggregateByProject(providerFilter, limit, useIndex = true, refres
   const projects = [...map.values()];
   projects.sort((a, b) => b.last_active.localeCompare(a.last_active));
   return projects;
+}
+async function findProjectStats(path, providerFilter, useIndex = true, refreshIndex = false) {
+  if (useIndex) {
+    const index = refreshIndex ? await rebuildSessionIndex(providerFilter) : await loadSessionIndexWithNewFiles(providerFilter);
+    const projectSessions2 = index.sessions.filter((session) => {
+      if (providerFilter && session.provider !== providerFilter) return false;
+      return Boolean(session.project_path && matchesProjectPath(session.project_path, path));
+    });
+    return pickProjectMatch(aggregateProjectsFromSessions(projectSessions2, providerFilter), path);
+  }
+  const projectSessions = [];
+  for await (const meta of streamSessions(providerFilter)) {
+    if (meta.project_path && matchesProjectPath(meta.project_path, path)) {
+      projectSessions.push(meta);
+    }
+  }
+  return pickProjectMatch(aggregateProjectsFromSessions(projectSessions, providerFilter), path);
+}
+function projectSummaryToStats(summary) {
+  return {
+    ...summary,
+    sessions: []
+  };
+}
+function matchesProjectPath(projectPath, input) {
+  return projectPath === input || projectPath.endsWith(input) || projectPath.endsWith("/" + input);
+}
+function pickProjectMatch(projects, input) {
+  const exact = projects.find((project) => project.project_path === input);
+  return exact ?? projects[0] ?? null;
 }
 function shortPath(p, maxLen) {
   if (p.length <= maxLen) return p;
@@ -1916,10 +2142,7 @@ function registerProjectCommand(program2) {
   project.command("show <path>").description("Show project details and session list").option("-a, --agent <agent>", "filter by agent: claude | codex").option("--refresh-index", "rebuild ~/.starling/session-index.json before showing").option("--no-index", "scan session files instead of using ~/.starling/session-index.json").option("--json", "output as JSON").action(
     async (path, opts) => {
       const provider = opts.agent;
-      const projects = await aggregateByProject(provider, void 0, opts.index !== false, Boolean(opts.refreshIndex));
-      const p = projects.find(
-        (pr) => pr.project_path === path || pr.project_path.endsWith(path) || pr.project_path.endsWith("/" + path)
-      );
+      const p = await findProjectStats(path, provider, opts.index !== false, Boolean(opts.refreshIndex));
       if (!p) {
         console.error(chalk5.red(`Project not found: ${path}`));
         process.exit(1);

@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "fs";
-import { join } from "path";
+import { dirname, join } from "path";
 import { CLAUDE_SESSIONS_DIR, CODEX_SESSIONS_DIR, DEFAULT_STARLING_HOME } from "../constants.js";
 import { atomicWriteJSON } from "../utils/fs.js";
 import { streamSessions } from "./discovery.js";
@@ -12,6 +12,28 @@ interface SessionFileEntry {
   provider: Provider;
   path: string;
   mtimeMs: number;
+}
+
+interface IndexedSessionFile {
+  session_id: string;
+  provider: Provider;
+  path: string;
+  mtimeMs: number;
+}
+
+interface IndexedSessionDirectory {
+  provider: Provider;
+  path: string;
+  mtimeMs: number;
+}
+
+export interface ProjectSummary {
+  project_path: string;
+  session_count: number;
+  agents: Record<string, number>;
+  models: Record<string, number>;
+  first_active: string;
+  last_active: string;
 }
 
 export interface ProjectStats {
@@ -30,6 +52,13 @@ export interface SessionIndex {
   session_count: number;
   project_count: number;
   sessions: SessionMeta[];
+  files?: IndexedSessionFile[];
+  directories?: IndexedSessionDirectory[];
+  projects?: ProjectSummary[];
+}
+
+interface LoadSessionIndexOptions {
+  refreshKnownFiles?: boolean;
 }
 
 export const SESSION_INDEX_PATH = join(DEFAULT_STARLING_HOME, "session-index.json");
@@ -39,7 +68,7 @@ export async function rebuildSessionIndex(provider?: "claude" | "codex"): Promis
   for await (const session of streamSessions(provider, Infinity)) {
     sessions.push(session);
   }
-  return writeSessionIndex(sessions);
+  return writeSessionIndex(sessions, collectSessionDirectoryEntries(provider));
 }
 
 export function loadSessionIndex(): SessionIndex | null {
@@ -58,30 +87,32 @@ export function loadSessionIndex(): SessionIndex | null {
 }
 
 export async function loadFreshSessionIndex(provider?: "claude" | "codex"): Promise<SessionIndex> {
-  const index = loadSessionIndex();
-  if (!index || isSessionIndexStale(provider)) {
-    return rebuildSessionIndex();
-  }
-  return index;
+  return loadSessionIndexWithNewFiles(provider, { refreshKnownFiles: true });
 }
 
-export async function loadSessionIndexWithNewFiles(provider?: Provider): Promise<SessionIndex> {
+export async function loadSessionIndexWithNewFiles(
+  provider?: Provider,
+  options: LoadSessionIndexOptions = {}
+): Promise<SessionIndex> {
   const index = loadSessionIndex();
   if (!index) {
     return rebuildSessionIndex();
   }
 
-  const indexedPaths = new Set(index.sessions.map((session) => session.file_path).filter(Boolean));
-  const newFiles = collectSessionFileEntries(provider).filter((entry) => !indexedPaths.has(entry.path));
-  if (newFiles.length === 0) return index;
+  const refresh = options.refreshKnownFiles
+    ? await refreshIndexedSessionFiles(index, provider)
+    : { index, sessions: index.sessions, changed: false };
+  const indexedPaths = new Set(refresh.sessions.map((session) => session.file_path).filter(Boolean));
+  const discovery = collectNewSessionFileEntries(provider, index, indexedPaths);
+  if (discovery.newFiles.length === 0 && !refresh.changed) return refresh.index;
 
-  const sessions = [...index.sessions];
-  for (const entry of newFiles) {
+  const sessions = [...refresh.sessions];
+  for (const entry of discovery.newFiles) {
     const session = await parseSessionFileEntry(entry);
     if (session) upsertSession(sessions, session);
   }
 
-  return writeSessionIndex(sessions);
+  return writeSessionIndex(sessions, mergeDirectoryEntries(index.directories ?? [], discovery.directories, provider));
 }
 
 export async function refreshIndexedSessionsById(
@@ -116,7 +147,7 @@ export async function refreshIndexedSessionsById(
     }
   }
 
-  return changed ? writeSessionIndex(sessions) : index;
+  return changed ? writeSessionIndex(sessions, index.directories ?? []) : index;
 }
 
 export function isSessionIndexStale(provider?: "claude" | "codex"): boolean {
@@ -145,7 +176,7 @@ export function upsertSessionInIndex(session: SessionMeta): boolean {
 
   const sessions = [...index.sessions];
   upsertSession(sessions, session);
-  writeSessionIndex(sessions);
+  writeSessionIndex(sessions, index.directories ?? []);
   return true;
 }
 
@@ -156,7 +187,7 @@ export function removeSessionFromIndex(sessionId: string): boolean {
   const normalized = sessionId.toLowerCase();
   const sessions = index.sessions.filter((session) => session.session_id.toLowerCase() !== normalized);
   if (sessions.length === index.sessions.length) return false;
-  writeSessionIndex(sessions);
+  writeSessionIndex(sessions, index.directories ?? []);
   return true;
 }
 
@@ -201,19 +232,53 @@ export function aggregateProjectsFromSessions(
   return projects;
 }
 
+export function aggregateProjectSummariesFromSessions(
+  sessions: SessionMeta[],
+  providerFilter?: "claude" | "codex"
+): ProjectSummary[] {
+  return aggregateProjectsFromSessions(sessions, providerFilter).map(({ sessions: _sessions, ...project }) => project);
+}
+
+export async function findIndexedSessionById(
+  sessionId: string,
+  provider?: Provider
+): Promise<SessionMeta | null> {
+  const matches = await findIndexedSessionCandidates(sessionId, provider);
+  return matches.find((session) => session.session_id === sessionId) ?? matches[0] ?? null;
+}
+
+export async function findIndexedSessionCandidates(
+  sessionId: string,
+  provider?: Provider
+): Promise<SessionMeta[]> {
+  const index = await refreshIndexedSessionsById([sessionId], provider);
+  const matches = index.sessions.filter((session) => {
+    if (provider && session.provider !== provider) return false;
+    return matchesSessionId(new Set([sessionId.toLowerCase()]), session.session_id);
+  });
+  matches.sort((a, b) => b.modified_at.localeCompare(a.modified_at));
+  return matches;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function writeSessionIndex(sessions: SessionMeta[]): SessionIndex {
+function writeSessionIndex(
+  sessions: SessionMeta[],
+  directories: IndexedSessionDirectory[] = []
+): SessionIndex {
   sessions.sort((a, b) => b.modified_at.localeCompare(a.modified_at));
-  const projects = aggregateProjectsFromSessions(sessions);
+  const projects = aggregateProjectSummariesFromSessions(sessions);
   const index: SessionIndex = {
     version: 1,
     built_at: new Date().toISOString(),
     session_count: sessions.length,
     project_count: projects.length,
     sessions,
+    files: indexedFilesFromSessions(sessions),
+    directories,
+    projects,
   };
   atomicWriteJSON(SESSION_INDEX_PATH, index);
   return index;
@@ -250,19 +315,184 @@ async function parseSessionFileEntry(entry: SessionFileEntry): Promise<SessionMe
   }
 }
 
-function collectSessionFileEntries(provider?: Provider): SessionFileEntry[] {
+async function refreshIndexedSessionFiles(
+  index: SessionIndex,
+  provider?: Provider
+): Promise<{ index: SessionIndex; sessions: SessionMeta[]; changed: boolean }> {
+  const sessions: SessionMeta[] = [];
+  let changed = false;
+
+  for (const session of index.sessions) {
+    if (provider && session.provider !== provider) {
+      sessions.push(session);
+      continue;
+    }
+    if (!session.file_path) {
+      sessions.push(session);
+      continue;
+    }
+
+    try {
+      const stat = statSync(session.file_path);
+      const indexedMtime = indexedFileMtime(index, session) ?? Date.parse(session.modified_at);
+      if (Number.isFinite(indexedMtime) && stat.mtimeMs <= indexedMtime) {
+        sessions.push(session);
+        continue;
+      }
+
+      const refreshed = await parseSessionFileEntry({
+        provider: session.provider === "codex" ? "codex" : "claude",
+        path: session.file_path,
+        mtimeMs: stat.mtimeMs,
+      });
+      if (refreshed) {
+        sessions.push(refreshed);
+        changed = true;
+      } else {
+        sessions.push(session);
+      }
+    } catch {
+      changed = true;
+    }
+  }
+
+  if (!changed) return { index, sessions: index.sessions, changed: false };
+  return { index, sessions, changed: true };
+}
+
+function indexedFileMtime(index: SessionIndex, session: SessionMeta): number | null {
+  const filePath = session.file_path;
+  if (!filePath) return null;
+  const entry = index.files?.find((file) => file.path === filePath);
+  if (entry && Number.isFinite(entry.mtimeMs)) return entry.mtimeMs;
+  const parsed = Date.parse(session.modified_at);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function indexedFilesFromSessions(sessions: SessionMeta[]): IndexedSessionFile[] {
+  return sessions
+    .filter((session) => Boolean(session.file_path))
+    .map((session) => ({
+      session_id: session.session_id,
+      provider: session.provider === "codex" ? "codex" : "claude",
+      path: session.file_path,
+      mtimeMs: Date.parse(session.modified_at) || 0,
+    }));
+}
+
+function collectSessionDirectoryEntries(provider?: Provider): IndexedSessionDirectory[] {
   const roots: Array<{ provider: Provider; path: string }> = [];
   if (!provider || provider === "claude") roots.push({ provider: "claude", path: CLAUDE_SESSIONS_DIR });
   if (!provider || provider === "codex") roots.push({ provider: "codex", path: CODEX_SESSIONS_DIR });
 
-  const files: SessionFileEntry[] = [];
+  const directories: IndexedSessionDirectory[] = [];
   for (const root of roots) {
-    collectSessionFileEntriesInDir(root.provider, root.path, files);
+    collectSessionDirectoryEntriesInDir(root.provider, root.path, directories);
   }
-  return files;
+  return directories;
 }
 
-function collectSessionFileEntriesInDir(provider: Provider, dir: string, files: SessionFileEntry[]): void {
+function collectSessionDirectoryEntriesInDir(provider: Provider, dir: string, directories: IndexedSessionDirectory[]): void {
+  let stat: ReturnType<typeof statSync>;
+  try {
+    stat = statSync(dir);
+  } catch {
+    return;
+  }
+  if (!stat.isDirectory()) return;
+  directories.push({ provider, path: dir, mtimeMs: stat.mtimeMs });
+
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    if (entry === "subagents") continue;
+    const full = join(dir, entry);
+    try {
+      const childStat = statSync(full);
+      if (childStat.isDirectory()) {
+        collectSessionDirectoryEntriesInDir(provider, full, directories);
+      }
+    } catch {
+      // skip unreadable entries
+    }
+  }
+}
+
+function collectNewSessionFileEntries(
+  provider: Provider | undefined,
+  index: SessionIndex,
+  indexedPaths: Set<string>
+): { newFiles: SessionFileEntry[]; directories: IndexedSessionDirectory[] } {
+  const roots: Array<{ provider: Provider; path: string }> = [];
+  if (!provider || provider === "claude") roots.push({ provider: "claude", path: CLAUDE_SESSIONS_DIR });
+  if (!provider || provider === "codex") roots.push({ provider: "codex", path: CODEX_SESSIONS_DIR });
+
+  const previousDirectories = index.directories ?? [];
+  const previousDirMtimes = new Map(previousDirectories.map((entry) => [entry.path, entry.mtimeMs]));
+  const previousChildDirs = mapIndexedChildDirectories(previousDirectories);
+  const newFiles: SessionFileEntry[] = [];
+  const directories: IndexedSessionDirectory[] = [];
+
+  for (const root of roots) {
+    collectNewSessionFileEntriesInDir(root.provider, root.path, previousDirMtimes, previousChildDirs, indexedPaths, newFiles, directories);
+  }
+
+  return { newFiles, directories };
+}
+
+function mapIndexedChildDirectories(directories: IndexedSessionDirectory[]): Map<string, string[]> {
+  const children = new Map<string, string[]>();
+  for (const entry of directories) {
+    const parent = dirname(entry.path);
+    const paths = children.get(parent) ?? [];
+    paths.push(entry.path);
+    children.set(parent, paths);
+  }
+  return children;
+}
+
+function mergeDirectoryEntries(
+  existing: IndexedSessionDirectory[],
+  refreshed: IndexedSessionDirectory[],
+  provider?: Provider
+): IndexedSessionDirectory[] {
+  if (!provider) return refreshed;
+  return [...existing.filter((entry) => entry.provider !== provider), ...refreshed];
+}
+
+function collectNewSessionFileEntriesInDir(
+  provider: Provider,
+  dir: string,
+  previousDirMtimes: Map<string, number>,
+  previousChildDirs: Map<string, string[]>,
+  indexedPaths: Set<string>,
+  files: SessionFileEntry[],
+  directories: IndexedSessionDirectory[]
+): void {
+  let dirStat: ReturnType<typeof statSync>;
+  try {
+    dirStat = statSync(dir);
+  } catch {
+    return;
+  }
+  if (!dirStat.isDirectory()) return;
+  directories.push({ provider, path: dir, mtimeMs: dirStat.mtimeMs });
+
+  const previousMtime = previousDirMtimes.get(dir);
+  const directoryChanged = previousMtime === undefined || dirStat.mtimeMs > previousMtime;
+
+  if (!directoryChanged) {
+    for (const childDir of previousChildDirs.get(dir) ?? []) {
+      collectNewSessionFileEntriesInDir(provider, childDir, previousDirMtimes, previousChildDirs, indexedPaths, files, directories);
+    }
+    return;
+  }
+
   let entries: string[];
   try {
     entries = readdirSync(dir);
@@ -276,8 +506,8 @@ function collectSessionFileEntriesInDir(provider: Provider, dir: string, files: 
     try {
       const stat = statSync(full);
       if (stat.isDirectory()) {
-        collectSessionFileEntriesInDir(provider, full, files);
-      } else if (entry.endsWith(".jsonl")) {
+        collectNewSessionFileEntriesInDir(provider, full, previousDirMtimes, previousChildDirs, indexedPaths, files, directories);
+      } else if (directoryChanged && entry.endsWith(".jsonl") && !indexedPaths.has(full)) {
         files.push({ provider, path: full, mtimeMs: stat.mtimeMs });
       }
     } catch {

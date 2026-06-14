@@ -1,6 +1,6 @@
 {
   "name": "starling-ai",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "Agent session manager — discover, bookmark, and organize AI coding sessions",
   "type": "module",
   "repository": {
@@ -14,6 +14,7 @@
     "dist",
     "skills",
     "scripts/install-agent-skills.js",
+    "docs",
     "package.json",
     "README.md",
     "LICENSE"

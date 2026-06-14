@@ -134,7 +134,11 @@ starling catalog clear <catalog>
 starling catalog delete <catalog>
 starling catalog del <catalog>
 starling catalog rename <catalog> <new-name>
+starling catalog move <catalog> --parent <parent-catalog>
+starling catalog move <catalog> --root
 starling catalog edit <catalog> --rename <new-name>
+starling catalog edit <catalog> --parent <parent-catalog>
+starling catalog edit <catalog> --root
 starling catalog tag <catalog> tag1 tag2
 ```
 
@@ -224,6 +228,19 @@ Starling stores its own data in `~/.starling`:
     codex/
       <profile>.toml
 ```
+
+Starling does not move or rewrite the original Claude Code and Codex session files. It reads them from the agent-owned locations, such as `~/.claude/projects` and `~/.codex/sessions`, and stores only Starling metadata and profiles under `~/.starling`.
+
+The local session index is optimized for repeated CLI and VS Code sidebar reads:
+
+- `sessions`: parsed session metadata used by session, catalog, and project views.
+- `files`: the indexed session file path and mtime, used to refresh only changed files.
+- `directories`: scanned session directories and mtimes, used to discover newly created session files without reparsing everything.
+- `projects`: precomputed project summaries for fast project tree/list rendering.
+
+Project and catalog views refresh this index incrementally by default. The hot path discovers newly created session files from directory mtimes without statting every old session file. Exact session detail paths, such as `starling session show <session-id>`, refresh only the matched session file when needed. Use `starling session index rebuild` only when you want a full rescan.
+
+See [docs/data-path-design.md](docs/data-path-design.md) for the full data path and index refresh design.
 
 Claude profiles are JSON files that Starling passes to Claude Code as settings.
 

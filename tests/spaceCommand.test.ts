@@ -338,6 +338,142 @@ describe("catalog command", () => {
     ]));
   });
 
+  it("moves a catalog under another parent", async () => {
+    writeFileSync(
+      storePath,
+      JSON.stringify({
+        version: STORE_VERSION,
+        bookmarks: [],
+        spaces: [
+          catalog("cat_0001", "old-parent"),
+          catalog("cat_0002", "new-parent"),
+          catalog("cat_0003", "child", "cat_0001"),
+          catalog("cat_0004", "grandchild", "cat_0003"),
+        ],
+        categories: [],
+      })
+    );
+
+    const program = new Command();
+    program.exitOverride();
+    registerSpaceCommand(program);
+
+    await program.parseAsync(["node", "starling", "catalog", "move", "old-parent/child", "--parent", "new-parent"]);
+
+    const store = JSON.parse(readFileSync(storePath, "utf-8")) as {
+      spaces: Array<{ id: string; name: string; parent_id: string | null }>;
+    };
+    expect(store.spaces).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "cat_0003", name: "child", parent_id: "cat_0002" }),
+      expect.objectContaining({ id: "cat_0004", name: "grandchild", parent_id: "cat_0003" }),
+    ]));
+  });
+
+  it("moves a catalog to the root level", async () => {
+    writeFileSync(
+      storePath,
+      JSON.stringify({
+        version: STORE_VERSION,
+        bookmarks: [],
+        spaces: [
+          catalog("cat_0001", "parent"),
+          catalog("cat_0002", "child", "cat_0001"),
+        ],
+        categories: [],
+      })
+    );
+
+    const program = new Command();
+    program.exitOverride();
+    registerSpaceCommand(program);
+
+    await program.parseAsync(["node", "starling", "catalog", "move", "parent/child", "--root"]);
+
+    const store = JSON.parse(readFileSync(storePath, "utf-8")) as {
+      spaces: Array<{ id: string; parent_id: string | null }>;
+    };
+    expect(store.spaces).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "cat_0002", parent_id: null }),
+    ]));
+  });
+
+  it("moves a catalog to root through edit --root", async () => {
+    writeFileSync(
+      storePath,
+      JSON.stringify({
+        version: STORE_VERSION,
+        bookmarks: [],
+        spaces: [
+          catalog("cat_0001", "parent"),
+          catalog("cat_0002", "child", "cat_0001"),
+        ],
+        categories: [],
+      })
+    );
+
+    const program = new Command();
+    program.exitOverride();
+    registerSpaceCommand(program);
+
+    await program.parseAsync(["node", "starling", "catalog", "edit", "parent/child", "--root"]);
+
+    const store = JSON.parse(readFileSync(storePath, "utf-8")) as {
+      spaces: Array<{ id: string; parent_id: string | null }>;
+    };
+    expect(store.spaces).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "cat_0002", parent_id: null }),
+    ]));
+  });
+
+  it("rejects moving a catalog below its descendant", async () => {
+    writeFileSync(
+      storePath,
+      JSON.stringify({
+        version: STORE_VERSION,
+        bookmarks: [],
+        spaces: [
+          catalog("cat_0001", "parent"),
+          catalog("cat_0002", "child", "cat_0001"),
+          catalog("cat_0003", "grandchild", "cat_0002"),
+        ],
+        categories: [],
+      })
+    );
+
+    const program = new Command();
+    program.exitOverride();
+    registerSpaceCommand(program);
+
+    await expect(
+      program.parseAsync(["node", "starling", "catalog", "move", "parent", "--parent", "parent/child/grandchild"])
+    ).rejects.toThrow();
+  });
+
+  it("rejects moving a catalog to a parent with an existing same-name child", async () => {
+    writeFileSync(
+      storePath,
+      JSON.stringify({
+        version: STORE_VERSION,
+        bookmarks: [],
+        spaces: [
+          catalog("cat_0001", "parent-a"),
+          catalog("cat_0002", "parent-b"),
+          catalog("cat_0003", "child", "cat_0001"),
+          catalog("cat_0004", "child", "cat_0002"),
+        ],
+        categories: [],
+      })
+    );
+
+    const program = new Command();
+    program.exitOverride();
+    registerSpaceCommand(program);
+
+    await expect(
+      program.parseAsync(["node", "starling", "catalog", "move", "parent-a/child", "--parent", "parent-b"])
+    ).rejects.toThrow();
+  });
+
   it("rejects renaming a catalog to an existing sibling name", async () => {
     writeFileSync(
       storePath,

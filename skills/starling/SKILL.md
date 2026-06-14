@@ -5,45 +5,61 @@ description: "Use when working with Starling, the local agent session manager fo
 
 # Starling
 
-Starling is a local session manager for Claude Code and Codex. It discovers session files, groups sessions by project, organizes them into catalogs, stores metadata under `~/.starling`, and provides a VS Code sidebar.
+Starling is a local session manager for Claude Code and Codex. Use it to find prior sessions, resume work, organize sessions into catalogs, inspect projects, and launch Claude/Codex with saved model profiles.
 
+This skill is an operating manual for agents using Starling. Do not treat it as Starling development or release documentation.
+
+## Agent Rules
+
+- Prefer `starling` CLI commands over manually reading `~/.starling`, `~/.claude`, or `~/.codex`.
+- Do not delete sessions, remove catalog assignments, or edit model profiles unless the user explicitly asks.
+- Do not rewrite agent-owned data under `~/.claude` or `~/.codex`.
+- Use one plain catalog name in examples unless the task is specifically about catalog hierarchy.
+- Put Starling options before the agent name in `starling run`; pass agent-native arguments after `claude` or `codex`.
 
 ## Catalogs
 
-Use one plain catalog name in examples unless explaining hierarchy:
+Use catalogs to group important sessions.
 
 ```bash
-starling catalog create paper-review
-starling catalog add paper-review <session-id> --title "Figure review"
+starling catalog ls
 starling catalog tree
+starling catalog tree --sessions
 starling catalog show paper-review
 ```
 
-Hierarchy is path-based:
+Create catalogs:
 
 ```bash
+starling catalog create paper-review
 starling catalog create research/paper
 starling catalog create child --parent research
 ```
 
 `research/paper` means catalog `paper` under parent catalog `research`; it is not a single catalog name.
 
-Useful catalog operations:
+Add or remove sessions:
 
 ```bash
-starling catalog ls
-starling catalog show <catalog>
-starling catalog detach <catalog> <session-id>
-starling catalog clear <catalog>
-starling catalog rename <catalog> <new-name>
-starling catalog delete <catalog>
+starling catalog add paper-review <session-id> --title "Figure review"
+starling catalog detach paper-review <session-id>
+starling catalog clear paper-review
+```
+
+Rename, move, or delete catalogs:
+
+```bash
+starling catalog rename paper-review review
+starling catalog move review --parent research
+starling catalog move review --root
+starling catalog delete review
 ```
 
 Deleting a catalog recursively deletes child catalogs from Starling metadata. It does not delete real session files.
 
 ## Sessions
 
-Common session commands:
+Find and inspect sessions:
 
 ```bash
 starling session ls
@@ -54,6 +70,14 @@ starling session show <session-id>
 starling resume <session-id>
 ```
 
+Manage session metadata:
+
+```bash
+starling session meta <session-id> --title "New title" --tags review,important
+starling session note <session-id> "Follow up on benchmark results"
+starling session unpin <session-id>
+```
+
 Manage catalog assignment from the session namespace:
 
 ```bash
@@ -62,31 +86,37 @@ starling session catalog remove <session-id> paper-review
 starling session catalog clear <session-id>
 ```
 
-Use 13-character session ID display when changing UI or tables, unless full IDs are required.
+Use full session IDs for destructive or ambiguous operations. Short session IDs in Starling displays are usually 13 characters.
 
-## Projects And Index
+## Projects
 
-Project views are built from the local session index by default:
+Use project commands to find sessions by working directory:
 
 ```bash
 starling project ls
 starling project ls --all
+starling project ls --agent claude
+starling project ls --agent codex
 starling project show /path/to/project
-starling session index status
-starling session index rebuild
-starling session index clear
 ```
 
-If project output is stale, rebuild the index. If performance is being investigated, compare indexed and scan modes:
+If project or session output appears stale:
 
 ```bash
-starling project ls --refresh-index
+starling session index status
+starling session index rebuild
+```
+
+Use `--no-index` only when troubleshooting a stale or corrupted index:
+
+```bash
 starling project ls --no-index
+starling project show /path/to/project --no-index
 ```
 
 ## Running Agents
 
-Starling arguments go before the agent name. Agent arguments go after the agent name and should be passed through unchanged:
+Starling arguments go before the agent name. Agent arguments go after the agent name and should be passed through unchanged.
 
 ```bash
 starling run --catalog paper-review codex
@@ -95,7 +125,13 @@ starling run --config ds --catalog paper-review claude
 starling run --catalog paper-review claude --dangerously-skip-permissions
 ```
 
-If `--config` is omitted, Starling should use the agent's normal default configuration and must not overwrite default Codex or Claude config files.
+If `--config` is omitted, Starling uses the agent's normal default configuration.
+
+To put a run into a nested catalog, use a catalog path:
+
+```bash
+starling run --catalog research/paper claude
+```
 
 ## Model Profiles
 
@@ -114,7 +150,7 @@ starling model ls --agent claude
 starling model ls --agent codex
 ```
 
-Create profiles:
+Create profiles only when the user asks:
 
 ```bash
 starling model add ds --agent claude --model deepseek-v4-pro --base-url https://api.example.com --api-key "$API_KEY"
@@ -122,80 +158,10 @@ starling model add demo --agent codex --model gpt-5.2 --base-url https://api.exa
 starling model delete demo --agent codex
 ```
 
-Codex profiles use Codex-style TOML. Store the per-profile API key as `experimental_bearer_token` in the provider table. For Chat Completions-only providers, add `api_format = "openai_chat"`.
+Codex profiles use Codex-style TOML. For Chat Completions-only providers, add `api_format = "openai_chat"`.
 
 ## VS Code Extension
 
-Extension source is maintained separately in:
+The Starling VS Code extension exposes Catalog, Projects, Models, and Sessions views. It calls the local `starling` CLI.
 
-```text
-/data20T/dev/Starling-ext
-```
-
-Compile before claiming extension changes work:
-
-```bash
-cd /data20T/dev/Starling/vscode-extension
-npm run compile
-```
-
-The sidebar has three views in this order:
-
-```text
-Catalog
-Projects
-Sessions
-```
-
-The extension calls the `starling` CLI. If VS Code cannot find it, use the install prompt or set `starling.cliPath` to an absolute path.
-
-## Development And Release
-
-For local development:
-
-```bash
-cd /data20T/dev/Starling
-npm install
-npm run build
-npm run lint
-npm test
-npm link
-```
-
-For testing the published package:
-
-```bash
-npm uninstall -g starling-ai
-npm install -g starling-ai
-starling --version
-```
-
-Publishing uses tags:
-
-```bash
-git tag vX.Y.Z
-git tag vsx-vX.Y.Z
-git push origin vX.Y.Z vsx-vX.Y.Z
-```
-
-`vX.Y.Z` triggers npm publish. `vsx-vX.Y.Z` triggers VS Code Marketplace publish. A GitHub Release can include both assets:
-
-```bash
-npm pack --pack-destination .
-cd vscode-extension && npx @vscode/vsce package
-gh release create vX.Y.Z ../starling-ai-X.Y.Z.tgz starling-ai-X.Y.Z.vsix --title "vX.Y.Z" --generate-notes
-```
-
-If `gh release create` fails with a 403 while `GITHUB_TOKEN` is set, try:
-
-```bash
-env -u GITHUB_TOKEN gh release create ...
-```
-
-## Guardrails
-
-- Do not remove or rewrite user data in `~/.starling`, `~/.claude`, or `~/.codex` unless explicitly requested.
-- Do not let `starling run --config <name> codex` mutate the user's default `~/.codex/config.toml`.
-- Keep examples with a single catalog name unless the task is specifically about hierarchy.
-- When changing CLI behavior, update README, tests, and `dist/index.js`.
-- When changing extension behavior, update `vscode-extension/package.json` contributions if needed and run `npm run compile`.
+If the extension cannot find Starling, install the CLI or set `starling.cliPath` in VS Code settings.

@@ -279,6 +279,18 @@ export function registerSpaceCommand(program: Command): void {
       console.log(chalk.green(`Renamed catalog: "${updated.name}" (${updated.id})`));
     });
 
+  // catalog move
+  space
+    .command("move <catalog>")
+    .description("Move a catalog under another parent catalog")
+    .option("-p, --parent <parent>", "new parent catalog name, path, or id")
+    .option("--root", "move catalog to the root level")
+    .action((catalog: string, opts: { parent?: string; root?: boolean }) => {
+      const updated = moveCatalog(catalog, opts);
+      console.log(chalk.green(`Moved catalog: "${updated.name}" (${updated.id})`));
+      console.log(chalk.gray(`  Path: ${catalogPath(updated)}`));
+    });
+
   // catalog edit
   space
     .command("edit <name>")
@@ -286,7 +298,8 @@ export function registerSpaceCommand(program: Command): void {
     .option("-d, --description <desc>", "new description")
     .option("--rename <new-name>", "rename the catalog")
     .option("--parent <parent>", "set parent catalog")
-    .action((name: string, opts: { description?: string; rename?: string; parent?: string }) => {
+    .option("--root", "move catalog to the root level")
+    .action((name: string, opts: { description?: string; rename?: string; parent?: string; root?: boolean }) => {
       const s = resolveCatalogRef(name);
       const patch: Partial<Space> = {};
       if (opts.description) patch.description = opts.description;
@@ -294,20 +307,15 @@ export function registerSpaceCommand(program: Command): void {
         const nextName = validateCatalogName(opts.rename);
         patch.name = nextName;
       }
-      if (opts.parent) {
-        const parent = resolveCatalogRef(opts.parent);
-        if (parent.id === s.id) {
-          console.error(chalk.red("A catalog cannot be its own parent."));
-          process.exit(1);
-        }
-        if (isDescendantCatalog(parent, s, listSpaces())) {
-          console.error(chalk.red("A catalog cannot use its descendant as parent."));
-          process.exit(1);
-        }
-        patch.parent_id = parent.id;
+      if (opts.parent && opts.root) {
+        console.error(chalk.red("Use either --parent or --root, not both."));
+        process.exit(1);
+      }
+      if (opts.parent || opts.root) {
+        patch.parent_id = resolveMoveParentId(s, opts);
       }
       const nextName = patch.name ?? s.name;
-      const nextParentId = patch.parent_id ?? s.parent_id;
+      const nextParentId = Object.prototype.hasOwnProperty.call(patch, "parent_id") ? patch.parent_id ?? null : s.parent_id;
       if (hasSiblingSpaceName(nextName, nextParentId, s.id)) {
         console.error(chalk.red(`Catalog already exists under this parent: ${nextName}`));
         process.exit(1);
@@ -336,6 +344,54 @@ function renameCatalog(catalog: string, newName: string): Space {
     process.exit(1);
   }
   return updated;
+}
+
+function moveCatalog(
+  catalog: string,
+  opts: { parent?: string; root?: boolean }
+): Space {
+  const s = resolveCatalogRef(catalog);
+  const parentId = resolveMoveParentId(s, opts);
+
+  if (hasSiblingSpaceName(s.name, parentId, s.id)) {
+    console.error(chalk.red(`Catalog already exists under this parent: ${s.name}`));
+    process.exit(1);
+  }
+
+  const updated = updateSpace(s.id, { parent_id: parentId });
+  if (!updated) {
+    console.error(chalk.red(`Catalog not found: ${catalog}`));
+    process.exit(1);
+  }
+  return updated;
+}
+
+function resolveMoveParentId(
+  catalog: Space,
+  opts: { parent?: string; root?: boolean }
+): string | null {
+  if (opts.parent && opts.root) {
+    console.error(chalk.red("Use either --parent or --root, not both."));
+    process.exit(1);
+  }
+  if (!opts.parent && !opts.root) {
+    console.error(chalk.red("Specify --parent <catalog> or --root."));
+    process.exit(1);
+  }
+  if (opts.root) {
+    return null;
+  }
+
+  const parent = resolveCatalogRef(opts.parent!);
+  if (parent.id === catalog.id) {
+    console.error(chalk.red("A catalog cannot be its own parent."));
+    process.exit(1);
+  }
+  if (isDescendantCatalog(parent, catalog, listSpaces())) {
+    console.error(chalk.red("A catalog cannot use its descendant as parent."));
+    process.exit(1);
+  }
+  return parent.id;
 }
 
 function validateCatalogName(newName: string): string {

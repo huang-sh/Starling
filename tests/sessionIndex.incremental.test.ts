@@ -4,6 +4,7 @@ const files = new Map<string, string>();
 const stats = new Map<string, { mtimeMs: number; directory: boolean }>();
 const children = new Map<string, string[]>();
 const parsedFiles: string[] = [];
+const statCalls: string[] = [];
 let writtenJson: unknown = null;
 
 function addDir(path: string, names: string[]): void {
@@ -28,6 +29,7 @@ vi.mock("fs", () => ({
     return names;
   }),
   statSync: vi.fn((path: string) => {
+    statCalls.push(path);
     const st = stats.get(path);
     if (!st) throw new Error(`missing stat: ${path}`);
     return {
@@ -83,6 +85,7 @@ describe("loadSessionIndexWithNewFiles", () => {
     stats.clear();
     children.clear();
     parsedFiles.length = 0;
+    statCalls.length = 0;
     writtenJson = null;
 
     files.set(
@@ -145,5 +148,51 @@ describe("loadSessionIndexWithNewFiles", () => {
       session_count: 1,
       project_count: 1,
     });
+  });
+
+  it("skips ordinary files in unchanged indexed directories", async () => {
+    files.set(
+      "/starling/session-index.json",
+      JSON.stringify({
+        version: 1,
+        built_at: "2026-01-01T00:00:00.000Z",
+        session_count: 1,
+        project_count: 1,
+        sessions: [
+          {
+            session_id: "existing",
+            provider: "claude",
+            model: "claude-old",
+            project_path: "/work/old",
+            first_prompt: "",
+            file_path: "/sessions/claude/project/existing.jsonl",
+            created_at: "2026-01-01T00:00:00.000Z",
+            modified_at: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        files: [
+          {
+            session_id: "existing",
+            provider: "claude",
+            path: "/sessions/claude/project/existing.jsonl",
+            mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+          },
+        ],
+        directories: [
+          { provider: "claude", path: "/sessions/claude", mtimeMs: 1 },
+          { provider: "claude", path: "/sessions/claude/project", mtimeMs: 1 },
+          { provider: "codex", path: "/sessions/codex", mtimeMs: 1 },
+        ],
+      })
+    );
+    addFile("/sessions/claude/project/existing.jsonl", Date.parse("2026-01-02T00:00:00.000Z"));
+    const { loadSessionIndexWithNewFiles } = await import("../src/lib/sessionIndex.js");
+
+    const index = await loadSessionIndexWithNewFiles();
+
+    expect(index.session_count).toBe(1);
+    expect(parsedFiles).toEqual([]);
+    expect(statCalls).not.toContain("/sessions/claude/project/existing.jsonl");
+    expect(writtenJson).toBeNull();
   });
 });
