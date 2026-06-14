@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import Table from "cli-table3";
-import { existsSync, readFileSync, readdirSync } from "fs";
+import { existsSync, readFileSync, readdirSync, unlinkSync } from "fs";
 import { basename, extname, join } from "path";
 import {
   DEFAULT_CLAUDE_SETTINGS_DIR,
@@ -10,6 +10,7 @@ import {
 } from "../constants.js";
 import { homedir } from "os";
 import { atomicWriteJSON } from "../utils/fs.js";
+import { getCodexProviderProfile, migrateCodexJsonProfilesToToml, saveCodexProviderProfile } from "../lib/codexProvider.js";
 
 type ModelAgent = "claude" | "codex";
 type ModelScope = "current" | "profile";
@@ -97,6 +98,32 @@ export function registerModelCommand(program: Command): void {
       console.log(chalk.gray(`  Source: ${result.source}`));
     });
 
+  model
+    .command("delete <name>")
+    .aliases(["del", "rm"])
+    .description("Delete a Starling model profile")
+    .requiredOption("-a, --agent <agent>", "agent: claude | codex")
+    .option("--json", "output JSON")
+    .action((name: string, opts: { agent: string; json?: boolean }) => {
+      const agent = normalizeAgent(opts.agent);
+      if (!agent || agent === "all") {
+        console.error(chalk.red(`Unknown agent: ${opts.agent}`));
+        console.error(chalk.gray("Allowed values: claude, codex"));
+        process.exit(1);
+      }
+
+      const result = deleteModelProfile(name, agent);
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      console.log(chalk.green(`Deleted ${agent} model profile: ${result.name}`));
+      for (const source of result.sources) {
+        console.log(chalk.gray(`  Removed: ${source}`));
+      }
+    });
+
   program.addCommand(model);
 }
 
@@ -117,9 +144,25 @@ interface AddModelProfileOptions {
   force?: boolean;
 }
 
+interface DeleteModelProfileResult {
+  agent: ModelAgent;
+  name: string;
+  sources: string[];
+}
+
 function addModelProfile(name: string, agent: ModelAgent, opts: AddModelProfileOptions): AddModelProfileResult {
   const profileName = normalizeProfileName(name);
-  const source = join(agent === "claude" ? DEFAULT_CLAUDE_SETTINGS_DIR : DEFAULT_CODEX_SETTINGS_DIR, `${profileName}.json`);
+  if (agent === "codex") {
+    const existing = getCodexProviderProfile(profileName);
+    if (existing && !opts.force) {
+      console.error(chalk.red(`Model profile already exists: ${profileName}`));
+      console.error(chalk.gray(`  Source: ${existing.filePath}`));
+      console.error(chalk.gray("Use --force to overwrite it."));
+      process.exit(1);
+    }
+  }
+
+  const source = join(DEFAULT_CLAUDE_SETTINGS_DIR, `${profileName}.json`);
   if (existsSync(source) && !opts.force) {
     console.error(chalk.red(`Model profile already exists: ${profileName}`));
     console.error(chalk.gray(`  Source: ${source}`));
@@ -133,9 +176,52 @@ function addModelProfile(name: string, agent: ModelAgent, opts: AddModelProfileO
     process.exit(1);
   }
 
-  const payload = agent === "claude" ? buildClaudeProfile(opts, model) : buildCodexProfile(opts, model);
+  if (agent === "codex") {
+    const saved = saveCodexProviderProfile(profileName, {
+      apiKey: opts.apiKey?.trim() || "",
+      baseUrl: opts.baseUrl?.trim() || "",
+      model,
+      modelProvider: opts.provider?.trim() || "custom",
+      wireApi: opts.wireApi?.trim() || "responses",
+      config: {
+        model_reasoning_effort: opts.reasoning?.trim() || "",
+        disable_response_storage: true,
+      },
+    });
+    return { agent, name: profileName, source: saved.filePath, model };
+  }
+
+  const payload = buildClaudeProfile(opts, model);
   atomicWriteJSON(source, payload);
   return { agent, name: profileName, source, model };
+}
+
+export function deleteModelProfile(name: string, agent: ModelAgent): DeleteModelProfileResult {
+  const profileName = normalizeProfileName(name);
+  const sources = findModelProfileSources(profileName, agent);
+  if (sources.length === 0) {
+    const dir = agent === "claude" ? DEFAULT_CLAUDE_SETTINGS_DIR : DEFAULT_CODEX_SETTINGS_DIR;
+    const extensions = agent === "claude" ? ".json or .jsonc" : ".toml, .json, or .jsonc";
+    console.error(chalk.red(`Model profile not found: ${profileName}`));
+    console.error(chalk.gray(`  Agent: ${agent}`));
+    console.error(chalk.gray(`  Expected under: ${dir}`));
+    console.error(chalk.gray(`  Supported files: ${profileName}${extensions}`));
+    process.exit(1);
+  }
+
+  for (const source of sources) {
+    unlinkSync(source);
+  }
+
+  return { agent, name: profileName, sources };
+}
+
+function findModelProfileSources(profileName: string, agent: ModelAgent): string[] {
+  const dir = agent === "claude" ? DEFAULT_CLAUDE_SETTINGS_DIR : DEFAULT_CODEX_SETTINGS_DIR;
+  const extensions = agent === "claude" ? [".json", ".jsonc"] : [".toml", ".json", ".jsonc"];
+  return extensions
+    .map((extension) => join(dir, `${profileName}${extension}`))
+    .filter((source) => existsSync(source));
 }
 
 function buildClaudeProfile(opts: AddModelProfileOptions, model: string): Record<string, unknown> {
@@ -164,33 +250,6 @@ function buildClaudeProfile(opts: AddModelProfileOptions, model: string): Record
       ],
       defaultMode: "plan",
     },
-  };
-}
-
-function buildCodexProfile(opts: AddModelProfileOptions, model: string): Record<string, unknown> {
-  const provider = opts.provider?.trim() || "custom";
-  const providerConfig: Record<string, unknown> = {
-    name: provider,
-    base_url: opts.baseUrl?.trim() || "",
-    wire_api: opts.wireApi?.trim() || "responses",
-    requires_openai_auth: true,
-  };
-
-  const config: Record<string, unknown> = {
-    model_provider: provider,
-    model,
-    model_reasoning_effort: opts.reasoning?.trim() || "",
-    disable_response_storage: true,
-    model_providers: {
-      [provider]: providerConfig,
-    },
-  };
-
-  return {
-    auth: {
-      OPENAI_API_KEY: opts.apiKey?.trim() || "",
-    },
-    config,
   };
 }
 
@@ -237,6 +296,7 @@ function collectClaudeConfigs(): ModelConfigSummary[] {
 }
 
 function collectCodexConfigs(): ModelConfigSummary[] {
+  migrateCodexJsonProfilesToToml();
   const currentPath = join(DEFAULT_CODEX_HOME, "config.toml");
   return [
     summarizeCodexToml(currentPath, "current", "current", readCodexAuthState()),
@@ -305,7 +365,7 @@ function summarizeClaudeJson(filePath: string, name: string, scope: ModelScope):
 function summarizeCodexProfile(filePath: string, name: string): ModelConfigSummary {
   const extension = extname(filePath).toLowerCase();
   if (extension === ".toml") {
-    return summarizeCodexToml(filePath, name, "profile", "profile");
+    return summarizeCodexToml(filePath, name, "profile", readCodexTomlAuthState(filePath));
   }
   if (extension !== ".json" && extension !== ".jsonc") {
     return {
@@ -395,6 +455,16 @@ function readCodexAuthState(): string {
       return "stored";
     }
     return Object.keys(parsed).length > 0 ? "stored" : "none";
+  } catch {
+    return "unreadable";
+  }
+}
+
+function readCodexTomlAuthState(filePath: string): string {
+  if (!existsSync(filePath)) return "none";
+  try {
+    const raw = readFileSync(filePath, "utf-8");
+    return /^\s*(experimental_bearer_token|OPENAI_API_KEY)\s*=\s*["'][^"']+["']/m.test(raw) ? "configured" : "none";
   } catch {
     return "unreadable";
   }

@@ -22,7 +22,7 @@ describe("codex provider profiles", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("creates a JSON profile and activates config plus auth", async () => {
+  it("creates a TOML profile and activates config plus auth", async () => {
     const {
       saveCodexProviderProfile,
       getCodexProviderProfile,
@@ -38,6 +38,8 @@ describe("codex provider profiles", () => {
     });
 
     expect(saved.name).toBe("deepseek");
+    expect(saved.filePath.endsWith("deepseek.toml")).toBe(true);
+    expect(readFileSync(join(root, ".starling", "settings", "codex", "deepseek.toml"), "utf-8")).toContain("experimental_bearer_token");
     expect(getCodexProviderProfile("deepseek")?.hasAuth).toBe(true);
     expect(getCodexProviderProfile("deepseek")?.hasConfig).toBe(true);
 
@@ -51,7 +53,7 @@ describe("codex provider profiles", () => {
     expect(readFileSync(join(root, ".codex", "config.toml"), "utf-8")).toContain("https://api.deepseek.com/v1");
   });
 
-  it("updates an existing JSON profile without dropping unrelated config fields", async () => {
+  it("updates an existing TOML profile without dropping unrelated config fields", async () => {
     const { saveCodexProviderProfile, readCodexProviderProfileFile } = await import("../src/lib/codexProvider.js");
 
     saveCodexProviderProfile("demo", {
@@ -74,4 +76,5 @@ describe("codex provider profiles", () => {
     expect(profile.config?.disable_response_storage).toBe(true);
     expect(profile.config?.model_reasoning_effort).toBe("high");
   });
+
 });

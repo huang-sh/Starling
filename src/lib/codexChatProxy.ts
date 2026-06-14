@@ -32,6 +32,14 @@ interface StoredResponse {
   messages: ChatMessage[];
 }
 
+interface ChatToolMetadata {
+  responseType: "function_call" | "custom_tool_call";
+  responseName: string;
+  applyPatchProxy?: ApplyPatchProxyKind;
+}
+
+type ApplyPatchProxyKind = "add_file" | "delete_file" | "update_file" | "replace_file" | "batch";
+
 const JSON_HEADERS = { "content-type": "application/json" };
 const SSE_HEADERS = {
   "content-type": "text/event-stream; charset=utf-8",
@@ -150,12 +158,12 @@ async function handleResponses(
   }
 
   if (chatRequest.stream || contentType.includes("text/event-stream")) {
-    await streamChatToResponses(upstream, res, chatRequest.model, context.history);
+    await streamChatToResponses(upstream, res, chatRequest.model, context.history, chatRequest.toolMetadata);
     return;
   }
 
   const chatResponse = await upstream.json();
-  const { response, storedMessages } = chatCompletionToResponse(chatResponse, chatRequest.model);
+  const { response, storedMessages } = chatCompletionToResponse(chatResponse, chatRequest.model, chatRequest.toolMetadata);
   if (typeof response.id === "string") {
     context.history.set(response.id, { messages: [...chatRequest.messages, ...storedMessages] });
   }
@@ -166,7 +174,7 @@ function responsesToChatRequest(
   body: Record<string, unknown>,
   defaultModel: string | undefined,
   history: Map<string, StoredResponse>
-): Record<string, unknown> & { model: string; messages: ChatMessage[]; stream: boolean } {
+): Record<string, unknown> & { model: string; messages: ChatMessage[]; stream: boolean; toolMetadata: Map<string, ChatToolMetadata> } {
   const model = stringValue(body.model) || defaultModel || "deepseek-v4-pro";
   const messages: ChatMessage[] = [];
 
@@ -179,13 +187,15 @@ function responsesToChatRequest(
   if (instructions) messages.push({ role: "system", content: instructions });
   messages.push(...responsesInputToChatMessages(body.input));
 
-  const result: Record<string, unknown> & { model: string; messages: ChatMessage[]; stream: boolean } = {
+  const result: Record<string, unknown> & { model: string; messages: ChatMessage[]; stream: boolean; toolMetadata: Map<string, ChatToolMetadata> } = {
     model,
     messages,
     stream: body.stream !== false,
+    toolMetadata: new Map(),
   };
 
-  const tools = responsesToolsToChatTools(body.tools);
+  const { tools, metadata } = responsesToolsToChatToolsWithMetadata(body.tools, messages);
+  result.toolMetadata = metadata;
   if (tools.length > 0) result.tools = tools;
   copyIfPresent(body, result, "temperature");
   copyIfPresent(body, result, "top_p");
@@ -309,22 +319,43 @@ function responsesContentToText(content: unknown): string {
 }
 
 export function responsesToolsToChatTools(tools: unknown): unknown[] {
-  if (!Array.isArray(tools)) return [];
+  return responsesToolsToChatToolsWithMetadata(tools).tools;
+}
+
+function responsesToolsToChatToolsWithMetadata(
+  tools: unknown,
+  messages: ChatMessage[] = []
+): { tools: unknown[]; metadata: Map<string, ChatToolMetadata> } {
+  if (!Array.isArray(tools)) return { tools: [], metadata: new Map() };
 
   const result: unknown[] = [];
+  const metadata = new Map<string, ChatToolMetadata>();
   const seen = new Set<string>();
+  const runningProcessIds = extractRunningProcessIds(messages);
 
-  const addFunctionTool = (name: string, tool: Record<string, unknown>, namespace?: string | null) => {
+  const addFunctionTool = (
+    name: string,
+    tool: Record<string, unknown>,
+    namespace?: string | null,
+    responseType: ChatToolMetadata["responseType"] = "function_call",
+    extraMetadata: Partial<ChatToolMetadata> = {}
+  ) => {
     const displayName = safeChatToolName(namespace ? `${namespace}_${name}` : name);
+    if (displayName === "write_stdin" && runningProcessIds.length === 0) return;
     if (seen.has(displayName)) return;
     seen.add(displayName);
+    metadata.set(displayName, {
+      responseType,
+      responseName: responseType === "custom_tool_call" ? name : displayName,
+      ...extraMetadata,
+    });
 
     result.push({
       type: "function",
       function: {
         name: displayName,
-        description: stringValue(tool.description) || "",
-        parameters: isRecord(tool.parameters) ? tool.parameters : { type: "object", properties: {} },
+        description: toolDescriptionForChat(displayName, tool, runningProcessIds),
+        parameters: toolParametersForChat(displayName, tool, runningProcessIds),
       },
     });
   };
@@ -374,26 +405,25 @@ export function responsesToolsToChatTools(tools: unknown): unknown[] {
     const name = stringValue(tool.name);
     if (!name) return;
     if (toolType === "custom") {
-      const displayName = safeChatToolName(namespace ? `${namespace}_${name}` : name);
-      if (seen.has(displayName)) return;
-      seen.add(displayName);
-      result.push({
-        type: "function",
-        function: {
-          name: displayName,
+      if (name === "apply_patch") {
+        addApplyPatchProxyTools(name, tool, namespace);
+        return;
+      }
+      addFunctionTool(
+        name,
+        {
           description: stringValue(tool.description) || "",
           parameters: {
             type: "object",
             properties: {
-              input: {
-                type: "string",
-                description: "Tool input",
-              },
+              input: { type: "string", description: "Tool input" },
             },
             required: ["input"],
           },
         },
-      });
+        namespace,
+        "custom_tool_call"
+      );
       return;
     }
 
@@ -406,7 +436,158 @@ export function responsesToolsToChatTools(tools: unknown): unknown[] {
     visitTool(tool);
   }
 
-  return result;
+  return { tools: result, metadata };
+
+  function addApplyPatchProxyTools(
+    name: string,
+    tool: Record<string, unknown>,
+    namespace: string | null
+  ) {
+    const baseDescription = stringValue(tool.description) || "Apply a source code patch.";
+    const addProxy = (suffix: ApplyPatchProxyKind, description: string, parameters: Record<string, unknown>) => {
+      addFunctionTool(
+        `${name}_${suffix}`,
+        {
+          description: `${baseDescription}\n\n${description}`,
+          parameters,
+        },
+        namespace,
+        "custom_tool_call",
+        {
+          responseName: name,
+          applyPatchProxy: suffix,
+        }
+      );
+    };
+
+    addProxy(
+      "add_file",
+      "Create one new file by providing a target path and full file content. Do not include patch '+' prefixes in content.",
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          path: { type: "string", description: "Target file path." },
+          content: { type: "string", description: "Full file content without patch '+' prefixes." },
+        },
+        required: ["path", "content"],
+      }
+    );
+    addProxy(
+      "delete_file",
+      "Delete one file by providing a target path.",
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          path: { type: "string", description: "Target file path." },
+        },
+        required: ["path"],
+      }
+    );
+    addProxy(
+      "update_file",
+      "Edit one existing file with structured hunks.",
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          path: { type: "string", description: "Target file path." },
+          move_to: { type: "string", description: "Optional destination path for move operations." },
+          hunks: applyPatchHunksSchema(),
+        },
+        required: ["path", "hunks"],
+      }
+    );
+    addProxy(
+      "replace_file",
+      "Replace one existing file by providing a target path and full new file content.",
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          path: { type: "string", description: "Target file path." },
+          content: { type: "string", description: "Full replacement content." },
+        },
+        required: ["path", "content"],
+      }
+    );
+    addProxy(
+      "batch",
+      "Edit files by providing ordered structured patch operations.",
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          operations: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                type: { type: "string", enum: ["add_file", "delete_file", "update_file", "replace_file"] },
+                path: { type: "string" },
+                move_to: { type: "string", description: "Optional destination path for update_file move operations." },
+                content: { type: "string", description: "Full content for add_file or replace_file." },
+                hunks: applyPatchHunksSchema(),
+              },
+              required: ["type", "path"],
+            },
+          },
+        },
+        required: ["operations"],
+      }
+    );
+  }
+}
+
+function extractRunningProcessIds(messages: ChatMessage[]): number[] {
+  const ids = new Set<number>();
+  for (const message of messages) {
+    if (typeof message.content !== "string") continue;
+    for (const match of message.content.matchAll(/Process running with session ID\s+(\d+)/g)) {
+      const id = Number(match[1]);
+      if (Number.isFinite(id)) ids.add(id);
+    }
+  }
+  return [...ids].sort((a, b) => a - b);
+}
+
+function toolDescriptionForChat(
+  displayName: string,
+  tool: Record<string, unknown>,
+  runningProcessIds: number[]
+): string {
+  const description = stringValue(tool.description) || "";
+  if (displayName !== "write_stdin") return description;
+  return [
+    description,
+    `Only use this tool to poll or send input to a process that is still running from a previous exec_command result. Valid session_id values for this request: ${runningProcessIds.join(", ")}.`,
+    "Do not use write_stdin to create or edit files; use exec_command or apply_patch instead.",
+  ].filter(Boolean).join("\n");
+}
+
+function toolParametersForChat(
+  displayName: string,
+  tool: Record<string, unknown>,
+  runningProcessIds: number[]
+): Record<string, unknown> {
+  const parameters = isRecord(tool.parameters)
+    ? JSON.parse(JSON.stringify(tool.parameters)) as Record<string, unknown>
+    : { type: "object", properties: {} };
+  if (displayName !== "write_stdin") return parameters;
+
+  if (!isRecord(parameters.properties)) {
+    parameters.properties = {};
+  }
+  const properties = parameters.properties as Record<string, unknown>;
+  const sessionId: Record<string, unknown> = isRecord(properties.session_id)
+    ? { ...properties.session_id }
+    : { type: "integer" };
+  sessionId.enum = runningProcessIds;
+  properties.session_id = sessionId;
+  parameters.properties = properties;
+  return parameters;
 }
 
 function safeChatToolName(value: string): string {
@@ -422,7 +603,8 @@ async function streamChatToResponses(
   upstream: Response,
   res: ServerResponse,
   model: string,
-  history: Map<string, StoredResponse>
+  history: Map<string, StoredResponse>,
+  toolMetadata: Map<string, ChatToolMetadata>
 ): Promise<void> {
   res.writeHead(200, SSE_HEADERS);
 
@@ -450,13 +632,13 @@ async function streamChatToResponses(
       const data = parseSseData(block);
       if (!data || data === "[DONE]") continue;
       const chunk = JSON.parse(data) as unknown;
-      for (const event of chatChunkToResponseEvents(chunk, state)) {
+      for (const event of chatChunkToResponseEvents(chunk, state, toolMetadata)) {
         writeSse(res, event.event, event.data);
       }
     }
   }
 
-  const completedOutput = finalizeResponseState(state);
+  const completedOutput = finalizeResponseState(state, toolMetadata);
   for (const event of completedOutput.events) {
     writeSse(res, event.event, event.data);
   }
@@ -472,7 +654,7 @@ async function streamChatToResponses(
       type: "function",
       function: {
         name: tool.name,
-        arguments: tool.arguments,
+        arguments: toolArgumentsForChatHistory(tool, toolMetadata.get(tool.name)),
       },
     }));
   if (toolCalls.length > 0) assistantMessage.tool_calls = toolCalls;
@@ -481,7 +663,8 @@ async function streamChatToResponses(
 
 function chatChunkToResponseEvents(
   chunk: unknown,
-  state: ReturnType<typeof createResponseState>
+  state: ReturnType<typeof createResponseState>,
+  toolMetadata: Map<string, ChatToolMetadata>
 ): Array<{ event: string; data: unknown }> {
   if (!isRecord(chunk)) return [];
   const model = stringValue(chunk.model);
@@ -517,7 +700,7 @@ function chatChunkToResponseEvents(
       if (name) current.name = name;
       if (args) current.arguments += args;
       state.toolItems.set(index, current);
-      events.push(...pushToolDelta(state, current, args || ""));
+      events.push(...pushToolDelta(state, current, args || "", toolMetadata));
     }
   }
 
@@ -592,45 +775,291 @@ function pushToolDelta(
     done: boolean;
     outputIndex: number;
   },
-  delta: string
+  delta: string,
+  toolMetadata: Map<string, ChatToolMetadata>
 ): Array<{ event: string; data: unknown }> {
   const outputIndex = current.outputIndex < 0 ? state.nextOutputIndex++ : current.outputIndex;
   current.outputIndex = outputIndex;
 
   const events: Array<{ event: string; data: unknown }> = [];
+  const metadata = toolMetadata.get(current.name) || inferApplyPatchMetadataFromToolName(current.name);
   if (!current.started) {
     current.started = true;
-    events.push({
-      event: "response.output_item.added",
-      data: {
-        type: "response.output_item.added",
-        output_index: outputIndex,
-        item: {
+    const item = metadata?.responseType === "custom_tool_call"
+      ? {
+          id: current.itemId,
+          type: "custom_tool_call",
+          status: "in_progress",
+          call_id: current.callId,
+          name: metadata.responseName,
+          input: "",
+        }
+      : {
           id: current.itemId,
           type: "function_call",
           status: "in_progress",
           call_id: current.callId,
           name: current.name,
           arguments: "",
-        },
-      },
-    });
-  }
-  if (delta) {
+        };
     events.push({
-      event: "response.function_call_arguments.delta",
+      event: "response.output_item.added",
       data: {
-        type: "response.function_call_arguments.delta",
-        item_id: current.itemId,
+        type: "response.output_item.added",
         output_index: outputIndex,
-        delta,
+        item,
       },
     });
   }
   return events;
 }
 
-function finalizeResponseState(state: ReturnType<typeof createResponseState>): {
+function responseToolItem(
+  tool: { itemId: string; callId: string; name: string; arguments: string },
+  metadata: ChatToolMetadata | undefined,
+  status: "in_progress" | "completed"
+): Record<string, unknown> {
+  const effectiveMetadata = metadata || inferApplyPatchMetadataFromToolName(tool.name);
+  if (effectiveMetadata?.responseType === "custom_tool_call") {
+    return {
+      id: tool.itemId,
+      type: "custom_tool_call",
+      status,
+      call_id: tool.callId,
+      name: effectiveMetadata.responseName,
+      input: status === "completed" ? customToolInputFromChatArguments(tool.arguments, effectiveMetadata) : "",
+    };
+  }
+
+  return {
+    id: tool.itemId,
+    type: "function_call",
+    status,
+    call_id: tool.callId,
+    name: tool.name,
+    arguments: status === "completed" ? functionToolArgumentsFromChatArguments(tool.arguments) : "",
+  };
+}
+
+function inferApplyPatchMetadataFromToolName(name: string): ChatToolMetadata | undefined {
+  if (name === "apply_patch") {
+    return { responseType: "custom_tool_call", responseName: "apply_patch" };
+  }
+  const suffix = name.startsWith("apply_patch_") ? name.slice("apply_patch_".length) : "";
+  if (!["add_file", "delete_file", "update_file", "replace_file", "batch"].includes(suffix)) {
+    return undefined;
+  }
+  return {
+    responseType: "custom_tool_call",
+    responseName: "apply_patch",
+    applyPatchProxy: suffix as ApplyPatchProxyKind,
+  };
+}
+
+function customToolInputFromChatArguments(args: string, metadata?: ChatToolMetadata): string {
+  const trimmed = args.trim();
+  if (!trimmed) return "";
+  if (metadata?.applyPatchProxy) {
+    return applyPatchProxyInputFromChatArguments(trimmed, metadata.applyPatchProxy);
+  }
+  let input = args;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (isRecord(parsed) && typeof parsed.input === "string") {
+      input = parsed.input;
+    }
+  } catch {
+    if (trimmed.includes("*** Begin Patch")) {
+      return normalizeCustomToolInput(trimmed);
+    }
+    // Some chat models return freeform custom tool input directly.
+  }
+  return normalizeCustomToolInput(input);
+}
+
+function functionToolArgumentsFromChatArguments(args: string): string {
+  const trimmed = args.trim();
+  if (!trimmed) return "{}";
+  try {
+    JSON.parse(trimmed);
+    return trimmed;
+  } catch {
+    return JSON.stringify({
+      _starling_invalid_arguments: trimmed,
+    });
+  }
+}
+
+function toolArgumentsForChatHistory(
+  tool: { name?: string; arguments: string },
+  metadata: ChatToolMetadata | undefined
+): string {
+  const effectiveMetadata = metadata || (tool.name ? inferApplyPatchMetadataFromToolName(tool.name) : undefined);
+  return effectiveMetadata?.responseType === "custom_tool_call"
+    ? JSON.stringify({ input: customToolInputFromChatArguments(tool.arguments, effectiveMetadata) })
+    : functionToolArgumentsFromChatArguments(tool.arguments);
+}
+
+function normalizeCustomToolInput(input: string): string {
+  const withoutFence = stripMarkdownFence(input);
+  if (!withoutFence.includes("*** Begin Patch")) return withoutFence;
+  return normalizeApplyPatchInput(withoutFence);
+}
+
+function stripMarkdownFence(input: string): string {
+  const trimmed = input.trim();
+  const match = trimmed.match(/^```(?:\w+)?\s*\n([\s\S]*?)\n```$/);
+  return match ? match[1].trim() : input;
+}
+
+function normalizeApplyPatchInput(input: string): string {
+  const begin = input.indexOf("*** Begin Patch");
+  if (begin < 0) return input;
+
+  const fromBegin = input.slice(begin);
+  const endMarker = "*** End Patch";
+  const end = fromBegin.indexOf(endMarker);
+  if (end < 0) return fromBegin.trimEnd();
+  return fromBegin.slice(0, end + endMarker.length);
+}
+
+function applyPatchHunksSchema(): Record<string, unknown> {
+  return {
+    type: "array",
+    description: "Structured update hunks.",
+    items: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        context: { type: "string", description: "Optional @@ context header text." },
+        lines: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              op: { type: "string", enum: ["context", "add", "remove"] },
+              text: { type: "string" },
+            },
+            required: ["op", "text"],
+          },
+        },
+      },
+      required: ["lines"],
+    },
+  };
+}
+
+function applyPatchProxyInputFromChatArguments(args: string, kind: ApplyPatchProxyKind): string {
+  if (args.includes("*** Begin Patch")) return normalizeApplyPatchInput(args);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(args);
+  } catch {
+    return args;
+  }
+
+  const operations = kind === "batch"
+    ? applyPatchOperationsFromBatch(parsed)
+    : [applyPatchOperationFromRecord(kind, parsed)];
+  if (!operations.length || operations.some((operation) => !operation)) {
+    return args;
+  }
+
+  return formatApplyPatchOperations(operations as ApplyPatchOperation[]);
+}
+
+interface ApplyPatchOperation {
+  type: "add_file" | "delete_file" | "update_file" | "replace_file";
+  path: string;
+  moveTo?: string;
+  content?: string;
+  hunks?: unknown[];
+}
+
+function applyPatchOperationsFromBatch(parsed: unknown): Array<ApplyPatchOperation | null> {
+  if (!isRecord(parsed) || !Array.isArray(parsed.operations)) return [];
+  return parsed.operations.map((operation) => {
+    if (!isRecord(operation)) return null;
+    const type = stringValue(operation.type) as ApplyPatchOperation["type"];
+    if (!["add_file", "delete_file", "update_file", "replace_file"].includes(type)) return null;
+    return applyPatchOperationFromRecord(type, operation);
+  });
+}
+
+function applyPatchOperationFromRecord(kind: ApplyPatchProxyKind, parsed: unknown): ApplyPatchOperation | null {
+  if (kind === "batch" || !isRecord(parsed)) return null;
+  const path = stringValue(parsed.path);
+  if (!path) return null;
+  return {
+    type: kind,
+    path,
+    moveTo: stringValue(parsed.move_to) || stringValue(parsed.moveTo) || undefined,
+    content: stringValue(parsed.content) ?? undefined,
+    hunks: Array.isArray(parsed.hunks) ? parsed.hunks : undefined,
+  };
+}
+
+function formatApplyPatchOperations(operations: ApplyPatchOperation[]): string {
+  const lines = ["*** Begin Patch"];
+  for (const operation of operations) {
+    if (operation.type === "add_file") {
+      lines.push(`*** Add File: ${operation.path}`);
+      lines.push(...plusPrefixedLines(operation.content || ""));
+      continue;
+    }
+    if (operation.type === "delete_file") {
+      lines.push(`*** Delete File: ${operation.path}`);
+      continue;
+    }
+    if (operation.type === "replace_file") {
+      lines.push(`*** Delete File: ${operation.path}`);
+      lines.push(`*** Add File: ${operation.path}`);
+      lines.push(...plusPrefixedLines(operation.content || ""));
+      continue;
+    }
+    lines.push(`*** Update File: ${operation.path}`);
+    if (operation.moveTo) lines.push(`*** Move to: ${operation.moveTo}`);
+    lines.push(...formatApplyPatchHunks(operation.hunks || []));
+  }
+  lines.push("*** End Patch");
+  return lines.join("\n");
+}
+
+function plusPrefixedLines(content: string): string[] {
+  const withoutTrailingNewline = content.endsWith("\n") ? content.slice(0, -1) : content;
+  if (!withoutTrailingNewline) return ["+"];
+  return withoutTrailingNewline.split("\n").map((line) => `+${line}`);
+}
+
+function formatApplyPatchHunks(hunks: unknown[]): string[] {
+  const lines: string[] = [];
+  for (const hunk of hunks) {
+    if (!isRecord(hunk)) continue;
+    const context = stringValue(hunk.context);
+    lines.push(context ? (context.startsWith("@@") ? context : `@@ ${context}`) : "@@");
+    const hunkLines = Array.isArray(hunk.lines) ? hunk.lines : [];
+    for (const line of hunkLines) {
+      if (!isRecord(line)) continue;
+      const op = stringValue(line.op);
+      const text = stringValue(line.text) ?? "";
+      if (op === "add") {
+        lines.push(`+${text}`);
+      } else if (op === "remove") {
+        lines.push(`-${text}`);
+      } else {
+        lines.push(` ${text}`);
+      }
+    }
+  }
+  return lines;
+}
+
+function finalizeResponseState(
+  state: ReturnType<typeof createResponseState>,
+  toolMetadata: Map<string, ChatToolMetadata>
+): {
   events: Array<{ event: string; data: unknown }>;
   items: unknown[];
 } {
@@ -714,6 +1143,7 @@ function finalizeResponseState(state: ReturnType<typeof createResponseState>): {
   for (const tool of state.toolItems.values()) {
     const outputIndex = tool.outputIndex < 0 ? state.nextOutputIndex++ : tool.outputIndex;
     tool.outputIndex = outputIndex;
+    const metadata = toolMetadata.get(tool.name);
     if (!tool.started) {
       tool.started = true;
       events.push({
@@ -721,41 +1151,39 @@ function finalizeResponseState(state: ReturnType<typeof createResponseState>): {
         data: {
           type: "response.output_item.added",
           output_index: outputIndex,
-          item: {
-            id: tool.itemId,
-            type: "function_call",
-            status: "in_progress",
-            call_id: tool.callId,
-            name: tool.name,
-            arguments: "",
-          },
+          item: responseToolItem(tool, metadata, "in_progress"),
         },
       });
     }
-    const item = {
-      id: tool.itemId,
-      type: "function_call",
-      status: "completed",
-      call_id: tool.callId,
-      name: tool.name,
-      arguments: tool.arguments,
-    };
-    events.push({
-      event: "response.function_call_arguments.done",
-      data: {
-        type: "response.function_call_arguments.done",
-        item_id: tool.itemId,
-        output_index: outputIndex,
-        arguments: tool.arguments,
-      },
-    });
-    events.push({
-        event: "response.output_item.done",
-        data: { type: "response.output_item.done", output_index: outputIndex, item },
+    const item = responseToolItem(tool, metadata, "completed");
+    if (metadata?.responseType !== "custom_tool_call") {
+      const argumentsJson = functionToolArgumentsFromChatArguments(tool.arguments);
+      events.push({
+        event: "response.function_call_arguments.delta",
+        data: {
+          type: "response.function_call_arguments.delta",
+          item_id: tool.itemId,
+          output_index: outputIndex,
+          delta: argumentsJson,
+        },
       });
-      items.push(item);
-      state.outputItems.set(outputIndex, item);
+      events.push({
+        event: "response.function_call_arguments.done",
+        data: {
+          type: "response.function_call_arguments.done",
+          item_id: tool.itemId,
+          output_index: outputIndex,
+          arguments: argumentsJson,
+        },
+      });
     }
+    events.push({
+      event: "response.output_item.done",
+      data: { type: "response.output_item.done", output_index: outputIndex, item },
+    });
+    items.push(item);
+    state.outputItems.set(outputIndex, item);
+  }
 
   const orderedItems = [...state.outputItems.entries()]
     .sort((a, b) => a[0] - b[0])
@@ -808,7 +1236,11 @@ function pushReasoningDelta(
   return events;
 }
 
-function chatCompletionToResponse(chatResponse: unknown, defaultModel: string): { response: Record<string, unknown>; storedMessages: ChatMessage[] } {
+function chatCompletionToResponse(
+  chatResponse: unknown,
+  defaultModel: string,
+  toolMetadata: Map<string, ChatToolMetadata>
+): { response: Record<string, unknown>; storedMessages: ChatMessage[] } {
   const responseId = isRecord(chatResponse) && stringValue(chatResponse.id) ? `resp_${stringValue(chatResponse.id)}` : `resp_starling_${randomUUID().replace(/-/g, "")}`;
   const choice = isRecord(chatResponse) && Array.isArray(chatResponse.choices) && isRecord(chatResponse.choices[0]) ? chatResponse.choices[0] : {};
   const message = isRecord(choice.message) ? choice.message : {};
@@ -839,14 +1271,13 @@ function chatCompletionToResponse(chatResponse: unknown, defaultModel: string): 
   for (const tool of toolCalls) {
     if (!isRecord(tool)) continue;
     const fn = isRecord(tool.function) ? tool.function : {};
-    output.push({
-      id: `fc_${randomUUID().replace(/-/g, "")}`,
-      type: "function_call",
-      status: "completed",
-      call_id: stringValue(tool.id) || `call_${randomUUID().replace(/-/g, "")}`,
-      name: stringValue(fn.name) || "",
+    const name = stringValue(fn.name) || "";
+    output.push(responseToolItem({
+      itemId: `fc_${randomUUID().replace(/-/g, "")}`,
+      callId: stringValue(tool.id) || `call_${randomUUID().replace(/-/g, "")}`,
+      name,
       arguments: stringValue(fn.arguments) || "",
-    });
+    }, toolMetadata.get(name), "completed"));
   }
   const response = responseEnvelope(
     {

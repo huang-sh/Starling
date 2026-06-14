@@ -63,6 +63,7 @@ const RUN_SESSION_DETECT_INTERVAL_MS = 300;
 const RUN_SESSION_DETECT_FULL_SCAN_THRESHOLD_MS = 200;
 const RUN_SESSION_EXIT_SETTLE_MS = 200;
 const RUN_FAST_FAILURE_SKIP_SCAN_MS = 2000;
+const RUN_PIN_ATTEMPT_DRAIN_TIMEOUT_MS = 1500;
 
 export function registerRunCommand(program: Command): void {
   const run = new Command("run")
@@ -127,6 +128,7 @@ export function registerRunCommand(program: Command): void {
 
       let catalogPinned = false;
       let agentClosed = false;
+      let stopAutoPinWatcher = false;
       let hintedSessionId: string | undefined;
       let pinAttempt: Promise<void> | null = null;
       const startAutoPinWatcher = async () => {
@@ -136,7 +138,7 @@ export function registerRunCommand(program: Command): void {
         pinAttempt = (async () => {
           const startedTime = Date.parse(startedAt);
           let attemptsAfterClose = 0;
-          for (let i = 0; ; i++) {
+          for (let i = 0; !stopAutoPinWatcher; i++) {
             const sessionId = hintedSessionId ?? readRunHookSessionId(hookRun?.eventsPath ?? codexConfig?.eventsPath);
             if (!sessionId) {
               if (provider === "codex") {
@@ -148,7 +150,7 @@ export function registerRunCommand(program: Command): void {
                   return;
                 }
               }
-              if (agentClosed) return;
+              if (agentClosed || stopAutoPinWatcher) return;
               await sleep(250);
               continue;
             }
@@ -162,7 +164,7 @@ export function registerRunCommand(program: Command): void {
               catalogPinned = true;
               return;
             }
-            if (agentClosed) {
+            if (agentClosed || stopAutoPinWatcher) {
               attemptsAfterClose++;
               if (attemptsAfterClose >= 20) break;
             }
@@ -298,7 +300,8 @@ export function registerRunCommand(program: Command): void {
       updateSessionIndexInBackground(newSessionMeta);
 
       if (pinAttempt) {
-        await pinAttempt;
+        stopAutoPinWatcher = true;
+        await drainPinAttempt(pinAttempt);
       }
 
       if (exitCode !== 0) {
@@ -310,6 +313,13 @@ export function registerRunCommand(program: Command): void {
     });
 
   program.addCommand(run);
+}
+
+async function drainPinAttempt(pinAttempt: Promise<void>): Promise<void> {
+  await Promise.race([
+    pinAttempt,
+    sleep(RUN_PIN_ATTEMPT_DRAIN_TIMEOUT_MS),
+  ]);
 }
 
 function updateSessionIndexInBackground(session: SessionMeta): void {
@@ -447,12 +457,8 @@ async function createCodexRunConfig(configPath: string | null): Promise<CodexRun
 
   const ext = extname(configPath).toLowerCase();
   if (ext === ".toml") {
-    const profileName = `starling-run-${randomUUID()}`;
-    const profilePath = join(DEFAULT_CODEX_HOME, `${profileName}.config.toml`);
-    ensureDir(profilePath);
-    writeFileSync(profilePath, readFileSync(configPath, "utf-8"), "utf-8");
-    chmodSync(profilePath, 0o600);
-    return { args: ["--profile", profileName], cleanupPaths: [profilePath] };
+    const profile = readCodexTomlProfileForRun(configPath);
+    return createCodexRunConfigFromProfile(profile);
   }
 
   if (ext === ".json" || ext === ".jsonc") {
@@ -576,7 +582,7 @@ function syncCodexProfileProjectTrustFromRunConfig(
 ): void {
   if (!sourceConfigPath || !runConfig) return;
   const sourceExt = extname(sourceConfigPath).toLowerCase();
-  if (sourceExt !== ".json" && sourceExt !== ".jsonc") return;
+  if (sourceExt !== ".json" && sourceExt !== ".jsonc" && sourceExt !== ".toml") return;
 
   const trustedProjects = new Set<string>();
   for (const path of runConfig.cleanupPaths) {
@@ -586,6 +592,11 @@ function syncCodexProfileProjectTrustFromRunConfig(
     }
   }
   if (trustedProjects.size === 0) return;
+
+  if (sourceExt === ".toml") {
+    syncCodexTomlProjectTrust(sourceConfigPath, trustedProjects);
+    return;
+  }
 
   try {
     const raw = readFileSync(sourceConfigPath, "utf-8");
@@ -611,6 +622,61 @@ function syncCodexProfileProjectTrustFromRunConfig(
   } catch (error) {
     console.error(chalk.yellow(`Could not sync Codex project trust to ${sourceConfigPath}: ${String(error)}`));
   }
+}
+
+function syncCodexTomlProjectTrust(sourceConfigPath: string, trustedProjects: Set<string>): void {
+  try {
+    let raw = readFileSync(sourceConfigPath, "utf-8");
+    let changed = false;
+
+    for (const projectPath of trustedProjects) {
+      const updated = upsertCodexTomlProjectTrust(raw, projectPath);
+      if (updated !== raw) {
+        raw = updated;
+        changed = true;
+      }
+    }
+
+    if (changed) writeFileSync(sourceConfigPath, raw.endsWith("\n") ? raw : `${raw}\n`, "utf-8");
+  } catch (error) {
+    console.error(chalk.yellow(`Could not sync Codex project trust to ${sourceConfigPath}: ${String(error)}`));
+  }
+}
+
+function upsertCodexTomlProjectTrust(raw: string, projectPath: string): string {
+  const header = `[projects.${JSON.stringify(projectPath)}]`;
+  const lines = raw.split(/\r?\n/);
+  const headerIndex = lines.findIndex((line) => line.trim() === header);
+
+  if (headerIndex < 0) {
+    return `${raw.trimEnd()}\n\n${header}\ntrust_level = "trusted"\n`;
+  }
+
+  let endIndex = lines.length;
+  for (let index = headerIndex + 1; index < lines.length; index += 1) {
+    if (/^\s*\[/.test(lines[index])) {
+      endIndex = index;
+      break;
+    }
+  }
+
+  let hasTrust = false;
+  const nextLines = [...lines];
+  for (let index = endIndex - 1; index > headerIndex; index -= 1) {
+    if (!/^\s*trust_level\s*=\s*["']trusted["']\s*(?:#.*)?$/.test(nextLines[index])) continue;
+    if (hasTrust) {
+      nextLines.splice(index, 1);
+      endIndex -= 1;
+      continue;
+    }
+    hasTrust = true;
+  }
+
+  if (!hasTrust) {
+    nextLines.splice(endIndex, 0, "trust_level = \"trusted\"");
+  }
+
+  return nextLines.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 
 function readTrustedProjectsFromCodexToml(filePath: string): string[] {
@@ -676,6 +742,35 @@ function readCodexJsonProfileForRun(configPath: string, allowComments: boolean):
     console.error(chalk.gray(String(error)));
     process.exit(1);
   }
+}
+
+function readCodexTomlProfileForRun(configPath: string): CodexRunProfile {
+  try {
+    const configText = readFileSync(configPath, "utf-8");
+    const config = parseSimpleToml(configText);
+    const auth = resolveCodexTomlAuth(config);
+    const profile: Record<string, unknown> = { config };
+    const chatProxy = resolveCodexChatProxySpec(profile, auth);
+    const env = chatProxy ? {} : resolveCodexProfileEnv(profile, auth, configText);
+    return {
+      inlineConfig: null,
+      configText: configText.trim() ? (configText.endsWith("\n") ? configText : `${configText}\n`) : null,
+      env,
+      chatProxy,
+    };
+  } catch (error) {
+    console.error(chalk.red(`Could not parse Codex config TOML: ${configPath}`));
+    console.error(chalk.gray(String(error)));
+    process.exit(1);
+  }
+}
+
+function resolveCodexTomlAuth(config: Record<string, unknown>): Record<string, unknown> | null {
+  const providerName = resolveCodexModelProviderName(config);
+  const providers = isRecord(config.model_providers) ? config.model_providers : {};
+  const providerConfig = providerName && isRecord(providers[providerName]) ? providers[providerName] as Record<string, unknown> : {};
+  const token = stringValue(providerConfig.experimental_bearer_token) || stringValue(config.OPENAI_API_KEY);
+  return token ? { OPENAI_API_KEY: token } : null;
 }
 
 function resolveCodexProfileConfigText(profile: Record<string, unknown>): string | null {
@@ -878,6 +973,82 @@ function stripJsonComments(value: string): string {
   return value.replace(/^\s*\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
 }
 
+function parseSimpleToml(raw: string): Record<string, unknown> {
+  const root: Record<string, unknown> = {};
+  let current = root;
+
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    const section = trimmed.match(/^\[([^\]]+)\]$/);
+    if (section) {
+      current = root;
+      for (const part of splitTomlPath(section[1])) {
+        const existing = current[part];
+        if (!isRecord(existing)) current[part] = {};
+        current = current[part] as Record<string, unknown>;
+      }
+      continue;
+    }
+
+    const kv = trimmed.match(/^([A-Za-z0-9_.-]+|"(?:\\.|[^"])+")\s*=\s*(.+?)\s*(?:#.*)?$/);
+    if (!kv) continue;
+    current[unquoteTomlKey(kv[1])] = parseTomlScalar(kv[2].trim());
+  }
+
+  return root;
+}
+
+function splitTomlPath(value: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let inQuote = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === '"' && value[index - 1] !== "\\") {
+      inQuote = !inQuote;
+      current += char;
+      continue;
+    }
+    if (char === "." && !inQuote) {
+      parts.push(unquoteTomlKey(current.trim()));
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) parts.push(unquoteTomlKey(current.trim()));
+  return parts;
+}
+
+function unquoteTomlKey(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      return JSON.parse(trimmed) as string;
+    } catch {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+
+function parseTomlScalar(value: string): unknown {
+  if (value.startsWith('"') && value.endsWith('"')) {
+    try {
+      return JSON.parse(value) as string;
+    } catch {
+      return value.slice(1, -1);
+    }
+  }
+  if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1);
+  if (value === "true") return true;
+  if (value === "false") return false;
+  if (/^-?\d+(?:\.\d+)?$/.test(value)) return Number(value);
+  return value;
+}
+
 function flattenCodexConfig(
   value: Record<string, unknown>,
   prefix = ""
@@ -932,22 +1103,31 @@ function toTomlKey(key: string): string {
   return /^\w+$/.test(key) ? key : JSON.stringify(key);
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function serializeTomlObject(value: Record<string, unknown>, prefix: string[], lines: string[]): void {
+  for (const [key, child] of Object.entries(value)) {
+    if (typeof child === "undefined" || isRecord(child)) continue;
+    lines.push(`${toTomlKey(key)} = ${toTomlValue(child)}`);
+  }
+
   for (const [key, child] of Object.entries(value)) {
     if (typeof child === "undefined") continue;
     if (isRecord(child)) {
       const nextPath = [...prefix, key];
-      lines.push("");
-      lines.push(`[${[...nextPath].map(toTomlKey).join(".")}]`);
+      if (hasDirectTomlValues(child)) {
+        lines.push("");
+        lines.push(`[${[...nextPath].map(toTomlKey).join(".")}]`);
+      }
       serializeTomlObject(child, nextPath, lines);
-      continue;
     }
-    if (Array.isArray(child)) {
-      lines.push(`${toTomlKey(key)} = ${toTomlValue(child)}`);
-      continue;
-    }
-    lines.push(`${toTomlKey(key)} = ${toTomlValue(child)}`);
   }
+}
+
+function hasDirectTomlValues(value: Record<string, unknown>): boolean {
+  return Object.values(value).some((child) => typeof child !== "undefined" && !isRecord(child));
 }
 
 function convertCodexJsonToToml(value: Record<string, unknown>): string {
@@ -1195,10 +1375,24 @@ async function runAgent(
     });
 
     let terminalInterrupted = false;
+    let settled = false;
 
     const onSigInt = () => {
       terminalInterrupted = true;
       child.kill("SIGINT");
+    };
+
+    const cleanupListeners = () => {
+      if (options?.preserveSignals) {
+        process.off("SIGINT", onSigInt);
+      }
+    };
+
+    const settle = (exitCode: number) => {
+      if (settled) return;
+      settled = true;
+      cleanupListeners();
+      resolvePromise({ exitCode });
     };
 
     if (options?.preserveSignals) {
@@ -1206,20 +1400,24 @@ async function runAgent(
     }
 
     child.on("error", (err) => {
-      if (options?.preserveSignals) {
-        process.off("SIGINT", onSigInt);
-      }
+      cleanupListeners();
       reject(err);
     });
 
-    child.on("close", (code) => {
-      if (options?.preserveSignals) {
-        process.off("SIGINT", onSigInt);
-      }
+    child.on("exit", (code) => {
       if (terminalInterrupted) {
-        return resolvePromise({ exitCode: 130 });
+        settle(130);
+        return;
       }
-      resolvePromise({ exitCode: code ?? 0 });
+      settle(code ?? 0);
+    });
+
+    child.on("close", (code) => {
+      if (terminalInterrupted) {
+        settle(130);
+        return;
+      }
+      settle(code ?? 0);
     });
   });
 }
@@ -1283,6 +1481,18 @@ async function detectSessionStartedAfterRun(
     );
     if (hintedSession) {
       return hintedSession;
+    }
+  }
+
+  if (provider === "claude" && normalizedCwd) {
+    const projectMatch = await detectSessionInCurrentClaudeProject(
+      startedTime,
+      beforeRun,
+      normalizedCwd,
+      beforeRunProjectFiles
+    );
+    if (projectMatch) {
+      return projectMatch;
     }
   }
 

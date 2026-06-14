@@ -1980,7 +1980,37 @@ function hasKnownConfigExtension(fileName, extensions) {
 // src/lib/codexProvider.ts
 var CODEX_PROVIDER_HISTORY_PATH = join5(DEFAULT_STARLING_HOME, "codex-provider.json");
 var CODEX_PROVIDER_EXTENSIONS = [".toml", ".json", ".jsonc"];
+function getCodexProviderProfile(profileName) {
+  migrateCodexJsonProfilesToToml();
+  const sourcePath = resolveCodexConfigPath(profileName);
+  if (!sourcePath) return null;
+  const extension = extname2(sourcePath).toLowerCase();
+  const name = basename(sourcePath, extension);
+  const parsed = inspectCodexProfile(sourcePath);
+  return {
+    name,
+    filePath: sourcePath,
+    extension,
+    hasAuth: parsed.hasAuth,
+    hasConfig: parsed.hasConfig
+  };
+}
+function saveCodexProviderProfile(profileName, patch) {
+  migrateCodexJsonProfilesToToml();
+  const safeName = normalizeProfileName(profileName);
+  const existingPath = resolveCodexConfigPath(safeName);
+  const targetPath = existingPath ?? join5(DEFAULT_CODEX_SETTINGS_DIR, `${safeName}.toml`);
+  const existing = existsSync4(targetPath) ? parseCodexProfile(targetPath) : { auth: null, config: null, configObject: null };
+  const auth = mergeAuthPatch(existing.auth, patch);
+  const config = mergeConfigPatch(existing.configObject, patch);
+  if ((!auth || Object.keys(auth).length === 0) && (!config || Object.keys(config).length === 0)) {
+    throw new Error("Codex provider profile needs at least auth or config content.");
+  }
+  writeCodexProfileToml(targetPath, auth, config);
+  return getCodexProviderProfile(safeName);
+}
 function resolveCodexConfigPath(nameOrPath) {
+  migrateCodexJsonProfilesToToml();
   if (!nameOrPath) return null;
   if (isAbsolute(nameOrPath) || existsSync4(nameOrPath)) {
     if (!existsSync4(nameOrPath)) {
@@ -1996,6 +2026,348 @@ function resolveCodexConfigPath(nameOrPath) {
     if (existsSync4(candidate)) return candidate;
   }
   return null;
+}
+function inspectCodexProfile(filePath) {
+  const extension = extname2(filePath).toLowerCase();
+  if (extension === ".toml") {
+    const parsed = parseCodexTomlProfile(filePath);
+    return {
+      filePath,
+      hasConfig: true,
+      hasAuth: parsed.auth !== null
+    };
+  }
+  if (extension === ".json" || extension === ".jsonc") {
+    const parsed = parseCodexJsonProfile(filePath, extension === ".jsonc");
+    return {
+      filePath,
+      hasConfig: typeof parsed.config === "string" && parsed.config.trim().length > 0,
+      hasAuth: parsed.auth !== null
+    };
+  }
+  return { filePath, hasConfig: false, hasAuth: false };
+}
+function migrateCodexJsonProfilesToToml() {
+  if (!existsSync4(DEFAULT_CODEX_SETTINGS_DIR)) return [];
+  const migrated = [];
+  const entries = readdirSync3(DEFAULT_CODEX_SETTINGS_DIR, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const sourcePath = join5(DEFAULT_CODEX_SETTINGS_DIR, entry.name);
+    const extension = extname2(sourcePath).toLowerCase();
+    if (extension !== ".json" && extension !== ".jsonc") continue;
+    const name = entry.name.slice(0, entry.name.length - extension.length);
+    const targetPath = join5(DEFAULT_CODEX_SETTINGS_DIR, `${name}.toml`);
+    const backupPath = `${sourcePath}.bak`;
+    try {
+      if (!existsSync4(targetPath)) {
+        const parsed = parseCodexJsonProfile(sourcePath, extension === ".jsonc");
+        writeCodexProfileToml(targetPath, parsed.auth, parsed.configObject);
+        migrated.push(targetPath);
+      }
+      if (!existsSync4(backupPath)) {
+        renameSync2(sourcePath, backupPath);
+      } else if (existsSync4(targetPath)) {
+        unlinkSync4(sourcePath);
+      }
+    } catch {
+    }
+  }
+  return migrated;
+}
+function parseCodexProfile(filePath) {
+  const extension = extname2(filePath).toLowerCase();
+  if (extension === ".toml") return parseCodexTomlProfile(filePath);
+  if (extension === ".json" || extension === ".jsonc") {
+    return parseCodexJsonProfile(filePath, extension === ".jsonc");
+  }
+  throw new Error(`Unsupported codex profile type: ${filePath}`);
+}
+function parseCodexJsonProfile(filePath, allowComments) {
+  const raw = readFileSync3(filePath, "utf-8");
+  let parsed;
+  try {
+    parsed = JSON.parse(allowComments ? stripJsonComments(raw) : raw);
+  } catch {
+    throw new Error(`Invalid JSON profile: ${filePath}`);
+  }
+  if (!isRecord3(parsed)) {
+    throw new Error(`Invalid codex profile object: ${filePath}`);
+  }
+  const auth = resolveProfileAuth(parsed);
+  const configObject = resolveProfileConfigObject(parsed);
+  const config = typeof parsed.config === "string" ? parsed.config : configObject ? convertJsonToToml(configObject) : null;
+  if (!auth && !config) {
+    throw new Error(`Codex profile has no recognized auth/config content: ${filePath}`);
+  }
+  return { auth, config, configObject };
+}
+function parseCodexTomlProfile(filePath) {
+  const raw = readFileSync3(filePath, "utf-8");
+  const configObject = parseSimpleToml(raw);
+  const providerName = stringValue(configObject.model_provider);
+  const providers = isRecord3(configObject.model_providers) ? configObject.model_providers : {};
+  const providerConfig = providerName && isRecord3(providers[providerName]) ? providers[providerName] : {};
+  const token = stringValue(providerConfig.experimental_bearer_token) || stringValue(configObject.OPENAI_API_KEY);
+  const auth = token ? { OPENAI_API_KEY: token } : null;
+  return {
+    auth,
+    config: raw.endsWith("\n") ? raw : `${raw}
+`,
+    configObject
+  };
+}
+function resolveProfileAuth(value) {
+  if (isRecord3(value.auth)) {
+    return value.auth;
+  }
+  const candidateKeys = ["OPENAI_API_KEY", "openai_api_key", "apiKey", "api_key"];
+  for (const key of candidateKeys) {
+    const v = value[key];
+    if (typeof v === "string" && v.trim()) {
+      return { OPENAI_API_KEY: v };
+    }
+  }
+  if (typeof value.token === "string" && value.token.trim()) {
+    return { OPENAI_API_KEY: value.token };
+  }
+  return null;
+}
+function resolveProfileConfigObject(value) {
+  if (isRecord3(value.config)) {
+    return cloneRecord(value.config);
+  }
+  return null;
+}
+function mergeAuthPatch(existing, patch) {
+  const merged = existing ? { ...existing } : {};
+  if (patch.auth) {
+    for (const [key, value] of Object.entries(patch.auth)) {
+      if (typeof value !== "undefined") merged[key] = value;
+    }
+  }
+  if (typeof patch.apiKey === "string" && patch.apiKey.trim()) {
+    merged.OPENAI_API_KEY = patch.apiKey.trim();
+  }
+  return Object.keys(merged).length > 0 ? merged : null;
+}
+function mergeConfigPatch(existing, patch) {
+  const merged = existing ? cloneRecord(existing) : {};
+  if (patch.config) {
+    deepMerge(merged, patch.config);
+  }
+  const providerName = patch.modelProvider?.trim() || stringValue(merged.model_provider) || "custom";
+  if (patch.modelProvider || patch.baseUrl || patch.wireApi || patch.apiKey || patch.model) {
+    merged.model_provider = providerName;
+  }
+  if (typeof patch.model === "string" && patch.model.trim()) {
+    merged.model = patch.model.trim();
+  }
+  if (patch.baseUrl || patch.wireApi) {
+    const providers = isRecord3(merged.model_providers) ? merged.model_providers : {};
+    const providerConfig = isRecord3(providers[providerName]) ? providers[providerName] : {};
+    providerConfig.name = stringValue(providerConfig.name) || providerName;
+    if (typeof patch.baseUrl === "string" && patch.baseUrl.trim()) {
+      providerConfig.base_url = patch.baseUrl.trim();
+    }
+    if (typeof patch.wireApi === "string" && patch.wireApi.trim()) {
+      providerConfig.wire_api = patch.wireApi.trim();
+    }
+    if (typeof providerConfig.requires_openai_auth === "undefined") {
+      providerConfig.requires_openai_auth = true;
+    }
+    providers[providerName] = providerConfig;
+    merged.model_providers = providers;
+  }
+  return Object.keys(merged).length > 0 ? merged : null;
+}
+function writeCodexProfileToml(targetPath, auth, config) {
+  const normalized = config ? cloneRecord(config) : {};
+  const token = auth ? stringValue(auth.OPENAI_API_KEY) || stringValue(auth.api_key) || stringValue(auth.apiKey) : "";
+  if (token) {
+    const providerName = stringValue(normalized.model_provider) || "custom";
+    normalized.model_provider = providerName;
+    const providers = isRecord3(normalized.model_providers) ? normalized.model_providers : {};
+    const providerConfig = isRecord3(providers[providerName]) ? providers[providerName] : {};
+    providerConfig.name = stringValue(providerConfig.name) || providerName;
+    providerConfig.requires_openai_auth = typeof providerConfig.requires_openai_auth === "boolean" ? providerConfig.requires_openai_auth : true;
+    providerConfig.experimental_bearer_token = token;
+    providers[providerName] = providerConfig;
+    normalized.model_providers = providers;
+  }
+  normalizeThirdPartyChatProviderConfig(normalized);
+  ensureDir(targetPath);
+  writeFileSync2(targetPath, convertJsonToToml(normalized), "utf-8");
+  chmodSync2(targetPath, 384);
+}
+function normalizeThirdPartyChatProviderConfig(config) {
+  const providerName = stringValue(config.model_provider);
+  const providers = isRecord3(config.model_providers) ? config.model_providers : {};
+  const providerConfig = providerName && isRecord3(providers[providerName]) ? providers[providerName] : {};
+  if (isOfficialOpenAiProvider(providerName, providerConfig)) return;
+  config.api_format = "openai_chat";
+  providerConfig.api_format = "openai_chat";
+  if (!stringValue(providerConfig.wire_api)) {
+    providerConfig.wire_api = "responses";
+  }
+  if (providerName) {
+    providers[providerName] = providerConfig;
+    config.model_providers = providers;
+  }
+}
+function isOfficialOpenAiProvider(providerName, providerConfig) {
+  const name = `${providerName} ${stringValue(providerConfig.name)}`.toLowerCase();
+  const baseUrl = stringValue(providerConfig.base_url).toLowerCase();
+  return name.includes("openai") || baseUrl.includes("api.openai.com");
+}
+function deepMerge(target, patch) {
+  for (const [key, value] of Object.entries(patch)) {
+    if (typeof value === "undefined") continue;
+    if (isRecord3(value) && isRecord3(target[key])) {
+      deepMerge(target[key], value);
+      continue;
+    }
+    target[key] = isRecord3(value) ? cloneRecord(value) : value;
+  }
+}
+function normalizeProfileName(profileName) {
+  const name = basename(profileName).replace(/\.(jsonc?|toml)$/i, "").trim();
+  if (!name || name === "." || name === "..") {
+    throw new Error(`Invalid codex provider name: ${profileName}`);
+  }
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) {
+    throw new Error("Codex provider name may only contain letters, numbers, dot, dash, and underscore.");
+  }
+  return name;
+}
+function stringValue(value) {
+  return typeof value === "string" ? value : "";
+}
+function cloneRecord(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+function stripJsonComments(raw) {
+  return raw.replace(/^\s*\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+}
+function parseSimpleToml(raw) {
+  const root = {};
+  let current = root;
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const section = trimmed.match(/^\[([^\]]+)\]$/);
+    if (section) {
+      current = root;
+      for (const part of splitTomlPath(section[1])) {
+        const existing = current[part];
+        if (!isRecord3(existing)) current[part] = {};
+        current = current[part];
+      }
+      continue;
+    }
+    const kv = trimmed.match(/^([A-Za-z0-9_.-]+|"(?:\\.|[^"])+")\s*=\s*(.+?)\s*(?:#.*)?$/);
+    if (!kv) continue;
+    current[unquoteTomlKey(kv[1])] = parseTomlScalar(kv[2].trim());
+  }
+  return root;
+}
+function splitTomlPath(value) {
+  const parts = [];
+  let current = "";
+  let inQuote = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === '"' && value[index - 1] !== "\\") {
+      inQuote = !inQuote;
+      current += char;
+      continue;
+    }
+    if (char === "." && !inQuote) {
+      parts.push(unquoteTomlKey(current.trim()));
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) parts.push(unquoteTomlKey(current.trim()));
+  return parts;
+}
+function unquoteTomlKey(value) {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+function parseTomlScalar(value) {
+  if (value.startsWith('"') && value.endsWith('"')) {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value.slice(1, -1);
+    }
+  }
+  if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1);
+  if (value === "true") return true;
+  if (value === "false") return false;
+  if (/^-?\d+(?:\.\d+)?$/.test(value)) return Number(value);
+  return value;
+}
+function convertJsonToToml(value) {
+  const lines = [];
+  serializeTomlObject(value, [], lines);
+  return lines.length > 0 ? `${lines.join("\n")}
+` : "";
+}
+function serializeTomlObject(value, prefix, lines) {
+  for (const [key, child] of Object.entries(value)) {
+    if (typeof child === "undefined" || isRecord3(child)) continue;
+    lines.push(`${toTomlKey(key)} = ${toTomlValue(child)}`);
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (typeof child === "undefined") continue;
+    if (isRecord3(child)) {
+      const nextPath = [...prefix, key];
+      if (hasDirectTomlValues(child)) {
+        lines.push("");
+        lines.push(`[${[...nextPath].map(toTomlKey).join(".")}]`);
+      }
+      serializeTomlObject(child, nextPath, lines);
+    }
+  }
+}
+function hasDirectTomlValues(value) {
+  return Object.values(value).some((child) => typeof child !== "undefined" && !isRecord3(child));
+}
+function toTomlValue(value) {
+  if (isRecord3(value)) {
+    const entries = [];
+    for (const [k, v] of Object.entries(value)) {
+      if (typeof v === "undefined") continue;
+      entries.push(`${toTomlKey(k)} = ${toTomlValue(v)}`);
+    }
+    return `{ ${entries.join(", ")} }`;
+  }
+  if (Array.isArray(value)) {
+    const items = value.filter((entry) => typeof entry !== "undefined").map((entry) => toTomlValue(entry));
+    return `[${items.join(", ")}]`;
+  }
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value === null) {
+    throw new Error("Codex config values cannot be null.");
+  }
+  return JSON.stringify(String(value));
+}
+function toTomlKey(key) {
+  return /^\w+$/.test(key) ? key : JSON.stringify(key);
+}
+function isRecord3(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // src/lib/codexChatProxy.ts
@@ -2071,7 +2443,7 @@ async function handleModels(req, res, upstreamBaseUrl, apiKey, search) {
   writeJson(res, 200, normalizeModelsResponse(body));
 }
 async function handleResponses(res, body, context) {
-  if (!isRecord3(body)) {
+  if (!isRecord4(body)) {
     writeJson(res, 400, { error: { message: "Responses request body must be a JSON object." } });
     return;
   }
@@ -2091,32 +2463,34 @@ async function handleResponses(res, body, context) {
     return;
   }
   if (chatRequest.stream || contentType.includes("text/event-stream")) {
-    await streamChatToResponses(upstream, res, chatRequest.model, context.history);
+    await streamChatToResponses(upstream, res, chatRequest.model, context.history, chatRequest.toolMetadata);
     return;
   }
   const chatResponse = await upstream.json();
-  const { response, storedMessages } = chatCompletionToResponse(chatResponse, chatRequest.model);
+  const { response, storedMessages } = chatCompletionToResponse(chatResponse, chatRequest.model, chatRequest.toolMetadata);
   if (typeof response.id === "string") {
     context.history.set(response.id, { messages: [...chatRequest.messages, ...storedMessages] });
   }
   writeJson(res, 200, response);
 }
 function responsesToChatRequest(body, defaultModel, history) {
-  const model = stringValue(body.model) || defaultModel || "deepseek-v4-pro";
+  const model = stringValue2(body.model) || defaultModel || "deepseek-v4-pro";
   const messages = [];
-  const previousResponseId = stringValue(body.previous_response_id);
+  const previousResponseId = stringValue2(body.previous_response_id);
   if (previousResponseId) {
     messages.push(...history.get(previousResponseId)?.messages ?? []);
   }
-  const instructions = stringValue(body.instructions);
+  const instructions = stringValue2(body.instructions);
   if (instructions) messages.push({ role: "system", content: instructions });
   messages.push(...responsesInputToChatMessages(body.input));
   const result = {
     model,
     messages,
-    stream: body.stream !== false
+    stream: body.stream !== false,
+    toolMetadata: /* @__PURE__ */ new Map()
   };
-  const tools = responsesToolsToChatTools(body.tools);
+  const { tools, metadata } = responsesToolsToChatToolsWithMetadata(body.tools, messages);
+  result.toolMetadata = metadata;
   if (tools.length > 0) result.tools = tools;
   copyIfPresent(body, result, "temperature");
   copyIfPresent(body, result, "top_p");
@@ -2135,7 +2509,7 @@ function responsesToChatRequest(body, defaultModel, history) {
   const reasoningObject = body.reasoning;
   if (typeof reasoningObject === "string" && reasoningObject.trim()) {
     copyIfPresent(body, result, "reasoning");
-  } else if (isRecord3(reasoningObject) && typeof reasoningObject.effort === "string") {
+  } else if (isRecord4(reasoningObject) && typeof reasoningObject.effort === "string") {
     result.reasoning_effort = reasoningObject.effort;
     copyIfPresent(body, result, "reasoning");
   }
@@ -2162,14 +2536,14 @@ function responsesInputToChatMessages(input) {
     pendingToolCalls = [];
   };
   for (const item of input) {
-    if (!isRecord3(item)) continue;
-    const type = stringValue(item.type);
+    if (!isRecord4(item)) continue;
+    const type = stringValue2(item.type);
     if (type === "function_call" || type === "custom_tool_call" || type === "tool_search_call") {
-      const callId = stringValue(item.call_id) || stringValue(item.id) || `call_${randomUUID().replace(/-/g, "")}`;
-      const namespace = stringValue(item.namespace);
-      const callName = stringValue(item.name) || stringValue(item.tool_name) || "tool_call";
+      const callId = stringValue2(item.call_id) || stringValue2(item.id) || `call_${randomUUID().replace(/-/g, "")}`;
+      const namespace = stringValue2(item.namespace);
+      const callName = stringValue2(item.name) || stringValue2(item.tool_name) || "tool_call";
       const name = safeChatToolName(namespace ? `${namespace}_${callName}` : callName);
-      const args = stringValue(item.arguments) || stringifyContent(item.input) || "{}";
+      const args = stringValue2(item.arguments) || stringifyContent(item.input) || "{}";
       pendingToolCalls.push({
         id: callId,
         type: "function",
@@ -2182,7 +2556,7 @@ function responsesInputToChatMessages(input) {
     }
     if (type === "function_call_output" || type === "custom_tool_call_output" || type === "tool_search_output") {
       flushPendingToolCalls();
-      const callId = stringValue(item.call_id) || stringValue(item.id) || "";
+      const callId = stringValue2(item.call_id) || stringValue2(item.id) || "";
       messages.push({
         role: "tool",
         tool_call_id: callId || void 0,
@@ -2198,7 +2572,7 @@ function responsesInputToChatMessages(input) {
     if (type === "message" || item.role) {
       flushPendingToolCalls();
       flushPendingReasoning();
-      const role = normalizeChatRole(stringValue(item.role));
+      const role = normalizeChatRole(stringValue2(item.role));
       if (!role || role === "tool") continue;
       const content = responsesContentToText(item.content);
       const message = { role, content };
@@ -2227,26 +2601,34 @@ function responsesContentToText(content) {
       parts.push(part);
       continue;
     }
-    if (!isRecord3(part)) continue;
-    const text = stringValue(part.text) || stringValue(part.input_text) || stringValue(part.output_text);
+    if (!isRecord4(part)) continue;
+    const text = stringValue2(part.text) || stringValue2(part.input_text) || stringValue2(part.output_text);
     if (text) parts.push(text);
   }
   return parts.join("\n");
 }
-function responsesToolsToChatTools(tools) {
-  if (!Array.isArray(tools)) return [];
+function responsesToolsToChatToolsWithMetadata(tools, messages = []) {
+  if (!Array.isArray(tools)) return { tools: [], metadata: /* @__PURE__ */ new Map() };
   const result = [];
+  const metadata = /* @__PURE__ */ new Map();
   const seen = /* @__PURE__ */ new Set();
-  const addFunctionTool = (name, tool, namespace) => {
+  const runningProcessIds = extractRunningProcessIds(messages);
+  const addFunctionTool = (name, tool, namespace, responseType = "function_call", extraMetadata = {}) => {
     const displayName = safeChatToolName(namespace ? `${namespace}_${name}` : name);
+    if (displayName === "write_stdin" && runningProcessIds.length === 0) return;
     if (seen.has(displayName)) return;
     seen.add(displayName);
+    metadata.set(displayName, {
+      responseType,
+      responseName: responseType === "custom_tool_call" ? name : displayName,
+      ...extraMetadata
+    });
     result.push({
       type: "function",
       function: {
         name: displayName,
-        description: stringValue(tool.description) || "",
-        parameters: isRecord3(tool.parameters) ? tool.parameters : { type: "object", properties: {} }
+        description: toolDescriptionForChat(displayName, tool, runningProcessIds),
+        parameters: toolParametersForChat(displayName, tool, runningProcessIds)
       }
     });
   };
@@ -2264,12 +2646,12 @@ function responsesToolsToChatTools(tools) {
       );
       return;
     }
-    if (!isRecord3(tool)) return;
-    const toolType = stringValue(tool.type);
+    if (!isRecord4(tool)) return;
+    const toolType = stringValue2(tool.type);
     if (toolType === "namespace") {
-      const ns = stringValue(tool.name);
+      const ns = stringValue2(tool.name);
       if (!ns) return;
-      const children = Array.isArray(tool.tools) ? tool.tools : isRecord3(tool.tools) ? [] : Array.isArray(tool.children) ? tool.children : [];
+      const children = Array.isArray(tool.tools) ? tool.tools : isRecord4(tool.tools) ? [] : Array.isArray(tool.children) ? tool.children : [];
       for (const child of children) {
         visitTool(child, ns);
       }
@@ -2289,29 +2671,28 @@ function responsesToolsToChatTools(tools) {
       });
       return;
     }
-    const name = stringValue(tool.name);
+    const name = stringValue2(tool.name);
     if (!name) return;
     if (toolType === "custom") {
-      const displayName = safeChatToolName(namespace ? `${namespace}_${name}` : name);
-      if (seen.has(displayName)) return;
-      seen.add(displayName);
-      result.push({
-        type: "function",
-        function: {
-          name: displayName,
-          description: stringValue(tool.description) || "",
+      if (name === "apply_patch") {
+        addApplyPatchProxyTools(name, tool, namespace);
+        return;
+      }
+      addFunctionTool(
+        name,
+        {
+          description: stringValue2(tool.description) || "",
           parameters: {
             type: "object",
             properties: {
-              input: {
-                type: "string",
-                description: "Tool input"
-              }
+              input: { type: "string", description: "Tool input" }
             },
             required: ["input"]
           }
-        }
-      });
+        },
+        namespace,
+        "custom_tool_call"
+      );
       return;
     }
     if (toolType === "function" || !toolType) {
@@ -2321,13 +2702,144 @@ function responsesToolsToChatTools(tools) {
   for (const tool of tools) {
     visitTool(tool);
   }
-  return result;
+  return { tools: result, metadata };
+  function addApplyPatchProxyTools(name, tool, namespace) {
+    const baseDescription = stringValue2(tool.description) || "Apply a source code patch.";
+    const addProxy = (suffix, description, parameters) => {
+      addFunctionTool(
+        `${name}_${suffix}`,
+        {
+          description: `${baseDescription}
+
+${description}`,
+          parameters
+        },
+        namespace,
+        "custom_tool_call",
+        {
+          responseName: name,
+          applyPatchProxy: suffix
+        }
+      );
+    };
+    addProxy(
+      "add_file",
+      "Create one new file by providing a target path and full file content. Do not include patch '+' prefixes in content.",
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          path: { type: "string", description: "Target file path." },
+          content: { type: "string", description: "Full file content without patch '+' prefixes." }
+        },
+        required: ["path", "content"]
+      }
+    );
+    addProxy(
+      "delete_file",
+      "Delete one file by providing a target path.",
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          path: { type: "string", description: "Target file path." }
+        },
+        required: ["path"]
+      }
+    );
+    addProxy(
+      "update_file",
+      "Edit one existing file with structured hunks.",
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          path: { type: "string", description: "Target file path." },
+          move_to: { type: "string", description: "Optional destination path for move operations." },
+          hunks: applyPatchHunksSchema()
+        },
+        required: ["path", "hunks"]
+      }
+    );
+    addProxy(
+      "replace_file",
+      "Replace one existing file by providing a target path and full new file content.",
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          path: { type: "string", description: "Target file path." },
+          content: { type: "string", description: "Full replacement content." }
+        },
+        required: ["path", "content"]
+      }
+    );
+    addProxy(
+      "batch",
+      "Edit files by providing ordered structured patch operations.",
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          operations: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                type: { type: "string", enum: ["add_file", "delete_file", "update_file", "replace_file"] },
+                path: { type: "string" },
+                move_to: { type: "string", description: "Optional destination path for update_file move operations." },
+                content: { type: "string", description: "Full content for add_file or replace_file." },
+                hunks: applyPatchHunksSchema()
+              },
+              required: ["type", "path"]
+            }
+          }
+        },
+        required: ["operations"]
+      }
+    );
+  }
+}
+function extractRunningProcessIds(messages) {
+  const ids = /* @__PURE__ */ new Set();
+  for (const message of messages) {
+    if (typeof message.content !== "string") continue;
+    for (const match of message.content.matchAll(/Process running with session ID\s+(\d+)/g)) {
+      const id = Number(match[1]);
+      if (Number.isFinite(id)) ids.add(id);
+    }
+  }
+  return [...ids].sort((a, b) => a - b);
+}
+function toolDescriptionForChat(displayName, tool, runningProcessIds) {
+  const description = stringValue2(tool.description) || "";
+  if (displayName !== "write_stdin") return description;
+  return [
+    description,
+    `Only use this tool to poll or send input to a process that is still running from a previous exec_command result. Valid session_id values for this request: ${runningProcessIds.join(", ")}.`,
+    "Do not use write_stdin to create or edit files; use exec_command or apply_patch instead."
+  ].filter(Boolean).join("\n");
+}
+function toolParametersForChat(displayName, tool, runningProcessIds) {
+  const parameters = isRecord4(tool.parameters) ? JSON.parse(JSON.stringify(tool.parameters)) : { type: "object", properties: {} };
+  if (displayName !== "write_stdin") return parameters;
+  if (!isRecord4(parameters.properties)) {
+    parameters.properties = {};
+  }
+  const properties = parameters.properties;
+  const sessionId = isRecord4(properties.session_id) ? { ...properties.session_id } : { type: "integer" };
+  sessionId.enum = runningProcessIds;
+  properties.session_id = sessionId;
+  parameters.properties = properties;
+  return parameters;
 }
 function safeChatToolName(value) {
   const normalized = value.trim().replace(/[^a-zA-Z0-9_-]+/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "");
   return normalized || "tool_call";
 }
-async function streamChatToResponses(upstream, res, model, history) {
+async function streamChatToResponses(upstream, res, model, history, toolMetadata) {
   res.writeHead(200, SSE_HEADERS);
   const responseId = `resp_starling_${randomUUID().replace(/-/g, "")}`;
   const createdAt = Math.floor(Date.now() / 1e3);
@@ -2350,12 +2862,12 @@ async function streamChatToResponses(upstream, res, model, history) {
       const data = parseSseData(block);
       if (!data || data === "[DONE]") continue;
       const chunk = JSON.parse(data);
-      for (const event of chatChunkToResponseEvents(chunk, state)) {
+      for (const event of chatChunkToResponseEvents(chunk, state, toolMetadata)) {
         writeSse(res, event.event, event.data);
       }
     }
   }
-  const completedOutput = finalizeResponseState(state);
+  const completedOutput = finalizeResponseState(state, toolMetadata);
   for (const event of completedOutput.events) {
     writeSse(res, event.event, event.data);
   }
@@ -2368,46 +2880,46 @@ async function streamChatToResponses(upstream, res, model, history) {
     type: "function",
     function: {
       name: tool.name,
-      arguments: tool.arguments
+      arguments: toolArgumentsForChatHistory(tool, toolMetadata.get(tool.name))
     }
   }));
   if (toolCalls.length > 0) assistantMessage.tool_calls = toolCalls;
   history.set(responseId, { messages: [assistantMessage] });
 }
-function chatChunkToResponseEvents(chunk, state) {
-  if (!isRecord3(chunk)) return [];
-  const model = stringValue(chunk.model);
+function chatChunkToResponseEvents(chunk, state, toolMetadata) {
+  if (!isRecord4(chunk)) return [];
+  const model = stringValue2(chunk.model);
   if (model) state.model = model;
-  const choice = Array.isArray(chunk.choices) && isRecord3(chunk.choices[0]) ? chunk.choices[0] : null;
-  const delta = isRecord3(choice?.delta) ? choice.delta : null;
+  const choice = Array.isArray(chunk.choices) && isRecord4(chunk.choices[0]) ? chunk.choices[0] : null;
+  const delta = isRecord4(choice?.delta) ? choice.delta : null;
   const events = [];
-  const content = stringValue(delta?.content);
+  const content = stringValue2(delta?.content);
   if (content) events.push(...pushTextDelta(state, content));
-  const reasoning = stringValue(delta?.reasoning);
+  const reasoning = stringValue2(delta?.reasoning);
   if (reasoning) events.push(...pushReasoningDelta(state, reasoning));
   if (Array.isArray(delta?.tool_calls)) {
     for (const callDelta of delta.tool_calls) {
-      if (!isRecord3(callDelta)) continue;
+      if (!isRecord4(callDelta)) continue;
       const index = typeof callDelta.index === "number" ? callDelta.index : 0;
       const current = state.toolItems.get(index) ?? {
         itemId: `fc_${randomUUID().replace(/-/g, "")}`,
-        callId: stringValue(callDelta.id) || `call_${randomUUID().replace(/-/g, "")}`,
+        callId: stringValue2(callDelta.id) || `call_${randomUUID().replace(/-/g, "")}`,
         name: "",
         arguments: "",
         started: false,
         done: false,
         outputIndex: -1
       };
-      if (stringValue(callDelta.id)) {
-        current.callId = stringValue(callDelta.id) || current.callId;
+      if (stringValue2(callDelta.id)) {
+        current.callId = stringValue2(callDelta.id) || current.callId;
       }
-      const fn = isRecord3(callDelta.function) ? callDelta.function : {};
-      const name = stringValue(fn.name);
-      const args = stringValue(fn.arguments);
+      const fn = isRecord4(callDelta.function) ? callDelta.function : {};
+      const name = stringValue2(fn.name);
+      const args = stringValue2(fn.arguments);
       if (name) current.name = name;
       if (args) current.arguments += args;
       state.toolItems.set(index, current);
-      events.push(...pushToolDelta(state, current, args || ""));
+      events.push(...pushToolDelta(state, current, args || "", toolMetadata));
     }
   }
   return events;
@@ -2467,42 +2979,242 @@ function pushTextDelta(state, delta) {
   });
   return events;
 }
-function pushToolDelta(state, current, delta) {
+function pushToolDelta(state, current, delta, toolMetadata) {
   const outputIndex = current.outputIndex < 0 ? state.nextOutputIndex++ : current.outputIndex;
   current.outputIndex = outputIndex;
   const events = [];
+  const metadata = toolMetadata.get(current.name) || inferApplyPatchMetadataFromToolName(current.name);
   if (!current.started) {
     current.started = true;
+    const item = metadata?.responseType === "custom_tool_call" ? {
+      id: current.itemId,
+      type: "custom_tool_call",
+      status: "in_progress",
+      call_id: current.callId,
+      name: metadata.responseName,
+      input: ""
+    } : {
+      id: current.itemId,
+      type: "function_call",
+      status: "in_progress",
+      call_id: current.callId,
+      name: current.name,
+      arguments: ""
+    };
     events.push({
       event: "response.output_item.added",
       data: {
         type: "response.output_item.added",
         output_index: outputIndex,
-        item: {
-          id: current.itemId,
-          type: "function_call",
-          status: "in_progress",
-          call_id: current.callId,
-          name: current.name,
-          arguments: ""
-        }
-      }
-    });
-  }
-  if (delta) {
-    events.push({
-      event: "response.function_call_arguments.delta",
-      data: {
-        type: "response.function_call_arguments.delta",
-        item_id: current.itemId,
-        output_index: outputIndex,
-        delta
+        item
       }
     });
   }
   return events;
 }
-function finalizeResponseState(state) {
+function responseToolItem(tool, metadata, status) {
+  const effectiveMetadata = metadata || inferApplyPatchMetadataFromToolName(tool.name);
+  if (effectiveMetadata?.responseType === "custom_tool_call") {
+    return {
+      id: tool.itemId,
+      type: "custom_tool_call",
+      status,
+      call_id: tool.callId,
+      name: effectiveMetadata.responseName,
+      input: status === "completed" ? customToolInputFromChatArguments(tool.arguments, effectiveMetadata) : ""
+    };
+  }
+  return {
+    id: tool.itemId,
+    type: "function_call",
+    status,
+    call_id: tool.callId,
+    name: tool.name,
+    arguments: status === "completed" ? functionToolArgumentsFromChatArguments(tool.arguments) : ""
+  };
+}
+function inferApplyPatchMetadataFromToolName(name) {
+  if (name === "apply_patch") {
+    return { responseType: "custom_tool_call", responseName: "apply_patch" };
+  }
+  const suffix = name.startsWith("apply_patch_") ? name.slice("apply_patch_".length) : "";
+  if (!["add_file", "delete_file", "update_file", "replace_file", "batch"].includes(suffix)) {
+    return void 0;
+  }
+  return {
+    responseType: "custom_tool_call",
+    responseName: "apply_patch",
+    applyPatchProxy: suffix
+  };
+}
+function customToolInputFromChatArguments(args, metadata) {
+  const trimmed = args.trim();
+  if (!trimmed) return "";
+  if (metadata?.applyPatchProxy) {
+    return applyPatchProxyInputFromChatArguments(trimmed, metadata.applyPatchProxy);
+  }
+  let input = args;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (isRecord4(parsed) && typeof parsed.input === "string") {
+      input = parsed.input;
+    }
+  } catch {
+    if (trimmed.includes("*** Begin Patch")) {
+      return normalizeCustomToolInput(trimmed);
+    }
+  }
+  return normalizeCustomToolInput(input);
+}
+function functionToolArgumentsFromChatArguments(args) {
+  const trimmed = args.trim();
+  if (!trimmed) return "{}";
+  try {
+    JSON.parse(trimmed);
+    return trimmed;
+  } catch {
+    return JSON.stringify({
+      _starling_invalid_arguments: trimmed
+    });
+  }
+}
+function toolArgumentsForChatHistory(tool, metadata) {
+  const effectiveMetadata = metadata || (tool.name ? inferApplyPatchMetadataFromToolName(tool.name) : void 0);
+  return effectiveMetadata?.responseType === "custom_tool_call" ? JSON.stringify({ input: customToolInputFromChatArguments(tool.arguments, effectiveMetadata) }) : functionToolArgumentsFromChatArguments(tool.arguments);
+}
+function normalizeCustomToolInput(input) {
+  const withoutFence = stripMarkdownFence(input);
+  if (!withoutFence.includes("*** Begin Patch")) return withoutFence;
+  return normalizeApplyPatchInput(withoutFence);
+}
+function stripMarkdownFence(input) {
+  const trimmed = input.trim();
+  const match = trimmed.match(/^```(?:\w+)?\s*\n([\s\S]*?)\n```$/);
+  return match ? match[1].trim() : input;
+}
+function normalizeApplyPatchInput(input) {
+  const begin = input.indexOf("*** Begin Patch");
+  if (begin < 0) return input;
+  const fromBegin = input.slice(begin);
+  const endMarker = "*** End Patch";
+  const end = fromBegin.indexOf(endMarker);
+  if (end < 0) return fromBegin.trimEnd();
+  return fromBegin.slice(0, end + endMarker.length);
+}
+function applyPatchHunksSchema() {
+  return {
+    type: "array",
+    description: "Structured update hunks.",
+    items: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        context: { type: "string", description: "Optional @@ context header text." },
+        lines: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              op: { type: "string", enum: ["context", "add", "remove"] },
+              text: { type: "string" }
+            },
+            required: ["op", "text"]
+          }
+        }
+      },
+      required: ["lines"]
+    }
+  };
+}
+function applyPatchProxyInputFromChatArguments(args, kind) {
+  if (args.includes("*** Begin Patch")) return normalizeApplyPatchInput(args);
+  let parsed;
+  try {
+    parsed = JSON.parse(args);
+  } catch {
+    return args;
+  }
+  const operations = kind === "batch" ? applyPatchOperationsFromBatch(parsed) : [applyPatchOperationFromRecord(kind, parsed)];
+  if (!operations.length || operations.some((operation) => !operation)) {
+    return args;
+  }
+  return formatApplyPatchOperations(operations);
+}
+function applyPatchOperationsFromBatch(parsed) {
+  if (!isRecord4(parsed) || !Array.isArray(parsed.operations)) return [];
+  return parsed.operations.map((operation) => {
+    if (!isRecord4(operation)) return null;
+    const type = stringValue2(operation.type);
+    if (!["add_file", "delete_file", "update_file", "replace_file"].includes(type)) return null;
+    return applyPatchOperationFromRecord(type, operation);
+  });
+}
+function applyPatchOperationFromRecord(kind, parsed) {
+  if (kind === "batch" || !isRecord4(parsed)) return null;
+  const path = stringValue2(parsed.path);
+  if (!path) return null;
+  return {
+    type: kind,
+    path,
+    moveTo: stringValue2(parsed.move_to) || stringValue2(parsed.moveTo) || void 0,
+    content: stringValue2(parsed.content) ?? void 0,
+    hunks: Array.isArray(parsed.hunks) ? parsed.hunks : void 0
+  };
+}
+function formatApplyPatchOperations(operations) {
+  const lines = ["*** Begin Patch"];
+  for (const operation of operations) {
+    if (operation.type === "add_file") {
+      lines.push(`*** Add File: ${operation.path}`);
+      lines.push(...plusPrefixedLines(operation.content || ""));
+      continue;
+    }
+    if (operation.type === "delete_file") {
+      lines.push(`*** Delete File: ${operation.path}`);
+      continue;
+    }
+    if (operation.type === "replace_file") {
+      lines.push(`*** Delete File: ${operation.path}`);
+      lines.push(`*** Add File: ${operation.path}`);
+      lines.push(...plusPrefixedLines(operation.content || ""));
+      continue;
+    }
+    lines.push(`*** Update File: ${operation.path}`);
+    if (operation.moveTo) lines.push(`*** Move to: ${operation.moveTo}`);
+    lines.push(...formatApplyPatchHunks(operation.hunks || []));
+  }
+  lines.push("*** End Patch");
+  return lines.join("\n");
+}
+function plusPrefixedLines(content) {
+  const withoutTrailingNewline = content.endsWith("\n") ? content.slice(0, -1) : content;
+  if (!withoutTrailingNewline) return ["+"];
+  return withoutTrailingNewline.split("\n").map((line) => `+${line}`);
+}
+function formatApplyPatchHunks(hunks) {
+  const lines = [];
+  for (const hunk of hunks) {
+    if (!isRecord4(hunk)) continue;
+    const context = stringValue2(hunk.context);
+    lines.push(context ? context.startsWith("@@") ? context : `@@ ${context}` : "@@");
+    const hunkLines = Array.isArray(hunk.lines) ? hunk.lines : [];
+    for (const line of hunkLines) {
+      if (!isRecord4(line)) continue;
+      const op = stringValue2(line.op);
+      const text = stringValue2(line.text) ?? "";
+      if (op === "add") {
+        lines.push(`+${text}`);
+      } else if (op === "remove") {
+        lines.push(`-${text}`);
+      } else {
+        lines.push(` ${text}`);
+      }
+    }
+  }
+  return lines;
+}
+function finalizeResponseState(state, toolMetadata) {
   const events = [];
   const items = [];
   if (state.reasoning.started && !state.reasoning.done) {
@@ -2580,6 +3292,7 @@ function finalizeResponseState(state) {
   for (const tool of state.toolItems.values()) {
     const outputIndex = tool.outputIndex < 0 ? state.nextOutputIndex++ : tool.outputIndex;
     tool.outputIndex = outputIndex;
+    const metadata = toolMetadata.get(tool.name);
     if (!tool.started) {
       tool.started = true;
       events.push({
@@ -2587,34 +3300,32 @@ function finalizeResponseState(state) {
         data: {
           type: "response.output_item.added",
           output_index: outputIndex,
-          item: {
-            id: tool.itemId,
-            type: "function_call",
-            status: "in_progress",
-            call_id: tool.callId,
-            name: tool.name,
-            arguments: ""
-          }
+          item: responseToolItem(tool, metadata, "in_progress")
         }
       });
     }
-    const item = {
-      id: tool.itemId,
-      type: "function_call",
-      status: "completed",
-      call_id: tool.callId,
-      name: tool.name,
-      arguments: tool.arguments
-    };
-    events.push({
-      event: "response.function_call_arguments.done",
-      data: {
-        type: "response.function_call_arguments.done",
-        item_id: tool.itemId,
-        output_index: outputIndex,
-        arguments: tool.arguments
-      }
-    });
+    const item = responseToolItem(tool, metadata, "completed");
+    if (metadata?.responseType !== "custom_tool_call") {
+      const argumentsJson = functionToolArgumentsFromChatArguments(tool.arguments);
+      events.push({
+        event: "response.function_call_arguments.delta",
+        data: {
+          type: "response.function_call_arguments.delta",
+          item_id: tool.itemId,
+          output_index: outputIndex,
+          delta: argumentsJson
+        }
+      });
+      events.push({
+        event: "response.function_call_arguments.done",
+        data: {
+          type: "response.function_call_arguments.done",
+          item_id: tool.itemId,
+          output_index: outputIndex,
+          arguments: argumentsJson
+        }
+      });
+    }
     events.push({
       event: "response.output_item.done",
       data: { type: "response.output_item.done", output_index: outputIndex, item }
@@ -2663,11 +3374,11 @@ function pushReasoningDelta(state, delta) {
   });
   return events;
 }
-function chatCompletionToResponse(chatResponse, defaultModel) {
-  const responseId = isRecord3(chatResponse) && stringValue(chatResponse.id) ? `resp_${stringValue(chatResponse.id)}` : `resp_starling_${randomUUID().replace(/-/g, "")}`;
-  const choice = isRecord3(chatResponse) && Array.isArray(chatResponse.choices) && isRecord3(chatResponse.choices[0]) ? chatResponse.choices[0] : {};
-  const message = isRecord3(choice.message) ? choice.message : {};
-  const [text, inlineReasoning] = splitReasoningFromContent(stringValue(message.content) || "");
+function chatCompletionToResponse(chatResponse, defaultModel, toolMetadata) {
+  const responseId = isRecord4(chatResponse) && stringValue2(chatResponse.id) ? `resp_${stringValue2(chatResponse.id)}` : `resp_starling_${randomUUID().replace(/-/g, "")}`;
+  const choice = isRecord4(chatResponse) && Array.isArray(chatResponse.choices) && isRecord4(chatResponse.choices[0]) ? chatResponse.choices[0] : {};
+  const message = isRecord4(choice.message) ? choice.message : {};
+  const [text, inlineReasoning] = splitReasoningFromContent(stringValue2(message.content) || "");
   const reasoningText = [stringifyContent(message.reasoning), inlineReasoning].map((value) => value.trim()).filter(Boolean).join("\n");
   const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
   const output = [];
@@ -2689,22 +3400,21 @@ function chatCompletionToResponse(chatResponse, defaultModel) {
     });
   }
   for (const tool of toolCalls) {
-    if (!isRecord3(tool)) continue;
-    const fn = isRecord3(tool.function) ? tool.function : {};
-    output.push({
-      id: `fc_${randomUUID().replace(/-/g, "")}`,
-      type: "function_call",
-      status: "completed",
-      call_id: stringValue(tool.id) || `call_${randomUUID().replace(/-/g, "")}`,
-      name: stringValue(fn.name) || "",
-      arguments: stringValue(fn.arguments) || ""
-    });
+    if (!isRecord4(tool)) continue;
+    const fn = isRecord4(tool.function) ? tool.function : {};
+    const name = stringValue2(fn.name) || "";
+    output.push(responseToolItem({
+      itemId: `fc_${randomUUID().replace(/-/g, "")}`,
+      callId: stringValue2(tool.id) || `call_${randomUUID().replace(/-/g, "")}`,
+      name,
+      arguments: stringValue2(fn.arguments) || ""
+    }, toolMetadata.get(name), "completed"));
   }
   const response = responseEnvelope(
     {
       responseId,
-      model: isRecord3(chatResponse) && stringValue(chatResponse.model) || defaultModel,
-      createdAt: isRecord3(chatResponse) && typeof chatResponse.created === "number" ? chatResponse.created : Math.floor(Date.now() / 1e3)
+      model: isRecord4(chatResponse) && stringValue2(chatResponse.model) || defaultModel,
+      createdAt: isRecord4(chatResponse) && typeof chatResponse.created === "number" ? chatResponse.created : Math.floor(Date.now() / 1e3)
     },
     "completed",
     output
@@ -2717,7 +3427,7 @@ function chatCompletionToResponse(chatResponse, defaultModel) {
 function extractReasoningFromInputItem(item) {
   const reasoning = item.reasoning;
   if (typeof reasoning === "string" && reasoning.trim()) return reasoning.trim();
-  if (isRecord3(reasoning)) {
+  if (isRecord4(reasoning)) {
     const summary = reasonSummaryTextFromContainer(reasoning);
     if (summary) return summary.trim();
   }
@@ -2726,7 +3436,7 @@ function extractReasoningFromInputItem(item) {
     const summary = reasonSummaryTextFromItems(item.summary);
     if (summary) return summary.trim();
   }
-  if (isRecord3(item.summary)) {
+  if (isRecord4(item.summary)) {
     const summary = reasonSummaryTextFromContainer(item.summary);
     if (summary) return summary.trim();
   }
@@ -2736,7 +3446,7 @@ function extractReasoningFromInputItem(item) {
 function reasonSummaryTextFromItems(value) {
   const chunks = [];
   for (const entry of value) {
-    if (!isRecord3(entry)) continue;
+    if (!isRecord4(entry)) continue;
     const text = typeof entry.text === "string" ? entry.text : reasonSummaryTextFromContainer(entry) || "";
     if (text) chunks.push(text);
   }
@@ -2748,13 +3458,13 @@ function reasonSummaryTextFromContainer(container) {
   if (Array.isArray(summary)) {
     const chunks = [];
     for (const entry of summary) {
-      if (!isRecord3(entry)) continue;
+      if (!isRecord4(entry)) continue;
       const text = typeof entry.text === "string" ? entry.text : "";
       if (text) chunks.push(text);
     }
     return chunks.length > 0 ? chunks.join("\n") : null;
   }
-  if (isRecord3(summary) && typeof summary.text === "string") return summary.text;
+  if (isRecord4(summary) && typeof summary.text === "string") return summary.text;
   return null;
 }
 function splitReasoningFromContent(content) {
@@ -2798,15 +3508,15 @@ function chatErrorToResponsesError(errorText, status) {
   } catch {
     parsed = null;
   }
-  const message = isRecord3(parsed) && isRecord3(parsed.error) && stringValue(parsed.error.message) || isRecord3(parsed) && stringValue(parsed.message) || errorText || `Upstream error ${status}`;
+  const message = isRecord4(parsed) && isRecord4(parsed.error) && stringValue2(parsed.error.message) || isRecord4(parsed) && stringValue2(parsed.message) || errorText || `Upstream error ${status}`;
   return { error: { message, type: "upstream_error", code: status } };
 }
 function normalizeModelsResponse(body) {
-  if (isRecord3(body) && Array.isArray(body.models)) return body;
-  const source = isRecord3(body) && Array.isArray(body.data) ? body.data : [];
-  const models = source.filter(isRecord3).map((model, index) => {
-    const id = stringValue(model.id) || stringValue(model.name);
-    const name = stringValue(model.name) || id;
+  if (isRecord4(body) && Array.isArray(body.models)) return body;
+  const source = isRecord4(body) && Array.isArray(body.data) ? body.data : [];
+  const models = source.filter(isRecord4).map((model, index) => {
+    const id = stringValue2(model.id) || stringValue2(model.name);
+    const name = stringValue2(model.name) || id;
     return {
       id,
       slug: id,
@@ -2822,8 +3532,8 @@ function normalizeModelsResponse(body) {
       shell_type: "shell_command",
       visibility: "list",
       supported_in_api: true,
-      object: stringValue(model.object) || "model",
-      owned_by: stringValue(model.owned_by) || "deepseek",
+      object: stringValue2(model.object) || "model",
+      owned_by: stringValue2(model.owned_by) || "deepseek",
       context_window: 1e6,
       max_context_window: 1e6,
       priority: 1e3 + index,
@@ -2894,11 +3604,11 @@ function parseSseData(block) {
   return block.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
 }
 function readReasoningEffort(body) {
-  if (isRecord3(body.reasoning)) {
-    const effort = stringValue(body.reasoning.effort);
+  if (isRecord4(body.reasoning)) {
+    const effort = stringValue2(body.reasoning.effort);
     if (effort) return effort;
   }
-  return stringValue(body.model_reasoning_effort);
+  return stringValue2(body.model_reasoning_effort);
 }
 function copyIfPresent(source, target, key) {
   if (typeof source[key] !== "undefined") target[key] = source[key];
@@ -2912,10 +3622,10 @@ function stringifyContent(value) {
   if (value == null) return "";
   return JSON.stringify(value);
 }
-function stringValue(value) {
+function stringValue2(value) {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
-function isRecord3(value) {
+function isRecord4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -2970,6 +3680,7 @@ var RUN_SESSION_DETECT_INTERVAL_MS = 300;
 var RUN_SESSION_DETECT_FULL_SCAN_THRESHOLD_MS = 200;
 var RUN_SESSION_EXIT_SETTLE_MS = 200;
 var RUN_FAST_FAILURE_SKIP_SCAN_MS = 2e3;
+var RUN_PIN_ATTEMPT_DRAIN_TIMEOUT_MS = 1500;
 function registerRunCommand(program2) {
   const run = new Command5("run").description("Launch claude/codex with auto catalog assignment for the created session").argument("<agent>", "agent binary: claude | codex | agent").argument("[agent-args...]", "arguments passed verbatim to the agent CLI").option("-c, --catalog <catalog>", "add created session to catalog").option("--config <config>", "Starling settings profile under ~/.starling/settings/{claude|codex}").option("--title <title>", "pin title for created session").option("--tags <tags>", "pin tags for created session, comma-separated").option("--cwd <path>", "working directory for agent launch").allowUnknownOption().passThroughOptions().addHelpText(
     "after",
@@ -3014,6 +3725,7 @@ function registerRunCommand(program2) {
     };
     let catalogPinned = false;
     let agentClosed = false;
+    let stopAutoPinWatcher = false;
     let hintedSessionId;
     let pinAttempt = null;
     const startAutoPinWatcher = async () => {
@@ -3022,7 +3734,7 @@ function registerRunCommand(program2) {
       pinAttempt = (async () => {
         const startedTime = Date.parse(startedAt);
         let attemptsAfterClose = 0;
-        for (let i = 0; ; i++) {
+        for (let i = 0; !stopAutoPinWatcher; i++) {
           const sessionId = hintedSessionId ?? readRunHookSessionId(hookRun?.eventsPath ?? codexConfig?.eventsPath);
           if (!sessionId) {
             if (provider === "codex") {
@@ -3034,7 +3746,7 @@ function registerRunCommand(program2) {
                 return;
               }
             }
-            if (agentClosed) return;
+            if (agentClosed || stopAutoPinWatcher) return;
             await sleep(250);
             continue;
           }
@@ -3045,7 +3757,7 @@ function registerRunCommand(program2) {
             catalogPinned = true;
             return;
           }
-          if (agentClosed) {
+          if (agentClosed || stopAutoPinWatcher) {
             attemptsAfterClose++;
             if (attemptsAfterClose >= 20) break;
           }
@@ -3161,7 +3873,8 @@ function registerRunCommand(program2) {
     console.log(chalk6.green(`Session started: ${newSessionMeta.session_id}`));
     updateSessionIndexInBackground(newSessionMeta);
     if (pinAttempt) {
-      await pinAttempt;
+      stopAutoPinWatcher = true;
+      await drainPinAttempt(pinAttempt);
     }
     if (exitCode !== 0) {
       await cleanupRunState();
@@ -3170,6 +3883,12 @@ function registerRunCommand(program2) {
     await cleanupRunState();
   });
   program2.addCommand(run);
+}
+async function drainPinAttempt(pinAttempt) {
+  await Promise.race([
+    pinAttempt,
+    sleep(RUN_PIN_ATTEMPT_DRAIN_TIMEOUT_MS)
+  ]);
 }
 function updateSessionIndexInBackground(session) {
   setImmediate(() => {
@@ -3210,7 +3929,7 @@ function createClaudeRunHookSettings(configPath) {
   ensureDir(eventsPath);
   const settings = readClaudeSettingsObject(configPath);
   if (!settings) return null;
-  const hooks = isRecord4(settings.hooks) ? { ...settings.hooks } : {};
+  const hooks = isRecord5(settings.hooks) ? { ...settings.hooks } : {};
   const sessionStart = Array.isArray(hooks.SessionStart) ? [...hooks.SessionStart] : [];
   sessionStart.push({
     hooks: [
@@ -3271,12 +3990,8 @@ async function createCodexRunConfig(configPath) {
   }
   const ext = extname3(configPath).toLowerCase();
   if (ext === ".toml") {
-    const profileName = `starling-run-${randomUUID2()}`;
-    const profilePath = join7(DEFAULT_CODEX_HOME, `${profileName}.config.toml`);
-    ensureDir(profilePath);
-    writeFileSync4(profilePath, readFileSync5(configPath, "utf-8"), "utf-8");
-    chmodSync4(profilePath, 384);
-    return { args: ["--profile", profileName], cleanupPaths: [profilePath] };
+    const profile = readCodexTomlProfileForRun(configPath);
+    return createCodexRunConfigFromProfile(profile);
   }
   if (ext === ".json" || ext === ".jsonc") {
     const profile = readCodexJsonProfileForRun(configPath, ext === ".jsonc");
@@ -3384,7 +4099,7 @@ async function cleanupCodexRunConfig(config) {
 function syncCodexProfileProjectTrustFromRunConfig(sourceConfigPath, runConfig) {
   if (!sourceConfigPath || !runConfig) return;
   const sourceExt = extname3(sourceConfigPath).toLowerCase();
-  if (sourceExt !== ".json" && sourceExt !== ".jsonc") return;
+  if (sourceExt !== ".json" && sourceExt !== ".jsonc" && sourceExt !== ".toml") return;
   const trustedProjects = /* @__PURE__ */ new Set();
   for (const path of runConfig.cleanupPaths) {
     if (!path.endsWith(".config.toml") || !existsSync6(path)) continue;
@@ -3393,15 +4108,19 @@ function syncCodexProfileProjectTrustFromRunConfig(sourceConfigPath, runConfig) 
     }
   }
   if (trustedProjects.size === 0) return;
+  if (sourceExt === ".toml") {
+    syncCodexTomlProjectTrust(sourceConfigPath, trustedProjects);
+    return;
+  }
   try {
     const raw = readFileSync5(sourceConfigPath, "utf-8");
-    const parsed = JSON.parse(sourceExt === ".jsonc" ? stripJsonComments(raw) : raw);
-    if (!isRecord4(parsed)) return;
-    const config = isRecord4(parsed.config) ? parsed.config : {};
-    const projects = isRecord4(config.projects) ? config.projects : {};
+    const parsed = JSON.parse(sourceExt === ".jsonc" ? stripJsonComments2(raw) : raw);
+    if (!isRecord5(parsed)) return;
+    const config = isRecord5(parsed.config) ? parsed.config : {};
+    const projects = isRecord5(config.projects) ? config.projects : {};
     let changed = false;
     for (const projectPath of trustedProjects) {
-      const project = isRecord4(projects[projectPath]) ? projects[projectPath] : {};
+      const project = isRecord5(projects[projectPath]) ? projects[projectPath] : {};
       if (project.trust_level === "trusted") continue;
       project.trust_level = "trusted";
       projects[projectPath] = project;
@@ -3414,6 +4133,57 @@ function syncCodexProfileProjectTrustFromRunConfig(sourceConfigPath, runConfig) 
   } catch (error) {
     console.error(chalk6.yellow(`Could not sync Codex project trust to ${sourceConfigPath}: ${String(error)}`));
   }
+}
+function syncCodexTomlProjectTrust(sourceConfigPath, trustedProjects) {
+  try {
+    let raw = readFileSync5(sourceConfigPath, "utf-8");
+    let changed = false;
+    for (const projectPath of trustedProjects) {
+      const updated = upsertCodexTomlProjectTrust(raw, projectPath);
+      if (updated !== raw) {
+        raw = updated;
+        changed = true;
+      }
+    }
+    if (changed) writeFileSync4(sourceConfigPath, raw.endsWith("\n") ? raw : `${raw}
+`, "utf-8");
+  } catch (error) {
+    console.error(chalk6.yellow(`Could not sync Codex project trust to ${sourceConfigPath}: ${String(error)}`));
+  }
+}
+function upsertCodexTomlProjectTrust(raw, projectPath) {
+  const header = `[projects.${JSON.stringify(projectPath)}]`;
+  const lines = raw.split(/\r?\n/);
+  const headerIndex = lines.findIndex((line) => line.trim() === header);
+  if (headerIndex < 0) {
+    return `${raw.trimEnd()}
+
+${header}
+trust_level = "trusted"
+`;
+  }
+  let endIndex = lines.length;
+  for (let index = headerIndex + 1; index < lines.length; index += 1) {
+    if (/^\s*\[/.test(lines[index])) {
+      endIndex = index;
+      break;
+    }
+  }
+  let hasTrust = false;
+  const nextLines = [...lines];
+  for (let index = endIndex - 1; index > headerIndex; index -= 1) {
+    if (!/^\s*trust_level\s*=\s*["']trusted["']\s*(?:#.*)?$/.test(nextLines[index])) continue;
+    if (hasTrust) {
+      nextLines.splice(index, 1);
+      endIndex -= 1;
+      continue;
+    }
+    hasTrust = true;
+  }
+  if (!hasTrust) {
+    nextLines.splice(endIndex, 0, 'trust_level = "trusted"');
+  }
+  return nextLines.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 function readTrustedProjectsFromCodexToml(filePath) {
   const raw = readFileSync5(filePath, "utf-8");
@@ -3441,8 +4211,8 @@ function readTrustedProjectsFromCodexToml(filePath) {
 function readCodexJsonProfileForRun(configPath, allowComments) {
   try {
     const raw = readFileSync5(configPath, "utf-8");
-    const parsed = JSON.parse(allowComments ? stripJsonComments(raw) : raw);
-    if (!isRecord4(parsed)) {
+    const parsed = JSON.parse(allowComments ? stripJsonComments2(raw) : raw);
+    if (!isRecord5(parsed)) {
       console.error(chalk6.red(`Codex config must be a JSON object: ${configPath}`));
       process.exit(1);
     }
@@ -3458,19 +4228,47 @@ function readCodexJsonProfileForRun(configPath, allowComments) {
     process.exit(1);
   }
 }
+function readCodexTomlProfileForRun(configPath) {
+  try {
+    const configText = readFileSync5(configPath, "utf-8");
+    const config = parseSimpleToml2(configText);
+    const auth = resolveCodexTomlAuth(config);
+    const profile = { config };
+    const chatProxy = resolveCodexChatProxySpec(profile, auth);
+    const env = chatProxy ? {} : resolveCodexProfileEnv(profile, auth, configText);
+    return {
+      inlineConfig: null,
+      configText: configText.trim() ? configText.endsWith("\n") ? configText : `${configText}
+` : null,
+      env,
+      chatProxy
+    };
+  } catch (error) {
+    console.error(chalk6.red(`Could not parse Codex config TOML: ${configPath}`));
+    console.error(chalk6.gray(String(error)));
+    process.exit(1);
+  }
+}
+function resolveCodexTomlAuth(config) {
+  const providerName = resolveCodexModelProviderName(config);
+  const providers = isRecord5(config.model_providers) ? config.model_providers : {};
+  const providerConfig = providerName && isRecord5(providers[providerName]) ? providers[providerName] : {};
+  const token = stringValue3(providerConfig.experimental_bearer_token) || stringValue3(config.OPENAI_API_KEY);
+  return token ? { OPENAI_API_KEY: token } : null;
+}
 function resolveCodexProfileConfigText(profile) {
   const value = profile.config;
   if (typeof value === "string" && value.trim()) {
     return value;
   }
-  if (isRecord4(value)) {
+  if (isRecord5(value)) {
     const toml = convertCodexJsonToToml(value);
     return toml.trim() ? toml : null;
   }
   return null;
 }
 function resolveCodexProfileAuth(profile) {
-  if (isRecord4(profile.auth)) {
+  if (isRecord5(profile.auth)) {
     return profile.auth;
   }
   const candidateKeys = ["OPENAI_API_KEY", "openai_api_key", "apiKey", "api_key"];
@@ -3489,19 +4287,19 @@ function resolveCodexProfileEnv(profile, auth, configText) {
   const env = {};
   const candidateKeys = ["OPENAI_API_KEY", "openai_api_key", "apiKey", "api_key", "token"];
   for (const key of candidateKeys) {
-    const value = auth?.[key] ?? (key !== "token" && isRecord4(profile.env) ? profile.env[key] : void 0);
+    const value = auth?.[key] ?? (key !== "token" && isRecord5(profile.env) ? profile.env[key] : void 0);
     if (typeof value === "string" && value.trim()) {
       env.OPENAI_API_KEY = value;
     }
   }
-  if (isRecord4(profile.env)) {
+  if (isRecord5(profile.env)) {
     for (const [key, value] of Object.entries(profile.env)) {
       if (typeof value === "string" && value.trim()) {
         env[key] = value;
       }
     }
   }
-  if (configText && isRecord4(profile.config) && typeof profile.config === "object" && profile.config !== null) {
+  if (configText && isRecord5(profile.config) && typeof profile.config === "object" && profile.config !== null) {
     const providerName = resolveCodexModelProviderName(profile.config);
     const baseUrl = resolveCodexCustomProviderBaseUrl(profile.config, providerName);
     if (typeof baseUrl === "string" && baseUrl.trim()) {
@@ -3514,7 +4312,7 @@ function resolveCodexProfileEnv(profile, auth, configText) {
 }
 function resolveStringEnv(value) {
   const env = {};
-  if (!isRecord4(value)) return env;
+  if (!isRecord5(value)) return env;
   for (const [key, child] of Object.entries(value)) {
     if (typeof child === "string" && child.trim()) {
       env[key] = child;
@@ -3523,17 +4321,17 @@ function resolveStringEnv(value) {
   return env;
 }
 function resolveCodexChatProxySpec(profile, auth) {
-  if (!isRecord4(profile.config)) return null;
+  if (!isRecord5(profile.config)) return null;
   const providerName = resolveCodexModelProviderName(profile.config);
   if (!providerName) return null;
   const providers = profile.config.model_providers;
-  if (!isRecord4(providers)) return null;
+  if (!isRecord5(providers)) return null;
   const providerConfig = providers[providerName];
-  if (!isRecord4(providerConfig)) return null;
+  if (!isRecord5(providerConfig)) return null;
   const upstreamBaseUrl = typeof providerConfig.base_url === "string" ? providerConfig.base_url.trim() : "";
   if (!upstreamBaseUrl) return null;
   const apiFormat = resolveCodexApiFormat(profile, profile.config, providerConfig);
-  const providerLabel = `${providerName} ${stringValue2(providerConfig.name)} ${stringValue2(profile.config.model)} ${upstreamBaseUrl}`.toLowerCase();
+  const providerLabel = `${providerName} ${stringValue3(providerConfig.name)} ${stringValue3(profile.config.model)} ${upstreamBaseUrl}`.toLowerCase();
   const shouldProxy = apiFormat === "openai_chat" || providerLabel.includes("deepseek");
   if (!shouldProxy) return null;
   const apiKey = resolveCodexApiKey(auth, profile);
@@ -3546,17 +4344,17 @@ function resolveCodexChatProxySpec(profile, auth) {
     upstreamBaseUrl,
     apiKey,
     model: typeof profile.config.model === "string" ? profile.config.model : void 0,
-    config: cloneRecord(profile.config)
+    config: cloneRecord2(profile.config)
   };
 }
 function codexProxyConfigText(config, proxyBaseUrl) {
-  const cloned = cloneRecord(config);
+  const cloned = cloneRecord2(config);
   const providerName = resolveCodexModelProviderName(cloned);
-  if (!providerName || !isRecord4(cloned.model_providers)) {
+  if (!providerName || !isRecord5(cloned.model_providers)) {
     return convertCodexJsonToToml(cloned);
   }
   const providerConfig = cloned.model_providers[providerName];
-  if (isRecord4(providerConfig)) {
+  if (isRecord5(providerConfig)) {
     providerConfig.base_url = proxyBaseUrl;
     providerConfig.wire_api = "responses";
     providerConfig.requires_openai_auth = false;
@@ -3568,7 +4366,7 @@ function codexProxyConfigText(config, proxyBaseUrl) {
 }
 function resolveCodexApiFormat(...values) {
   for (const value of values) {
-    const apiFormat = stringValue2(value.api_format) || stringValue2(value.apiFormat);
+    const apiFormat = stringValue3(value.api_format) || stringValue3(value.apiFormat);
     if (apiFormat) return apiFormat;
   }
   return null;
@@ -3576,15 +4374,15 @@ function resolveCodexApiFormat(...values) {
 function resolveCodexApiKey(auth, profile) {
   const candidateKeys = ["OPENAI_API_KEY", "openai_api_key", "apiKey", "api_key", "token"];
   for (const key of candidateKeys) {
-    const value = auth?.[key] ?? profile[key] ?? (isRecord4(profile.env) ? profile.env[key] : void 0);
+    const value = auth?.[key] ?? profile[key] ?? (isRecord5(profile.env) ? profile.env[key] : void 0);
     if (typeof value === "string" && value.trim()) return value.trim();
   }
   return null;
 }
-function cloneRecord(value) {
+function cloneRecord2(value) {
   return JSON.parse(JSON.stringify(value));
 }
-function stringValue2(value) {
+function stringValue3(value) {
   return typeof value === "string" ? value : "";
 }
 function resolveCodexModelProviderName(configValue) {
@@ -3595,9 +4393,9 @@ function resolveCodexModelProviderName(configValue) {
 function resolveCodexCustomProviderBaseUrl(configValue, providerName) {
   if (!providerName) return null;
   const providers = configValue.model_providers;
-  if (!isRecord4(providers)) return null;
+  if (!isRecord5(providers)) return null;
   const providerConfig = providers[providerName];
-  if (!isRecord4(providerConfig)) return null;
+  if (!isRecord5(providerConfig)) return null;
   const baseUrl = providerConfig.base_url;
   if (typeof baseUrl === "string" && baseUrl.trim()) return baseUrl.trim();
   return null;
@@ -3611,14 +4409,82 @@ function resolveCodexInlineConfig(profile) {
   delete config.config;
   return Object.keys(config).length > 0 ? config : null;
 }
-function stripJsonComments(value) {
+function stripJsonComments2(value) {
   return value.replace(/^\s*\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+}
+function parseSimpleToml2(raw) {
+  const root = {};
+  let current = root;
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const section = trimmed.match(/^\[([^\]]+)\]$/);
+    if (section) {
+      current = root;
+      for (const part of splitTomlPath2(section[1])) {
+        const existing = current[part];
+        if (!isRecord5(existing)) current[part] = {};
+        current = current[part];
+      }
+      continue;
+    }
+    const kv = trimmed.match(/^([A-Za-z0-9_.-]+|"(?:\\.|[^"])+")\s*=\s*(.+?)\s*(?:#.*)?$/);
+    if (!kv) continue;
+    current[unquoteTomlKey2(kv[1])] = parseTomlScalar2(kv[2].trim());
+  }
+  return root;
+}
+function splitTomlPath2(value) {
+  const parts = [];
+  let current = "";
+  let inQuote = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === '"' && value[index - 1] !== "\\") {
+      inQuote = !inQuote;
+      current += char;
+      continue;
+    }
+    if (char === "." && !inQuote) {
+      parts.push(unquoteTomlKey2(current.trim()));
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) parts.push(unquoteTomlKey2(current.trim()));
+  return parts;
+}
+function unquoteTomlKey2(value) {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+function parseTomlScalar2(value) {
+  if (value.startsWith('"') && value.endsWith('"')) {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value.slice(1, -1);
+    }
+  }
+  if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1);
+  if (value === "true") return true;
+  if (value === "false") return false;
+  if (/^-?\d+(?:\.\d+)?$/.test(value)) return Number(value);
+  return value;
 }
 function flattenCodexConfig(value, prefix = "") {
   const entries = [];
   for (const [key, nestedValue] of Object.entries(value)) {
     const path = prefix ? `${prefix}.${key}` : key;
-    if (isRecord4(nestedValue)) {
+    if (isRecord5(nestedValue)) {
       entries.push(...flattenCodexConfig(nestedValue, path));
       continue;
     }
@@ -3635,17 +4501,17 @@ function toCodexConfigValue(value) {
   }
   return JSON.stringify(value);
 }
-function toTomlValue(value) {
-  if (isRecord4(value)) {
+function toTomlValue2(value) {
+  if (isRecord5(value)) {
     const segments = [];
     for (const [k, v] of Object.entries(value)) {
       if (typeof v === "undefined") continue;
-      segments.push(`${toTomlKey(k)} = ${toTomlValue(v)}`);
+      segments.push(`${toTomlKey2(k)} = ${toTomlValue2(v)}`);
     }
     return `{ ${segments.join(", ")} }`;
   }
   if (Array.isArray(value)) {
-    const entries = value.filter((item) => typeof item !== "undefined").map((item) => toTomlValue(item));
+    const entries = value.filter((item) => typeof item !== "undefined").map((item) => toTomlValue2(item));
     return `[${entries.join(", ")}]`;
   }
   if (typeof value === "string") return JSON.stringify(value);
@@ -3656,29 +4522,32 @@ function toTomlValue(value) {
   }
   return JSON.stringify(String(value));
 }
-function toTomlKey(key) {
+function toTomlKey2(key) {
   return /^\w+$/.test(key) ? key : JSON.stringify(key);
 }
-function serializeTomlObject(value, prefix, lines) {
+function serializeTomlObject2(value, prefix, lines) {
+  for (const [key, child] of Object.entries(value)) {
+    if (typeof child === "undefined" || isRecord5(child)) continue;
+    lines.push(`${toTomlKey2(key)} = ${toTomlValue2(child)}`);
+  }
   for (const [key, child] of Object.entries(value)) {
     if (typeof child === "undefined") continue;
-    if (isRecord4(child)) {
+    if (isRecord5(child)) {
       const nextPath = [...prefix, key];
-      lines.push("");
-      lines.push(`[${[...nextPath].map(toTomlKey).join(".")}]`);
-      serializeTomlObject(child, nextPath, lines);
-      continue;
+      if (hasDirectTomlValues2(child)) {
+        lines.push("");
+        lines.push(`[${[...nextPath].map(toTomlKey2).join(".")}]`);
+      }
+      serializeTomlObject2(child, nextPath, lines);
     }
-    if (Array.isArray(child)) {
-      lines.push(`${toTomlKey(key)} = ${toTomlValue(child)}`);
-      continue;
-    }
-    lines.push(`${toTomlKey(key)} = ${toTomlValue(child)}`);
   }
+}
+function hasDirectTomlValues2(value) {
+  return Object.values(value).some((child) => typeof child !== "undefined" && !isRecord5(child));
 }
 function convertCodexJsonToToml(value) {
   const lines = [];
-  serializeTomlObject(value, [], lines);
+  serializeTomlObject2(value, [], lines);
   return lines.length > 0 ? `${lines.join("\n")}
 ` : "";
 }
@@ -3704,7 +4573,7 @@ function readRunHookSessionId(eventsPath) {
   return null;
 }
 function readSessionIdFromHookEntry(value) {
-  if (!isRecord4(value)) return null;
+  if (!isRecord5(value)) return null;
   const direct = value.session_id ?? value.sessionId;
   if (typeof direct === "string" && SESSION_ID_PATTERN.test(direct)) return direct;
   for (const nested of Object.values(value)) {
@@ -3725,8 +4594,8 @@ function readClaudeSettingsObject(configPath) {
 }
 function readSettingsJsonObject(filePath, allowComments) {
   const raw = readFileSync5(filePath, "utf-8");
-  const parsed = JSON.parse(allowComments ? stripJsonComments(raw) : raw);
-  return isRecord4(parsed) ? parsed : null;
+  const parsed = JSON.parse(allowComments ? stripJsonComments2(raw) : raw);
+  return isRecord5(parsed) ? parsed : null;
 }
 function jsonStable(value) {
   return JSON.stringify(value);
@@ -3734,7 +4603,7 @@ function jsonStable(value) {
 function cloneJsonValue(value) {
   return value === void 0 ? void 0 : JSON.parse(JSON.stringify(value));
 }
-function isRecord4(value) {
+function isRecord5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function shellQuote(value) {
@@ -3870,27 +4739,42 @@ async function runAgent(binary, args, cwd, options) {
       env: childEnv
     });
     let terminalInterrupted = false;
+    let settled = false;
     const onSigInt = () => {
       terminalInterrupted = true;
       child.kill("SIGINT");
+    };
+    const cleanupListeners = () => {
+      if (options?.preserveSignals) {
+        process.off("SIGINT", onSigInt);
+      }
+    };
+    const settle = (exitCode) => {
+      if (settled) return;
+      settled = true;
+      cleanupListeners();
+      resolvePromise({ exitCode });
     };
     if (options?.preserveSignals) {
       process.on("SIGINT", onSigInt);
     }
     child.on("error", (err) => {
-      if (options?.preserveSignals) {
-        process.off("SIGINT", onSigInt);
-      }
+      cleanupListeners();
       reject(err);
     });
-    child.on("close", (code) => {
-      if (options?.preserveSignals) {
-        process.off("SIGINT", onSigInt);
-      }
+    child.on("exit", (code) => {
       if (terminalInterrupted) {
-        return resolvePromise({ exitCode: 130 });
+        settle(130);
+        return;
       }
-      resolvePromise({ exitCode: code ?? 0 });
+      settle(code ?? 0);
+    });
+    child.on("close", (code) => {
+      if (terminalInterrupted) {
+        settle(130);
+        return;
+      }
+      settle(code ?? 0);
     });
   });
 }
@@ -3929,6 +4813,17 @@ async function detectSessionStartedAfterRun(provider, startedAt, beforeRun, cwd,
     );
     if (hintedSession) {
       return hintedSession;
+    }
+  }
+  if (provider === "claude" && normalizedCwd) {
+    const projectMatch = await detectSessionInCurrentClaudeProject(
+      startedTime,
+      beforeRun,
+      normalizedCwd,
+      beforeRunProjectFiles
+    );
+    if (projectMatch) {
+      return projectMatch;
     }
   }
   for (let attempt = 0; attempt < RUN_SESSION_DETECT_ATTEMPTS; attempt++) {
@@ -4371,7 +5266,7 @@ function normalizeAgent(input) {
 import { Command as Command6 } from "commander";
 import chalk7 from "chalk";
 import Table4 from "cli-table3";
-import { existsSync as existsSync7, readFileSync as readFileSync6, readdirSync as readdirSync5 } from "fs";
+import { existsSync as existsSync7, readFileSync as readFileSync6, readdirSync as readdirSync5, unlinkSync as unlinkSync7 } from "fs";
 import { basename as basename3, extname as extname4, join as join8 } from "path";
 import { homedir as homedir2 } from "os";
 var SUPPORTED_EXTENSIONS = /* @__PURE__ */ new Set([".json", ".jsonc", ".toml"]);
@@ -4405,11 +5300,37 @@ function registerModelCommand(program2) {
     console.log(chalk7.green(`Added ${agent} model profile: ${result.name}`));
     console.log(chalk7.gray(`  Source: ${result.source}`));
   });
+  model.command("delete <name>").aliases(["del", "rm"]).description("Delete a Starling model profile").requiredOption("-a, --agent <agent>", "agent: claude | codex").option("--json", "output JSON").action((name, opts) => {
+    const agent = normalizeAgent2(opts.agent);
+    if (!agent || agent === "all") {
+      console.error(chalk7.red(`Unknown agent: ${opts.agent}`));
+      console.error(chalk7.gray("Allowed values: claude, codex"));
+      process.exit(1);
+    }
+    const result = deleteModelProfile(name, agent);
+    if (opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(chalk7.green(`Deleted ${agent} model profile: ${result.name}`));
+    for (const source of result.sources) {
+      console.log(chalk7.gray(`  Removed: ${source}`));
+    }
+  });
   program2.addCommand(model);
 }
 function addModelProfile(name, agent, opts) {
-  const profileName = normalizeProfileName(name);
-  const source = join8(agent === "claude" ? DEFAULT_CLAUDE_SETTINGS_DIR : DEFAULT_CODEX_SETTINGS_DIR, `${profileName}.json`);
+  const profileName = normalizeProfileName2(name);
+  if (agent === "codex") {
+    const existing = getCodexProviderProfile(profileName);
+    if (existing && !opts.force) {
+      console.error(chalk7.red(`Model profile already exists: ${profileName}`));
+      console.error(chalk7.gray(`  Source: ${existing.filePath}`));
+      console.error(chalk7.gray("Use --force to overwrite it."));
+      process.exit(1);
+    }
+  }
+  const source = join8(DEFAULT_CLAUDE_SETTINGS_DIR, `${profileName}.json`);
   if (existsSync7(source) && !opts.force) {
     console.error(chalk7.red(`Model profile already exists: ${profileName}`));
     console.error(chalk7.gray(`  Source: ${source}`));
@@ -4421,9 +5342,45 @@ function addModelProfile(name, agent, opts) {
     console.error(chalk7.red("Model name cannot be empty."));
     process.exit(1);
   }
-  const payload = agent === "claude" ? buildClaudeProfile(opts, model) : buildCodexProfile(opts, model);
+  if (agent === "codex") {
+    const saved = saveCodexProviderProfile(profileName, {
+      apiKey: opts.apiKey?.trim() || "",
+      baseUrl: opts.baseUrl?.trim() || "",
+      model,
+      modelProvider: opts.provider?.trim() || "custom",
+      wireApi: opts.wireApi?.trim() || "responses",
+      config: {
+        model_reasoning_effort: opts.reasoning?.trim() || "",
+        disable_response_storage: true
+      }
+    });
+    return { agent, name: profileName, source: saved.filePath, model };
+  }
+  const payload = buildClaudeProfile(opts, model);
   atomicWriteJSON(source, payload);
   return { agent, name: profileName, source, model };
+}
+function deleteModelProfile(name, agent) {
+  const profileName = normalizeProfileName2(name);
+  const sources = findModelProfileSources(profileName, agent);
+  if (sources.length === 0) {
+    const dir = agent === "claude" ? DEFAULT_CLAUDE_SETTINGS_DIR : DEFAULT_CODEX_SETTINGS_DIR;
+    const extensions = agent === "claude" ? ".json or .jsonc" : ".toml, .json, or .jsonc";
+    console.error(chalk7.red(`Model profile not found: ${profileName}`));
+    console.error(chalk7.gray(`  Agent: ${agent}`));
+    console.error(chalk7.gray(`  Expected under: ${dir}`));
+    console.error(chalk7.gray(`  Supported files: ${profileName}${extensions}`));
+    process.exit(1);
+  }
+  for (const source of sources) {
+    unlinkSync7(source);
+  }
+  return { agent, name: profileName, sources };
+}
+function findModelProfileSources(profileName, agent) {
+  const dir = agent === "claude" ? DEFAULT_CLAUDE_SETTINGS_DIR : DEFAULT_CODEX_SETTINGS_DIR;
+  const extensions = agent === "claude" ? [".json", ".jsonc"] : [".toml", ".json", ".jsonc"];
+  return extensions.map((extension) => join8(dir, `${profileName}${extension}`)).filter((source) => existsSync7(source));
 }
 function buildClaudeProfile(opts, model) {
   const env = {
@@ -4452,31 +5409,7 @@ function buildClaudeProfile(opts, model) {
     }
   };
 }
-function buildCodexProfile(opts, model) {
-  const provider = opts.provider?.trim() || "custom";
-  const providerConfig = {
-    name: provider,
-    base_url: opts.baseUrl?.trim() || "",
-    wire_api: opts.wireApi?.trim() || "responses",
-    requires_openai_auth: true
-  };
-  const config = {
-    model_provider: provider,
-    model,
-    model_reasoning_effort: opts.reasoning?.trim() || "",
-    disable_response_storage: true,
-    model_providers: {
-      [provider]: providerConfig
-    }
-  };
-  return {
-    auth: {
-      OPENAI_API_KEY: opts.apiKey?.trim() || ""
-    },
-    config
-  };
-}
-function normalizeProfileName(name) {
+function normalizeProfileName2(name) {
   const normalized = basename3(name).replace(/\.(jsonc?|toml)$/i, "").trim();
   if (!normalized || normalized === "." || normalized === "..") {
     console.error(chalk7.red(`Invalid model profile name: ${name}`));
@@ -4515,6 +5448,7 @@ function collectClaudeConfigs() {
   ];
 }
 function collectCodexConfigs() {
+  migrateCodexJsonProfilesToToml();
   const currentPath = join8(DEFAULT_CODEX_HOME, "config.toml");
   return [
     summarizeCodexToml(currentPath, "current", "current", readCodexAuthState()),
@@ -4552,15 +5486,15 @@ function summarizeClaudeJson(filePath, name, scope) {
   if (!base.exists) return base;
   try {
     const parsed = parseJsonFile(filePath);
-    const env = isRecord5(parsed.env) ? parsed.env : parsed;
-    const model = stringValue3(env.ANTHROPIC_MODEL) || stringValue3(env.CLAUDE_MODEL) || stringValue3(env.ANTHROPIC_DEFAULT_SONNET_MODEL) || stringValue3(parsed.model);
-    const provider = inferProviderName(stringValue3(env.ANTHROPIC_BASE_URL) || stringValue3(env.CLAUDE_BASE_URL));
+    const env = isRecord6(parsed.env) ? parsed.env : parsed;
+    const model = stringValue4(env.ANTHROPIC_MODEL) || stringValue4(env.CLAUDE_MODEL) || stringValue4(env.ANTHROPIC_DEFAULT_SONNET_MODEL) || stringValue4(parsed.model);
+    const provider = inferProviderName(stringValue4(env.ANTHROPIC_BASE_URL) || stringValue4(env.CLAUDE_BASE_URL));
     return {
       ...base,
       model,
       provider,
-      baseUrl: stringValue3(env.ANTHROPIC_BASE_URL) || stringValue3(env.CLAUDE_BASE_URL),
-      reasoning: stringValue3(env.ANTHROPIC_REASONING_EFFORT) || stringValue3(parsed.reasoning),
+      baseUrl: stringValue4(env.ANTHROPIC_BASE_URL) || stringValue4(env.CLAUDE_BASE_URL),
+      reasoning: stringValue4(env.ANTHROPIC_REASONING_EFFORT) || stringValue4(parsed.reasoning),
       auth: describeAuth(env, ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_API_KEY"])
     };
   } catch (error) {
@@ -4570,7 +5504,7 @@ function summarizeClaudeJson(filePath, name, scope) {
 function summarizeCodexProfile(filePath, name) {
   const extension = extname4(filePath).toLowerCase();
   if (extension === ".toml") {
-    return summarizeCodexToml(filePath, name, "profile", "profile");
+    return summarizeCodexToml(filePath, name, "profile", readCodexTomlAuthState(filePath));
   }
   if (extension !== ".json" && extension !== ".jsonc") {
     return {
@@ -4591,8 +5525,8 @@ function summarizeCodexProfile(filePath, name) {
   };
   try {
     const parsed = parseJsonFile(filePath);
-    const config = isRecord5(parsed.config) ? parsed.config : parsed;
-    const auth = isRecord5(parsed.auth) ? describeAuth(parsed.auth, ["OPENAI_API_KEY", "api_key", "apiKey"]) : "none";
+    const config = isRecord6(parsed.config) ? parsed.config : parsed;
+    const auth = isRecord6(parsed.auth) ? describeAuth(parsed.auth, ["OPENAI_API_KEY", "api_key", "apiKey"]) : "none";
     return summarizeCodexConfigObject(base, config, auth);
   } catch (error) {
     return { ...base, error: formatError(error) };
@@ -4615,27 +5549,27 @@ function summarizeCodexToml(filePath, name, scope, auth) {
     return {
       ...base,
       model: parseTomlValue(raw, "model"),
-      provider: stringValue3(providerSection.name) || provider,
-      baseUrl: stringValue3(providerSection.base_url),
+      provider: stringValue4(providerSection.name) || provider,
+      baseUrl: stringValue4(providerSection.base_url),
       reasoning: parseTomlValue(raw, "model_reasoning_effort"),
-      wireApi: stringValue3(providerSection.wire_api)
+      wireApi: stringValue4(providerSection.wire_api)
     };
   } catch (error) {
     return { ...base, error: formatError(error) };
   }
 }
 function summarizeCodexConfigObject(base, config, auth) {
-  const providerKey = stringValue3(config.model_provider);
-  const providers = isRecord5(config.model_providers) ? config.model_providers : {};
-  const providerConfig = providerKey && isRecord5(providers[providerKey]) ? providers[providerKey] : {};
-  const providerRecord = isRecord5(providerConfig) ? providerConfig : {};
+  const providerKey = stringValue4(config.model_provider);
+  const providers = isRecord6(config.model_providers) ? config.model_providers : {};
+  const providerConfig = providerKey && isRecord6(providers[providerKey]) ? providers[providerKey] : {};
+  const providerRecord = isRecord6(providerConfig) ? providerConfig : {};
   return {
     ...base,
-    model: stringValue3(config.model),
-    provider: stringValue3(providerRecord.name) || providerKey,
-    baseUrl: stringValue3(providerRecord.base_url),
-    reasoning: stringValue3(config.model_reasoning_effort),
-    wireApi: stringValue3(providerRecord.wire_api),
+    model: stringValue4(config.model),
+    provider: stringValue4(providerRecord.name) || providerKey,
+    baseUrl: stringValue4(providerRecord.base_url),
+    reasoning: stringValue4(config.model_reasoning_effort),
+    wireApi: stringValue4(providerRecord.wire_api),
     auth
   };
 }
@@ -4648,6 +5582,15 @@ function readCodexAuthState() {
       return "stored";
     }
     return Object.keys(parsed).length > 0 ? "stored" : "none";
+  } catch {
+    return "unreadable";
+  }
+}
+function readCodexTomlAuthState(filePath) {
+  if (!existsSync7(filePath)) return "none";
+  try {
+    const raw = readFileSync6(filePath, "utf-8");
+    return /^\s*(experimental_bearer_token|OPENAI_API_KEY)\s*=\s*["'][^"']+["']/m.test(raw) ? "configured" : "none";
   } catch {
     return "unreadable";
   }
@@ -4696,13 +5639,13 @@ function formatModelTable(rows) {
 }
 function parseJsonFile(filePath) {
   const raw = readFileSync6(filePath, "utf-8");
-  const parsed = JSON.parse(stripJsonComments2(raw));
-  if (!isRecord5(parsed)) {
+  const parsed = JSON.parse(stripJsonComments3(raw));
+  if (!isRecord6(parsed)) {
     throw new Error("JSON root is not an object");
   }
   return parsed;
 }
-function stripJsonComments2(raw) {
+function stripJsonComments3(raw) {
   return raw.replace(/^\s*\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
 }
 function parseTomlValue(raw, key) {
@@ -4754,10 +5697,10 @@ function truncate(value, max) {
 function formatError(error) {
   return error instanceof Error ? error.message : String(error);
 }
-function stringValue3(value) {
+function stringValue4(value) {
   return typeof value === "string" ? value : "";
 }
-function isRecord5(value) {
+function isRecord6(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function escapeRegex(value) {
@@ -4767,7 +5710,7 @@ function escapeRegex(value) {
 // src/index.ts
 var program = new Command7();
 program.enablePositionalOptions();
-program.name("starling").description("Agent session manager \u2014 discover, pin, and organize AI coding sessions").version("0.0.4");
+program.name("starling").description("Agent session manager \u2014 discover, pin, and organize AI coding sessions").version("0.0.6");
 registerSessionCommand(program);
 registerPinCommand(program);
 registerSpaceCommand(program);

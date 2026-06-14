@@ -198,6 +198,8 @@ starling model add demo --agent codex \
   --api-key "$OPENAI_API_KEY" \
   --reasoning high \
   --wire-api responses
+
+starling model delete demo --agent codex
 ```
 
 Use a profile when launching an agent:
@@ -220,36 +222,30 @@ Starling stores its own data in `~/.starling`:
     claude/
       <profile>.json
     codex/
-      <profile>.json
+      <profile>.toml
 ```
 
 Claude profiles are JSON files that Starling passes to Claude Code as settings.
 
-Codex profiles are JSON files with `auth` and `config` sections. Starling converts them into a temporary Codex config for the run, so `starling run --config <name> codex` does not overwrite the user's default `~/.codex/config.toml`.
+Codex profiles are Codex-style TOML files. Starling copies them into a temporary Codex profile for the run, so `starling run --config <name> codex` does not overwrite the user's default `~/.codex/config.toml`.
 
 Example Codex profile:
 
-```json
-{
-  "auth": {
-    "OPENAI_API_KEY": "sk-..."
-  },
-  "config": {
-    "model_provider": "custom",
-    "model": "gpt-5.2",
-    "model_reasoning_effort": "high",
-    "disable_response_storage": true,
-    "model_providers": {
-      "custom": {
-        "name": "custom",
-        "base_url": "https://api.example.com/v1",
-        "wire_api": "responses",
-        "requires_openai_auth": true
-      }
-    }
-  }
-}
+```toml
+model_provider = "custom"
+model = "gpt-5.2"
+model_reasoning_effort = "high"
+disable_response_storage = true
+
+[model_providers.custom]
+name = "custom"
+base_url = "https://api.example.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+experimental_bearer_token = "sk-..."
 ```
+
+For Chat Completions-only providers, add `api_format = "openai_chat"` to the profile.
 
 ## VS Code Extension
 

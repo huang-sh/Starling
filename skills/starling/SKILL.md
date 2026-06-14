@@ -1,6 +1,6 @@
 ---
 name: starling-agent-session
-description: Use when working with Starling, the local agent session manager for Claude Code and Codex: organizing sessions into catalogs, managing projects/session, launching agents with catalog assignment, configuring Claude/Codex profiles.
+description: "Use when working with Starling, the local agent session manager for Claude Code and Codex: organizing sessions into catalogs, managing projects/session, launching agents with catalog assignment, configuring Claude/Codex profiles."
 ---
 
 # Starling
@@ -103,7 +103,7 @@ Profiles live under:
 
 ```text
 ~/.starling/settings/claude/<name>.json
-~/.starling/settings/codex/<name>.json
+~/.starling/settings/codex/<name>.toml
 ```
 
 List profiles:
@@ -119,16 +119,17 @@ Create profiles:
 ```bash
 starling model add ds --agent claude --model deepseek-v4-pro --base-url https://api.example.com --api-key "$API_KEY"
 starling model add demo --agent codex --model gpt-5.2 --base-url https://api.example.com/v1 --api-key "$OPENAI_API_KEY" --reasoning high --wire-api responses
+starling model delete demo --agent codex
 ```
 
-Codex profiles use JSON with `auth` and `config`. Starling converts them into temporary Codex config for a run.
+Codex profiles use Codex-style TOML. Store the per-profile API key as `experimental_bearer_token` in the provider table. For Chat Completions-only providers, add `api_format = "openai_chat"`.
 
 ## VS Code Extension
 
-Extension source is in:
+Extension source is maintained separately in:
 
 ```text
-vscode-extension/
+/data20T/dev/Starling-ext
 ```
 
 Compile before claiming extension changes work:

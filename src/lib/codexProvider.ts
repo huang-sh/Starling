@@ -51,6 +51,7 @@ interface CodexProfileData {
 }
 
 export function listCodexProviderProfiles(): CodexProviderProfileSummary[] {
+  migrateCodexJsonProfilesToToml();
   if (!existsSync(DEFAULT_CODEX_SETTINGS_DIR)) return [];
 
   const entries = readdirSync(DEFAULT_CODEX_SETTINGS_DIR, { withFileTypes: true });
@@ -83,6 +84,7 @@ export function listCodexProviderProfiles(): CodexProviderProfileSummary[] {
 }
 
 export function getCodexProviderProfile(profileName: string): CodexProviderProfileSummary | null {
+  migrateCodexJsonProfilesToToml();
   const sourcePath = resolveCodexConfigPath(profileName);
   if (!sourcePath) return null;
   const extension = extname(sourcePath).toLowerCase();
@@ -98,12 +100,14 @@ export function getCodexProviderProfile(profileName: string): CodexProviderProfi
 }
 
 export function readCodexProviderProfileFile(profileName: string): CodexProviderProfileFile {
+  migrateCodexJsonProfilesToToml();
   const sourcePath = resolveCodexConfigPathOrThrow(profileName);
   const extension = extname(sourcePath).toLowerCase();
   if (extension === ".toml") {
+    const parsed = parseCodexTomlProfile(sourcePath);
     return {
-      auth: null,
-      config: null,
+      auth: parsed.auth,
+      config: parsed.configObject,
       filePath: sourcePath,
     };
   }
@@ -124,27 +128,22 @@ export function saveCodexProviderProfile(
   profileName: string,
   patch: CodexProviderProfilePatch
 ): CodexProviderProfileSummary {
+  migrateCodexJsonProfilesToToml();
   const safeName = normalizeProfileName(profileName);
   const existingPath = resolveCodexConfigPath(safeName);
-  const targetPath = existingPath && extname(existingPath).toLowerCase() !== ".toml"
-    ? existingPath
-    : join(DEFAULT_CODEX_SETTINGS_DIR, `${safeName}.json`);
+  const targetPath = existingPath ?? join(DEFAULT_CODEX_SETTINGS_DIR, `${safeName}.toml`);
 
   const existing = existsSync(targetPath)
-    ? parseCodexJsonProfile(targetPath, extname(targetPath).toLowerCase() === ".jsonc")
+    ? parseCodexProfile(targetPath)
     : { auth: null, config: null, configObject: null };
 
   const auth = mergeAuthPatch(existing.auth, patch);
   const config = mergeConfigPatch(existing.configObject, patch);
-  const payload: Record<string, unknown> = {};
-  if (auth && Object.keys(auth).length > 0) payload.auth = auth;
-  if (config && Object.keys(config).length > 0) payload.config = config;
-
-  if (!payload.auth && !payload.config) {
+  if ((!auth || Object.keys(auth).length === 0) && (!config || Object.keys(config).length === 0)) {
     throw new Error("Codex provider profile needs at least auth or config content.");
   }
 
-  atomicWriteJSON(targetPath, payload);
+  writeCodexProfileToml(targetPath, auth, config);
   return getCodexProviderProfile(safeName)!;
 }
 
@@ -181,6 +180,7 @@ export function renameCodexProviderProfile(profileName: string, nextName: string
 }
 
 export function resolveCodexConfigPath(nameOrPath?: string): string | null {
+  migrateCodexJsonProfilesToToml();
   if (!nameOrPath) return null;
 
   if (isAbsolute(nameOrPath) || existsSync(nameOrPath)) {
@@ -260,6 +260,7 @@ export function setCurrentCodexProvider(profileName: string, sourcePath: string)
 }
 
 export function useCodexProvider(profileName: string): CodexProviderActivationResult {
+  migrateCodexJsonProfilesToToml();
   const sourcePath = resolveCodexConfigPathOrThrow(profileName);
   inspectCodexProfile(sourcePath);
 
@@ -272,6 +273,12 @@ export function useCodexProvider(profileName: string): CodexProviderActivationRe
     const text = readFileSync(sourcePath, "utf-8");
     writeCodexConfigText(text);
     wroteConfig = true;
+    const profile = parseCodexTomlProfile(sourcePath);
+    if (profile.auth && Object.keys(profile.auth).length > 0) {
+      const merged = mergeAuthWithLive(profile.auth);
+      atomicWriteJSON(join(DEFAULT_CODEX_HOME, "auth.json"), merged);
+      wroteAuth = true;
+    }
   } else if (extension === ".json" || extension === ".jsonc") {
     const profile = parseCodexJsonProfile(sourcePath, extension === ".jsonc");
 
@@ -305,10 +312,11 @@ function inspectCodexProfile(filePath: string): CodexProfileData {
   const extension = extname(filePath).toLowerCase();
 
   if (extension === ".toml") {
+    const parsed = parseCodexTomlProfile(filePath);
     return {
       filePath,
       hasConfig: true,
-      hasAuth: false,
+      hasAuth: parsed.auth !== null,
     };
   }
 
@@ -328,6 +336,49 @@ interface ParsedCodexProfile {
   auth: Record<string, unknown> | null;
   config: string | null;
   configObject: Record<string, unknown> | null;
+}
+
+export function migrateCodexJsonProfilesToToml(): string[] {
+  if (!existsSync(DEFAULT_CODEX_SETTINGS_DIR)) return [];
+  const migrated: string[] = [];
+  const entries = readdirSync(DEFAULT_CODEX_SETTINGS_DIR, { withFileTypes: true });
+
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const sourcePath = join(DEFAULT_CODEX_SETTINGS_DIR, entry.name);
+    const extension = extname(sourcePath).toLowerCase();
+    if (extension !== ".json" && extension !== ".jsonc") continue;
+
+    const name = entry.name.slice(0, entry.name.length - extension.length);
+    const targetPath = join(DEFAULT_CODEX_SETTINGS_DIR, `${name}.toml`);
+    const backupPath = `${sourcePath}.bak`;
+
+    try {
+      if (!existsSync(targetPath)) {
+        const parsed = parseCodexJsonProfile(sourcePath, extension === ".jsonc");
+        writeCodexProfileToml(targetPath, parsed.auth, parsed.configObject);
+        migrated.push(targetPath);
+      }
+      if (!existsSync(backupPath)) {
+        renameSync(sourcePath, backupPath);
+      } else if (existsSync(targetPath)) {
+        unlinkSync(sourcePath);
+      }
+    } catch {
+      // Keep invalid legacy files in place so users can repair them manually.
+    }
+  }
+
+  return migrated;
+}
+
+function parseCodexProfile(filePath: string): ParsedCodexProfile {
+  const extension = extname(filePath).toLowerCase();
+  if (extension === ".toml") return parseCodexTomlProfile(filePath);
+  if (extension === ".json" || extension === ".jsonc") {
+    return parseCodexJsonProfile(filePath, extension === ".jsonc");
+  }
+  throw new Error(`Unsupported codex profile type: ${filePath}`);
 }
 
 function parseCodexJsonProfile(filePath: string, allowComments: boolean): ParsedCodexProfile {
@@ -352,6 +403,21 @@ function parseCodexJsonProfile(filePath: string, allowComments: boolean): Parsed
   }
 
   return { auth, config, configObject };
+}
+
+function parseCodexTomlProfile(filePath: string): ParsedCodexProfile {
+  const raw = readFileSync(filePath, "utf-8");
+  const configObject = parseSimpleToml(raw);
+  const providerName = stringValue(configObject.model_provider);
+  const providers = isRecord(configObject.model_providers) ? configObject.model_providers : {};
+  const providerConfig = providerName && isRecord(providers[providerName]) ? providers[providerName] as Record<string, unknown> : {};
+  const token = stringValue(providerConfig.experimental_bearer_token) || stringValue(configObject.OPENAI_API_KEY);
+  const auth = token ? { OPENAI_API_KEY: token } : null;
+  return {
+    auth,
+    config: raw.endsWith("\n") ? raw : `${raw}\n`,
+    configObject,
+  };
 }
 
 function resolveProfileAuth(value: Record<string, unknown>): Record<string, unknown> | null {
@@ -434,6 +500,53 @@ function mergeConfigPatch(
   return Object.keys(merged).length > 0 ? merged : null;
 }
 
+function writeCodexProfileToml(
+  targetPath: string,
+  auth: Record<string, unknown> | null,
+  config: Record<string, unknown> | null
+): void {
+  const normalized = config ? cloneRecord(config) : {};
+  const token = auth ? stringValue(auth.OPENAI_API_KEY) || stringValue(auth.api_key) || stringValue(auth.apiKey) : "";
+  if (token) {
+    const providerName = stringValue(normalized.model_provider) || "custom";
+    normalized.model_provider = providerName;
+    const providers = isRecord(normalized.model_providers) ? normalized.model_providers : {};
+    const providerConfig = isRecord(providers[providerName]) ? providers[providerName] as Record<string, unknown> : {};
+    providerConfig.name = stringValue(providerConfig.name) || providerName;
+    providerConfig.requires_openai_auth = typeof providerConfig.requires_openai_auth === "boolean" ? providerConfig.requires_openai_auth : true;
+    providerConfig.experimental_bearer_token = token;
+    providers[providerName] = providerConfig;
+    normalized.model_providers = providers;
+  }
+  normalizeThirdPartyChatProviderConfig(normalized);
+
+  ensureDir(targetPath);
+  writeFileSync(targetPath, convertJsonToToml(normalized), "utf-8");
+  chmodSync(targetPath, 0o600);
+}
+
+function normalizeThirdPartyChatProviderConfig(config: Record<string, unknown>): void {
+  const providerName = stringValue(config.model_provider);
+  const providers = isRecord(config.model_providers) ? config.model_providers : {};
+  const providerConfig = providerName && isRecord(providers[providerName]) ? providers[providerName] as Record<string, unknown> : {};
+  if (isOfficialOpenAiProvider(providerName, providerConfig)) return;
+  config.api_format = "openai_chat";
+  providerConfig.api_format = "openai_chat";
+  if (!stringValue(providerConfig.wire_api)) {
+    providerConfig.wire_api = "responses";
+  }
+  if (providerName) {
+    providers[providerName] = providerConfig;
+    config.model_providers = providers;
+  }
+}
+
+function isOfficialOpenAiProvider(providerName: string, providerConfig: Record<string, unknown>): boolean {
+  const name = `${providerName} ${stringValue(providerConfig.name)}`.toLowerCase();
+  const baseUrl = stringValue(providerConfig.base_url).toLowerCase();
+  return name.includes("openai") || baseUrl.includes("api.openai.com");
+}
+
 function deepMerge(target: Record<string, unknown>, patch: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(patch)) {
     if (typeof value === "undefined") continue;
@@ -484,6 +597,82 @@ function stripJsonComments(raw: string): string {
   return raw.replace(/^\s*\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
 }
 
+function parseSimpleToml(raw: string): Record<string, unknown> {
+  const root: Record<string, unknown> = {};
+  let current = root;
+
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    const section = trimmed.match(/^\[([^\]]+)\]$/);
+    if (section) {
+      current = root;
+      for (const part of splitTomlPath(section[1])) {
+        const existing = current[part];
+        if (!isRecord(existing)) current[part] = {};
+        current = current[part] as Record<string, unknown>;
+      }
+      continue;
+    }
+
+    const kv = trimmed.match(/^([A-Za-z0-9_.-]+|"(?:\\.|[^"])+")\s*=\s*(.+?)\s*(?:#.*)?$/);
+    if (!kv) continue;
+    current[unquoteTomlKey(kv[1])] = parseTomlScalar(kv[2].trim());
+  }
+
+  return root;
+}
+
+function splitTomlPath(value: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let inQuote = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === '"' && value[index - 1] !== "\\") {
+      inQuote = !inQuote;
+      current += char;
+      continue;
+    }
+    if (char === "." && !inQuote) {
+      parts.push(unquoteTomlKey(current.trim()));
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) parts.push(unquoteTomlKey(current.trim()));
+  return parts;
+}
+
+function unquoteTomlKey(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      return JSON.parse(trimmed) as string;
+    } catch {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+
+function parseTomlScalar(value: string): unknown {
+  if (value.startsWith('"') && value.endsWith('"')) {
+    try {
+      return JSON.parse(value) as string;
+    } catch {
+      return value.slice(1, -1);
+    }
+  }
+  if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1);
+  if (value === "true") return true;
+  if (value === "false") return false;
+  if (/^-?\d+(?:\.\d+)?$/.test(value)) return Number(value);
+  return value;
+}
+
 function writeCodexConfigText(rawText: string): void {
   const filePath = join(DEFAULT_CODEX_HOME, "config.toml");
   ensureDir(filePath);
@@ -499,20 +688,25 @@ function convertJsonToToml(value: Record<string, unknown>): string {
 
 function serializeTomlObject(value: Record<string, unknown>, prefix: string[], lines: string[]): void {
   for (const [key, child] of Object.entries(value)) {
+    if (typeof child === "undefined" || isRecord(child)) continue;
+    lines.push(`${toTomlKey(key)} = ${toTomlValue(child)}`);
+  }
+
+  for (const [key, child] of Object.entries(value)) {
     if (typeof child === "undefined") continue;
     if (isRecord(child)) {
       const nextPath = [...prefix, key];
-      lines.push("");
-      lines.push(`[${[...nextPath].map(toTomlKey).join(".")}]`);
+      if (hasDirectTomlValues(child)) {
+        lines.push("");
+        lines.push(`[${[...nextPath].map(toTomlKey).join(".")}]`);
+      }
       serializeTomlObject(child, nextPath, lines);
-      continue;
     }
-    if (Array.isArray(child)) {
-      lines.push(`${toTomlKey(key)} = ${toTomlValue(child)}`);
-      continue;
-    }
-    lines.push(`${toTomlKey(key)} = ${toTomlValue(child)}`);
   }
+}
+
+function hasDirectTomlValues(value: Record<string, unknown>): boolean {
+  return Object.values(value).some((child) => typeof child !== "undefined" && !isRecord(child));
 }
 
 function toTomlValue(value: unknown): string {
