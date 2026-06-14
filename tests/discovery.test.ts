@@ -107,6 +107,14 @@ describe("findSessions", () => {
     expect(candidates[1].session_id).toBe("ae208026-b.jsonl".replace(".jsonl", ""));
   });
 
+  it("findSessionCandidates rejects non-session names without scanning", async () => {
+    const { findSessionCandidates } = await import("../src/lib/discovery.js");
+    const candidates = await findSessionCandidates("sc-bench-skill-task-003-repeat-005");
+
+    expect(candidates).toHaveLength(0);
+    expect(statCalls).toHaveLength(0);
+  });
+
   it("findSessionCandidates searches nested provider directories", async () => {
     addDir("/sessions/codex", 150, ["2026"]);
     addDir("/sessions/codex/2026", 200, ["06"]);

@@ -111,6 +111,16 @@ function matchSessionId(candidate: string, sessionId: string): boolean {
   );
 }
 
+export function looksLikeSessionIdQuery(input: string): boolean {
+  const normalized = input.trim().toLowerCase();
+  if (normalized.length < 8) return false;
+  if (!/^[0-9a-f-]+$/.test(normalized)) return false;
+
+  const compact = normalized.replace(/-/g, "");
+  if (compact.length < 8 || compact.length > 32) return false;
+  return /^[0-9a-f]+$/.test(compact);
+}
+
 function collectSessionFilesForId(dir: string, sessionId: string, accumulator: string[]): void {
   if (accumulator.length > 5000) return;
   let entries: string[];
@@ -185,6 +195,8 @@ async function collectSessionCandidatesByFilename(sessionId: string): Promise<Se
 }
 
 export async function findSessionCandidates(sessionId: string): Promise<SessionMeta[]> {
+  if (!looksLikeSessionIdQuery(sessionId)) return [];
+
   const filenameMatches = await collectSessionCandidatesByFilename(sessionId);
   if (filenameMatches.length > 0) {
     return filenameMatches;

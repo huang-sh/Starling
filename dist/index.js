@@ -300,6 +300,14 @@ function matchSessionId(candidate, sessionId) {
   const normalizedSessionId = sessionId.toLowerCase();
   return normalizedCandidate === normalizedSessionId || normalizedCandidate.startsWith(normalizedSessionId) || normalizedCandidate.includes(normalizedSessionId) || normalizedSessionId.startsWith(normalizedCandidate);
 }
+function looksLikeSessionIdQuery(input) {
+  const normalized = input.trim().toLowerCase();
+  if (normalized.length < 8) return false;
+  if (!/^[0-9a-f-]+$/.test(normalized)) return false;
+  const compact = normalized.replace(/-/g, "");
+  if (compact.length < 8 || compact.length > 32) return false;
+  return /^[0-9a-f]+$/.test(compact);
+}
 function collectSessionFilesForId(dir, sessionId, accumulator) {
   if (accumulator.length > 5e3) return;
   let entries;
@@ -364,6 +372,7 @@ async function collectSessionCandidatesByFilename(sessionId) {
   return [];
 }
 async function findSessionCandidates(sessionId) {
+  if (!looksLikeSessionIdQuery(sessionId)) return [];
   const filenameMatches = await collectSessionCandidatesByFilename(sessionId);
   if (filenameMatches.length > 0) {
     return filenameMatches;
