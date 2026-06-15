@@ -1,41 +1,61 @@
-#!/usr/bin/env node
-
-// src/commands/runFast.ts
 import { spawn } from "child_process";
 import { basename, isAbsolute, join, resolve } from "path";
 import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
-var CONFIG_FILE_EXTENSIONS = [".json", ".jsonc", ".toml", ".yaml", ".yml", ".js", ".ts"];
-async function tryFastRun(argv) {
+
+const CONFIG_FILE_EXTENSIONS = [".json", ".jsonc", ".toml", ".yaml", ".yml", ".js", ".ts"];
+
+interface FastRunParseResult {
+  handled: boolean;
+  exitCode?: number;
+}
+
+interface FastRunOptions {
+  config?: string;
+  cwd?: string;
+  agent?: string;
+  agentArgs: string[];
+  needsFullRun: boolean;
+}
+
+export async function tryFastRun(argv: string[]): Promise<FastRunParseResult> {
   if (argv[2] !== "run") return { handled: false };
+
   const parsed = parseFastRunArgs(argv.slice(3));
   if (!parsed || parsed.needsFullRun || parsed.agent !== "claude") {
     return { handled: false };
   }
+
   const configPath = resolveClaudeConfigPath(parsed.config);
   if (parsed.config && !configPath) {
     printConfigNotFound(parsed.config);
     return { handled: true, exitCode: 1 };
   }
+
   const args = configPath ? ["--settings", configPath, ...parsed.agentArgs] : parsed.agentArgs;
-  const exitCode = await runAgentFast("claude", args, parsed.cwd ? resolve(parsed.cwd) : void 0);
+  const exitCode = await runAgentFast("claude", args, parsed.cwd ? resolve(parsed.cwd) : undefined);
   return { handled: true, exitCode };
 }
-function parseFastRunArgs(args) {
-  const parsed = {
+
+function parseFastRunArgs(args: string[]): FastRunOptions | null {
+  const parsed: FastRunOptions = {
     agentArgs: [],
-    needsFullRun: false
+    needsFullRun: false,
   };
+
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
+
     if (arg === "--") {
       parsed.needsFullRun = true;
       return parsed;
     }
+
     if (arg === "-c" || arg === "--catalog" || arg === "--title" || arg === "--tags") {
       parsed.needsFullRun = true;
       return parsed;
     }
+
     if (arg === "--config") {
       const value = args[i + 1];
       if (!value) return null;
@@ -43,10 +63,12 @@ function parseFastRunArgs(args) {
       i += 1;
       continue;
     }
+
     if (arg.startsWith("--config=")) {
       parsed.config = arg.slice("--config=".length);
       continue;
     }
+
     if (arg === "--cwd") {
       const value = args[i + 1];
       if (!value) return null;
@@ -54,41 +76,52 @@ function parseFastRunArgs(args) {
       i += 1;
       continue;
     }
+
     if (arg.startsWith("--cwd=")) {
       parsed.cwd = arg.slice("--cwd=".length);
       continue;
     }
+
     if (arg === "claude" || arg === "codex" || arg === "agent") {
       parsed.agent = arg;
       parsed.agentArgs = args.slice(i + 1);
       return parsed;
     }
+
     if (arg.startsWith("-")) {
       parsed.needsFullRun = true;
       return parsed;
     }
+
     return null;
   }
+
   return parsed.agent ? parsed : null;
 }
-function resolveClaudeConfigPath(configFile) {
+
+function resolveClaudeConfigPath(configFile?: string): string | null {
   if (!configFile) return null;
+
   if (isAbsolute(configFile) || existsSync(configFile)) {
     return existsSync(configFile) ? configFile : null;
   }
+
   const fileName = basename(configFile);
   const settingsDir = join(resolveStarlingHomeFast(), "settings", "claude");
   const candidate = join(settingsDir, fileName);
   if (existsSync(candidate)) return candidate;
+
   if (!hasKnownConfigExtensionFast(fileName)) {
     for (const ext of CONFIG_FILE_EXTENSIONS) {
       const candidateWithExtension = `${candidate}${ext}`;
       if (existsSync(candidateWithExtension)) return candidateWithExtension;
     }
   }
+
   return null;
 }
-function printConfigNotFound(configFile) {
+
+function printConfigNotFound(configFile: string): void {
   const fileName = basename(configFile);
   const settingsDir = join(resolveStarlingHomeFast(), "settings", "claude");
   const candidate = join(settingsDir, fileName);
@@ -98,158 +131,81 @@ function printConfigNotFound(configFile) {
       candidatesTried.push(`${candidate}${ext}`);
     }
   }
+
   console.error(`Config file not found: ${configFile}`);
   console.error(`Expected path: ${candidate}`);
   console.error(`Tried: ${candidatesTried.map((path) => path.replace(`${settingsDir}/`, "")).join(", ")}`);
 }
-function hasKnownConfigExtensionFast(fileName) {
+
+function hasKnownConfigExtensionFast(fileName: string): boolean {
   return CONFIG_FILE_EXTENSIONS.some((extension) => fileName.toLowerCase().endsWith(extension));
 }
-function resolveStarlingHomeFast() {
+
+function resolveStarlingHomeFast(): string {
   const envHome = process.env.STARLING_HOME?.trim();
   if (envHome) return expandHomePathFast(envHome);
+
   const configPath = process.env.STARLING_CLI_CONFIG?.trim() || join(homedir(), ".config", "starling", "config.json");
   try {
-    const parsed = JSON.parse(readFileSync(configPath, "utf-8"));
+    const parsed = JSON.parse(readFileSync(configPath, "utf-8")) as unknown;
     if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-      const homePath = parsed.homePath;
+      const homePath = (parsed as { homePath?: unknown }).homePath;
       if (typeof homePath === "string" && homePath.trim()) {
         return expandHomePathFast(homePath.trim());
       }
     }
   } catch {
+    // Missing or invalid config falls back to the default home.
   }
+
   return join(homedir(), ".starling");
 }
-function expandHomePathFast(value) {
+
+function expandHomePathFast(value: string): string {
   if (value === "~") return homedir();
   if (value.startsWith("~/")) return join(homedir(), value.slice(2));
   return value;
 }
-function runAgentFast(binary, args, cwd) {
+
+function runAgentFast(binary: string, args: string[], cwd?: string): Promise<number> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(binary, args, {
       stdio: "inherit",
-      cwd
+      cwd,
     });
+
     let terminalInterrupted = false;
     let settled = false;
+
     const onSigInt = () => {
       terminalInterrupted = true;
       child.kill("SIGINT");
     };
+
     const cleanup = () => {
       process.off("SIGINT", onSigInt);
     };
-    const settle = (exitCode) => {
+
+    const settle = (exitCode: number) => {
       if (settled) return;
       settled = true;
       cleanup();
       resolvePromise(exitCode);
     };
+
     process.on("SIGINT", onSigInt);
+
     child.on("error", (error) => {
       cleanup();
       reject(error);
     });
+
     child.on("exit", (code) => {
       settle(terminalInterrupted ? 130 : code ?? 0);
     });
+
     child.on("close", (code) => {
       settle(terminalInterrupted ? 130 : code ?? 0);
     });
   });
 }
-
-// package.json
-var package_default = {
-  name: "starling-ai",
-  version: "0.0.10",
-  description: "Agent session manager \u2014 discover, bookmark, and organize AI coding sessions",
-  type: "module",
-  repository: {
-    type: "git",
-    url: "https://github.com/huang-sh/Starling"
-  },
-  bin: {
-    starling: "dist/index.js"
-  },
-  files: [
-    "dist",
-    "skills",
-    "scripts/install-agent-skills.js",
-    "docs",
-    "package.json",
-    "README.md",
-    "LICENSE"
-  ],
-  scripts: {
-    build: "tsup",
-    dev: "tsup --watch",
-    postinstall: "node scripts/install-agent-skills.js",
-    "install:skill": "node scripts/install-agent-skills.js",
-    prepack: "npm run build",
-    test: "vitest run",
-    lint: "tsc --noEmit"
-  },
-  dependencies: {
-    chalk: "^5.3.0",
-    "cli-table3": "^0.6.5",
-    commander: "^12.1.0"
-  },
-  devDependencies: {
-    "@types/node": "^20.14.0",
-    tsup: "^8.1.0",
-    typescript: "^5.5.0",
-    vitest: "^1.6.0"
-  },
-  engines: {
-    node: ">=20.0.0"
-  },
-  license: "MIT"
-};
-
-// src/index.ts
-async function main() {
-  const fastRun = await tryFastRun(process.argv);
-  if (fastRun.handled) {
-    process.exit(fastRun.exitCode ?? 0);
-  }
-  const [
-    { Command },
-    { registerSessionCommand, resumeSession },
-    { registerPinCommand },
-    { registerSpaceCommand },
-    { registerProjectCommand },
-    { registerRunCommand },
-    { registerModelCommand },
-    { registerConfigCommand }
-  ] = await Promise.all([
-    import("commander"),
-    import("./session-LBDDRPME.js"),
-    import("./pin-SJU2AZCY.js"),
-    import("./space-ZS3CQBAN.js"),
-    import("./project-PA4OPW32.js"),
-    import("./run-N3QQIDRM.js"),
-    import("./model-Y4U7CZKA.js"),
-    import("./config-MZNWSHPE.js")
-  ]);
-  const program = new Command();
-  program.enablePositionalOptions();
-  program.name("starling").description("Agent session manager \u2014 discover, pin, and organize AI coding sessions").version(package_default.version);
-  registerSessionCommand(program);
-  registerPinCommand(program);
-  registerSpaceCommand(program);
-  registerProjectCommand(program);
-  registerRunCommand(program);
-  registerModelCommand(program);
-  registerConfigCommand(program);
-  program.command("resume <session-id>").description("Resume an agent session directly").action(async (sessionId) => {
-    await resumeSession(sessionId);
-  });
-  program.parse();
-}
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});

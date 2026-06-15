@@ -40,6 +40,18 @@ vi.mock("../src/lib/sessionIndex.js", () => ({
     project_count: 1,
     sessions: discoveryState.indexSessions,
   })),
+  lookupIndexedSessions: vi.fn(async (ids: string[], provider?: string) => {
+    const map = new Map<string, ReturnType<typeof sessionMeta>>();
+    const lowers = ids.map((id) => id.toLowerCase());
+    for (const session of discoveryState.indexSessions) {
+      if (provider && session.provider !== provider) continue;
+      const sLower = session.session_id.toLowerCase();
+      if (lowers.some((lower) => sLower === lower || sLower.startsWith(lower))) {
+        map.set(session.session_id, session);
+      }
+    }
+    return map;
+  }),
   refreshIndexedSessionsById: vi.fn(async () => ({
     version: 1,
     built_at: "2026-01-01T00:00:00.000Z",
@@ -267,6 +279,32 @@ describe("session metadata commands", () => {
     const store = readStore();
     expect(store.bookmarks).toHaveLength(0);
     expect(existsSync(filePath)).toBe(false);
+  });
+
+  it("looks up many sessions by id via session lookup --json", async () => {
+    discoveryState.indexSessions = [sessionMeta("session-1"), sessionMeta("session-2")];
+    const logs = captureLogs();
+    const program = programWithSession();
+
+    await program.parseAsync(["node", "starling", "session", "lookup", "session-1", "missing", "ses", "--json"]);
+
+    const output = JSON.parse(logs[0]) as Array<{ session_id: string }>;
+    expect(output.map((session) => session.session_id).sort()).toEqual(["session-1", "session-2"]);
+  });
+
+  it("filters session lookup by --agent", async () => {
+    discoveryState.indexSessions = [
+      { ...sessionMeta("session-1"), provider: "claude" },
+      { ...sessionMeta("session-2"), provider: "codex" },
+    ];
+    const logs = captureLogs();
+    const program = programWithSession();
+
+    await program.parseAsync(["node", "starling", "session", "lookup", "session-1", "session-2", "-a", "codex", "--json"]);
+
+    const output = JSON.parse(logs[0]) as Array<{ session_id: string; provider: string }>;
+    expect(output).toHaveLength(1);
+    expect(output[0].provider).toBe("codex");
   });
 });
 

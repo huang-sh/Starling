@@ -11,8 +11,8 @@ import { catalogPath, resolveCatalogReference } from "../lib/catalogResolver.js"
 import {
   clearSessionIndex,
   findIndexedSessionCandidates,
-  findIndexedSessionById,
   loadSessionIndex,
+  lookupIndexedSessions,
   refreshIndexedSessionsById,
   removeSessionFromIndex,
   rebuildSessionIndex,
@@ -225,6 +225,34 @@ export function registerSessionCommand(program: Command): void {
       if (meta.first_prompt) {
         console.log(`  First Prompt:`);
         console.log(`    ${meta.first_prompt}`);
+      }
+    });
+
+  session
+    .command("lookup <session-ids...>")
+    .description("Look up many sessions by id in one pass (read-only)")
+    .option("-a, --agent <agent>", "filter by agent: claude | codex")
+    .option("--json", "output as JSON")
+    .action(async (sessionIds: string[], opts: { agent?: string; json?: boolean }) => {
+      const provider = opts.agent as "claude" | "codex" | undefined;
+      const found = await lookupIndexedSessions(sessionIds, provider);
+      const sessions = [...found.values()].sort((a, b) => b.modified_at.localeCompare(a.modified_at));
+      const requested = sessionIds.length;
+      const resolved = sessions.length;
+      if (opts.json) {
+        console.log(JSON.stringify(sessions, null, 2));
+        if (resolved < requested) {
+          process.stderr.write(chalk.gray(`Resolved ${resolved}/${requested} sessions.\n`));
+        }
+        return;
+      }
+      if (sessions.length === 0) {
+        console.log(chalk.yellow(`No sessions found for ${requested} id(s).`));
+        return;
+      }
+      console.log(formatSessionTable(sessions));
+      if (resolved < requested) {
+        console.log(chalk.gray(`Resolved ${resolved}/${requested} sessions.`));
       }
     });
 
@@ -509,7 +537,9 @@ async function resolveSessionMeta(input: string): Promise<SessionMeta> {
 
 async function resolveSessionById(input: string): Promise<SessionMeta | null> {
   if (!looksLikeSessionIdQuery(input)) return null;
-  return findIndexedSessionById(input);
+  const found = await lookupIndexedSessions([input]);
+  const values = [...found.values()];
+  return values.find((session) => session.session_id === input) ?? values[0] ?? null;
 }
 
 function pickSessionCandidate(input: string, candidates: SessionMeta[]): SessionMeta {
