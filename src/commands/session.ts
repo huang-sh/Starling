@@ -101,18 +101,25 @@ export function registerSessionCommand(program: Command): void {
 
       // Default mode: table with limit
       const limit = parseInt(opts.limit, 10) || 20;
-      const sessions = hasCatalogFilter
-        ? (await findCatalogSessions(opts.cataloged, opts.catalog, provider)).slice(0, limit)
+      const catalogSessions = hasCatalogFilter
+        ? await findCatalogSessions(opts.cataloged, opts.catalog, provider)
+        : null;
+      const sessions = catalogSessions
+        ? catalogSessions.slice(0, limit)
         : await findSessions(limit, provider);
       if (sessions.length === 0) {
         console.log(chalk.yellow("No sessions found."));
         return;
       }
+      const total = catalogSessions ? catalogSessions.length : indexedSessionTotal(provider);
+      const truncatedHint = formatTruncationHint(sessions.length, total, limit);
       if (opts.json) {
         console.log(JSON.stringify(sessions, null, 2));
+        if (truncatedHint) process.stderr.write(chalk.gray(truncatedHint + "\n"));
         return;
       }
       console.log(formatSessionTable(sessions));
+      if (truncatedHint) console.log(chalk.gray(truncatedHint));
     });
 
   const index = new Command("index").description("Manage the local session index");
@@ -437,6 +444,28 @@ async function collectStreamedSessions(provider?: "claude" | "codex"): Promise<S
     sessions.push(meta);
   }
   return sessions;
+}
+
+/** Total session count from the index, optionally scoped to one provider. -1 if no index. */
+function indexedSessionTotal(provider?: "claude" | "codex"): number {
+  const index = loadSessionIndex();
+  if (!index) return -1;
+  if (!provider) return index.session_count;
+  return index.sessions.filter((session) => session.provider === provider).length;
+}
+
+/**
+ * Build a "showing N of M (use --all)" hint when the list is truncated.
+ * Returns empty string when nothing is held back.
+ */
+function formatTruncationHint(shown: number, total: number, limit: number): string {
+  if (total >= 0) {
+    if (total <= shown) return "";
+    return `Showing ${shown} of ${total} sessions. Use --all to list all.`;
+  }
+  // No index to count the total — fall back to signalling likely truncation.
+  if (shown < limit) return "";
+  return `Showing ${shown} sessions. Use --all to list all.`;
 }
 
 async function findCatalogSessions(

@@ -4,6 +4,7 @@ import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
 import { registerSessionCommand } from "../src/commands/session.js";
+import { loadSessionIndex } from "../src/lib/sessionIndex.js";
 import { ENV_CONFIG_KEY, STORE_VERSION } from "../src/constants.js";
 
 const discoveryState = vi.hoisted(() => ({
@@ -305,6 +306,52 @@ describe("session metadata commands", () => {
     const output = JSON.parse(logs[0]) as Array<{ session_id: string; provider: string }>;
     expect(output).toHaveLength(1);
     expect(output[0].provider).toBe("codex");
+  });
+
+  it("prints a truncation hint in table mode when the index has more sessions", async () => {
+    discoveryState.sessions = [sessionMeta("s1"), sessionMeta("s2"), sessionMeta("s3")];
+    vi.mocked(loadSessionIndex).mockReturnValueOnce({
+      version: 1,
+      built_at: "2026-01-01T00:00:00.000Z",
+      session_count: 100,
+      project_count: 1,
+      sessions: [],
+      files: [],
+      directories: [],
+    });
+    const logs = captureLogs();
+    const program = programWithSession();
+
+    await program.parseAsync(["node", "starling", "session", "ls"]);
+
+    const output = logs.join("\n");
+    expect(output).toContain("Showing 3 of 100 sessions");
+    expect(output).toContain("--all");
+  });
+
+  it("keeps stdout clean in json mode and sends the truncation hint to stderr", async () => {
+    discoveryState.sessions = [sessionMeta("s1")];
+    vi.mocked(loadSessionIndex).mockReturnValueOnce({
+      version: 1,
+      built_at: "2026-01-01T00:00:00.000Z",
+      session_count: 50,
+      project_count: 1,
+      sessions: [],
+      files: [],
+      directories: [],
+    });
+    const logs = captureLogs();
+    const stderrChunks: string[] = [];
+    vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+      stderrChunks.push(String(chunk));
+      return true;
+    });
+    const program = programWithSession();
+
+    await program.parseAsync(["node", "starling", "session", "ls", "--json"]);
+
+    expect(() => JSON.parse(logs[0])).not.toThrow();
+    expect(stderrChunks.join("")).toContain("Showing 1 of 50 sessions");
   });
 });
 

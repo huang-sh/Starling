@@ -1248,16 +1248,21 @@ Total: ${count} sessions`));
       return;
     }
     const limit = parseInt(opts.limit, 10) || 20;
-    const sessions = hasCatalogFilter ? (await findCatalogSessions(opts.cataloged, opts.catalog, provider)).slice(0, limit) : await findSessions(limit, provider);
+    const catalogSessions = hasCatalogFilter ? await findCatalogSessions(opts.cataloged, opts.catalog, provider) : null;
+    const sessions = catalogSessions ? catalogSessions.slice(0, limit) : await findSessions(limit, provider);
     if (sessions.length === 0) {
       console.log(chalk2.yellow("No sessions found."));
       return;
     }
+    const total = catalogSessions ? catalogSessions.length : indexedSessionTotal(provider);
+    const truncatedHint = formatTruncationHint(sessions.length, total, limit);
     if (opts.json) {
       console.log(JSON.stringify(sessions, null, 2));
+      if (truncatedHint) process.stderr.write(chalk2.gray(truncatedHint + "\n"));
       return;
     }
     console.log(formatSessionTable(sessions));
+    if (truncatedHint) console.log(chalk2.gray(truncatedHint));
   });
   const index = new Command("index").description("Manage the local session index");
   index.command("status").description("Show session index status").option("--json", "output as JSON").action((opts) => {
@@ -1497,6 +1502,20 @@ async function collectStreamedSessions(provider) {
     sessions.push(meta);
   }
   return sessions;
+}
+function indexedSessionTotal(provider) {
+  const index = loadSessionIndex();
+  if (!index) return -1;
+  if (!provider) return index.session_count;
+  return index.sessions.filter((session) => session.provider === provider).length;
+}
+function formatTruncationHint(shown, total, limit) {
+  if (total >= 0) {
+    if (total <= shown) return "";
+    return `Showing ${shown} of ${total} sessions. Use --all to list all.`;
+  }
+  if (shown < limit) return "";
+  return `Showing ${shown} sessions. Use --all to list all.`;
 }
 async function findCatalogSessions(cataloged, catalogRef, provider) {
   const sessionIds = getCatalogSessionIds(cataloged, catalogRef);
