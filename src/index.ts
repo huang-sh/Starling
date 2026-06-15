@@ -1,60 +1,35 @@
-import { tryFastRun } from "./commands/runFast.js";
+import { Command } from "commander";
+import { registerSessionCommand, resumeSession } from "./commands/session.js";
+import { registerPinCommand } from "./commands/pin.js";
+import { registerSpaceCommand } from "./commands/space.js";
+import { registerProjectCommand } from "./commands/project.js";
+import { registerRunCommand } from "./commands/run.js";
+import { registerModelCommand } from "./commands/model.js";
+import { registerConfigCommand } from "./commands/config.js";
 import packageJson from "../package.json" with { type: "json" };
 
-async function main(): Promise<void> {
-  const fastRun = await tryFastRun(process.argv);
-  if (fastRun.handled) {
-    process.exit(fastRun.exitCode ?? 0);
-  }
+const program = new Command();
+program.enablePositionalOptions();
 
-  const [
-    { Command },
-    { registerSessionCommand, resumeSession },
-    { registerPinCommand },
-    { registerSpaceCommand },
-    { registerProjectCommand },
-    { registerRunCommand },
-    { registerModelCommand },
-    { registerConfigCommand },
-  ] = await Promise.all([
-    import("commander"),
-    import("./commands/session.js"),
-    import("./commands/pin.js"),
-    import("./commands/space.js"),
-    import("./commands/project.js"),
-    import("./commands/run.js"),
-    import("./commands/model.js"),
-    import("./commands/config.js"),
-  ]);
+program
+  .name("starling")
+  .description("Agent session manager — discover, pin, and organize AI coding sessions")
+  .version(packageJson.version);
 
-  const program = new Command();
-  program.enablePositionalOptions();
+registerSessionCommand(program);
+registerPinCommand(program);
+registerSpaceCommand(program);
+registerProjectCommand(program);
+registerRunCommand(program);
+registerModelCommand(program);
+registerConfigCommand(program);
 
-  program
-    .name("starling")
-    .description("Agent session manager — discover, pin, and organize AI coding sessions")
-    .version(packageJson.version);
+// Top-level: starling resume <session-id>
+program
+  .command("resume <session-id>")
+  .description("Resume an agent session directly")
+  .action(async (sessionId: string) => {
+    await resumeSession(sessionId);
+  });
 
-  registerSessionCommand(program);
-  registerPinCommand(program);
-  registerSpaceCommand(program);
-  registerProjectCommand(program);
-  registerRunCommand(program);
-  registerModelCommand(program);
-  registerConfigCommand(program);
-
-  // Top-level: starling resume <session-id>
-  program
-    .command("resume <session-id>")
-    .description("Resume an agent session directly")
-    .action(async (sessionId: string) => {
-      await resumeSession(sessionId);
-    });
-
-  program.parse();
-}
-
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+program.parse();

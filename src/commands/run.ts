@@ -32,6 +32,7 @@ import {
   restoreCodexDefaultConfig,
 } from "../lib/codexDefaultGuard.js";
 import { upsertSessionInIndex } from "../lib/sessionIndex.js";
+import { shortSessionId } from "../lib/sessionDisplay.js";
 import { catalogPath, resolveCatalogReference } from "../lib/catalogResolver.js";
 import { hasKnownConfigExtension } from "../lib/configPaths.js";
 import type { SessionMeta, Space } from "../types.js";
@@ -60,7 +61,9 @@ const RUN_SESSION_CATALOG_SCAN_LIMIT = 2000;
 const RUN_SESSION_DETECT_ATTEMPTS = 8;
 const RUN_SESSION_DETECT_INTERVAL_MS = 300;
 const RUN_SESSION_DETECT_FULL_SCAN_THRESHOLD_MS = 200;
-const RUN_PIN_ATTEMPT_DRAIN_TIMEOUT_MS = 300;
+const RUN_SESSION_EXIT_SETTLE_MS = 200;
+const RUN_FAST_FAILURE_SKIP_SCAN_MS = 2000;
+const RUN_PIN_ATTEMPT_DRAIN_TIMEOUT_MS = 1500;
 
 export function registerRunCommand(program: Command): void {
   const run = new Command("run")
@@ -98,7 +101,6 @@ export function registerRunCommand(program: Command): void {
       }
       const normalizedCwd = opts.cwd ? resolve(opts.cwd) : process.cwd();
       const catalog = await resolveCatalog(opts.catalog);
-      const shouldTrackSession = Boolean(catalog);
       const codexDefaultSnapshot = provider === "codex" ? snapshotCodexDefaultConfig() : null;
       let codexConfig = provider === "codex"
         ? await createCodexRunConfig(resolvedConfig)
@@ -108,15 +110,15 @@ export function registerRunCommand(program: Command): void {
       }
       const hookRun =
         provider === "claude" && catalog ? createClaudeRunHookSettings(resolvedConfig) : null;
-      const runHookEventsPath = hookRun?.eventsPath ?? codexConfig?.eventsPath;
       const effectiveConfig = hookRun?.settingsPath ?? resolvedConfig;
       const args = resolveAgentArgs(provider, rawArgs, agentArgs, effectiveConfig, codexConfig);
       const cwd = opts.cwd;
       const binary = provider === "claude" ? "claude" : "codex";
       const startedAt = new Date().toISOString();
-      const beforeRun = shouldTrackSession && !runHookEventsPath ? await snapshotSessions(provider) : new Map<string, number>();
+      const runStartedAtMs = Date.now();
+      const beforeRun = hookRun ? new Map<string, number>() : await snapshotSessions(provider);
       const beforeRunProjectFiles =
-        shouldTrackSession && provider === "claude" && !runHookEventsPath ? snapshotProjectSessions(normalizedCwd) : new Map<string, number>();
+        provider === "claude" && !hookRun ? snapshotProjectSessions(normalizedCwd) : new Map<string, number>();
       const cleanupRunState = async () => {
         syncClaudeProfileSettingsFromRunSettings(resolvedConfig, hookRun?.settingsPath ?? null);
         cleanupClaudeRunHookSettings(hookRun);
@@ -137,9 +139,9 @@ export function registerRunCommand(program: Command): void {
           const startedTime = Date.parse(startedAt);
           let attemptsAfterClose = 0;
           for (let i = 0; !stopAutoPinWatcher; i++) {
-            const sessionId = hintedSessionId ?? readRunHookSessionId(runHookEventsPath);
+            const sessionId = hintedSessionId ?? readRunHookSessionId(hookRun?.eventsPath ?? codexConfig?.eventsPath);
             if (!sessionId) {
-              if (provider === "codex" && !runHookEventsPath) {
+              if (provider === "codex") {
                 const candidate = await findSingleCodexSessionForRunningAgent(startedTime, beforeRun, normalizedCwd);
                 if (candidate) {
                   hintedSessionId = candidate.session_id;
@@ -214,17 +216,92 @@ export function registerRunCommand(program: Command): void {
       agentClosed = true;
       syncCodexProfileProjectTrustFromRunConfig(resolvedConfig, codexConfig);
       const exitCode = runResult.exitCode;
-      if (!shouldTrackSession) {
+      if (exitCode !== 0) {
+        await sleep(RUN_SESSION_EXIT_SETTLE_MS);
+      }
+      const knownSessionId =
+        hintedSessionId ?? readRunHookSessionId(hookRun?.eventsPath ?? codexConfig?.eventsPath) ?? undefined;
+      if (exitCode !== 0 && Date.now() - runStartedAtMs < RUN_FAST_FAILURE_SKIP_SCAN_MS && !knownSessionId) {
+        await cleanupRunState();
+        process.exit(exitCode);
+      }
+      if (hookRun && !knownSessionId) {
         await cleanupRunState();
         if (exitCode !== 0) {
           process.exit(exitCode);
         }
+        console.log(chalk.yellow("No Claude session id was reported by SessionStart hook."));
         return;
       }
 
+      const newSessionMeta = hookRun && knownSessionId
+        ? await resolveHookReportedClaudeSession(knownSessionId, normalizedCwd)
+        : await detectSessionStartedAfterRun(
+          provider,
+          startedAt,
+          beforeRun,
+          normalizedCwd,
+          beforeRunProjectFiles,
+          knownSessionId
+        );
+
+      if (!newSessionMeta) {
+        if (exitCode !== 0) {
+          await cleanupRunState();
+          process.exit(exitCode);
+        }
+        console.log(chalk.yellow("No new session found, or session metadata is not ready yet."));
+        await cleanupRunState();
+        return;
+      }
+
+      if (catalog && !catalogPinned) {
+        if (knownSessionId && newSessionMeta.session_id === knownSessionId) {
+          await pinSessionToCatalog(newSessionMeta, opts, catalog);
+          catalogPinned = true;
+        } else {
+          const candidates = await collectRunSessionCandidates(
+            provider,
+            Date.parse(startedAt),
+            beforeRun,
+            normalizedCwd,
+            beforeRunProjectFiles
+          );
+
+          const sameProjectCandidates = candidates.filter((session) =>
+            normalizeProjectPath(session.project_path) === normalizedCwd
+          );
+          const targetCandidates = sameProjectCandidates.length > 0 ? sameProjectCandidates : candidates;
+
+          if (targetCandidates.length === 0) {
+            console.log(chalk.yellow("Could not find a stable candidate session for catalog assignment."));
+          } else if (targetCandidates.length === 1) {
+            await pinSessionToCatalog(targetCandidates[0]!, opts, catalog);
+            catalogPinned = true;
+          } else {
+            const header = `Found ${targetCandidates.length} possible sessions created after run, can't choose automatically.`;
+            console.log(chalk.yellow(header));
+            targetCandidates.slice(0, 5).forEach((session, index) => {
+              const shortId = shortSessionId(session.session_id);
+              const date = session.modified_at.slice(0, 16).replace("T", " ");
+              const project = session.project_path
+                ? session.project_path.length > 36
+                  ? `…${session.project_path.slice(-35)}`
+                  : session.project_path
+                : "-";
+              console.log(`  ${index + 1}. ${chalk.cyan(shortId)}  ${date}  ${project}`);
+            });
+            console.log(chalk.gray(`Use: starling pin <session_id> --to ${catalog.id} to assign manually.`));
+          }
+        }
+      }
+
+      console.log(chalk.green(`Session started: ${newSessionMeta.session_id}`));
+      updateSessionIndexInBackground(newSessionMeta);
+
       if (pinAttempt) {
-        await drainPinAttempt(pinAttempt);
         stopAutoPinWatcher = true;
+        await drainPinAttempt(pinAttempt);
       }
 
       if (exitCode !== 0) {
