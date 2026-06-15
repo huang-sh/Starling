@@ -133,6 +133,17 @@ starling project ls --no-index
 starling project show /path/to/project --no-index
 ```
 
+## Data Directory
+
+Starling uses `~/.starling` by default for metadata, model profiles, and session indexes. Prefer the CLI setting when the user wants to persist a different location:
+
+```bash
+starling config set home /data20T/dev/.starling --migrate
+starling config show
+```
+
+`--migrate` copies existing Starling metadata into the new home without overwriting target files. `STARLING_HOME=/path` can still be used for one-off commands and overrides the saved CLI setting for that process.
+
 ## Running Agents
 
 Starling arguments go before the agent name. Agent arguments go after the agent name and should be passed through unchanged.

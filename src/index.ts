@@ -5,6 +5,8 @@ import { registerSpaceCommand } from "./commands/space.js";
 import { registerProjectCommand } from "./commands/project.js";
 import { registerRunCommand } from "./commands/run.js";
 import { registerModelCommand } from "./commands/model.js";
+import { registerConfigCommand } from "./commands/config.js";
+import packageJson from "../package.json" with { type: "json" };
 
 const program = new Command();
 program.enablePositionalOptions();
@@ -12,7 +14,7 @@ program.enablePositionalOptions();
 program
   .name("starling")
   .description("Agent session manager — discover, pin, and organize AI coding sessions")
-  .version("0.0.6");
+  .version(packageJson.version);
 
 registerSessionCommand(program);
 registerPinCommand(program);
@@ -20,6 +22,7 @@ registerSpaceCommand(program);
 registerProjectCommand(program);
 registerRunCommand(program);
 registerModelCommand(program);
+registerConfigCommand(program);
 
 // Top-level: starling resume <session-id>
 program

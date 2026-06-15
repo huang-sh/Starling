@@ -217,10 +217,11 @@ If `--config` is not provided, Starling uses the agent's normal default configur
 
 ## Configuration Files
 
-Starling stores its own data in `~/.starling`:
+Starling stores its own data in `~/.starling` by default:
 
 ```text
 ~/.starling/
+  store.json
   session-index.json
   settings/
     claude/
@@ -229,7 +230,22 @@ Starling stores its own data in `~/.starling`:
       <profile>.toml
 ```
 
-Starling does not move or rewrite the original Claude Code and Codex session files. It reads them from the agent-owned locations, such as `~/.claude/projects` and `~/.codex/sessions`, and stores only Starling metadata and profiles under `~/.starling`.
+Set `STARLING_HOME` to use a different Starling data directory:
+
+```bash
+STARLING_HOME=/data20T/dev/.starling starling project ls
+```
+
+Or persist the default Starling data directory with the CLI:
+
+```bash
+starling config set home /data20T/dev/.starling --migrate
+starling config show
+```
+
+`STARLING_HOME` still has the highest priority and overrides the saved CLI setting for that process.
+
+Starling does not move or rewrite the original Claude Code and Codex session files. It reads them from the agent-owned locations, such as `~/.claude/projects` and `~/.codex/sessions`, and stores only Starling metadata and profiles under the Starling data directory.
 
 The local session index is optimized for repeated CLI and VS Code sidebar reads:
 
@@ -290,13 +306,14 @@ The extension supports common right-click actions:
 - Copy project path.
 - Copy session ID.
 
-The extension calls the `starling` CLI. If VS Code cannot find it on `PATH`, set `starling.cliPath` to an absolute path in VS Code settings.
+The extension calls the `starling` CLI. If VS Code cannot find it on `PATH`, set `starling.cliPath` to an absolute path in VS Code settings. To use a different Starling data directory, set `starling.homePath`; the extension passes it to the CLI as `STARLING_HOME`.
 
 Useful extension settings:
 
 ```json
 {
   "starling.cliPath": "starling",
+  "starling.homePath": "",
   "starling.cacheTtlSeconds": 30,
   "starling.projectSessionLimit": 30,
   "starling.sessionTreeLimit": 50

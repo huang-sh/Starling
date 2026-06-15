@@ -1,25 +1,47 @@
 #!/usr/bin/env node
 
 // src/index.ts
-import { Command as Command7 } from "commander";
+import { Command as Command8 } from "commander";
 
 // src/commands/session.ts
 import { Command } from "commander";
 import chalk2 from "chalk";
 import { spawn, spawnSync } from "child_process";
-import { existsSync as existsSync3, unlinkSync as unlinkSync3 } from "fs";
+import { existsSync as existsSync4, unlinkSync as unlinkSync3 } from "fs";
 
 // src/lib/discovery.ts
 import { readdirSync, statSync } from "fs";
 import { join as join2 } from "path";
 
 // src/constants.ts
+import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
+var STARLING_HOME_ENV = process.env.STARLING_HOME?.trim();
 var DEFAULT_CONFIG_DIR = join(homedir(), ".config", "starling");
-var DEFAULT_STORE_PATH = join(DEFAULT_CONFIG_DIR, "store.json");
+var CLI_CONFIG_PATH = process.env.STARLING_CLI_CONFIG?.trim() || join(DEFAULT_CONFIG_DIR, "config.json");
+function readConfiguredStarlingHome() {
+  if (!existsSync(CLI_CONFIG_PATH)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(CLI_CONFIG_PATH, "utf-8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    const homePath = parsed.homePath;
+    return typeof homePath === "string" && homePath.trim() ? homePath.trim() : null;
+  } catch {
+    return null;
+  }
+}
+function expandHomePath(value) {
+  if (value === "~") return homedir();
+  if (value.startsWith("~/")) return join(homedir(), value.slice(2));
+  return value;
+}
+var STARLING_HOME_CONFIG = readConfiguredStarlingHome();
+var STARLING_HOME_VALUE = STARLING_HOME_ENV || STARLING_HOME_CONFIG;
+var STARLING_HOME_SOURCE = STARLING_HOME_ENV ? "env" : STARLING_HOME_CONFIG ? "config" : "default";
+var DEFAULT_STARLING_HOME = STARLING_HOME_VALUE ? expandHomePath(STARLING_HOME_VALUE) : join(homedir(), ".starling");
+var DEFAULT_STORE_PATH = STARLING_HOME_VALUE ? join(DEFAULT_STARLING_HOME, "store.json") : join(DEFAULT_CONFIG_DIR, "store.json");
 var STORE_VERSION = 1;
-var DEFAULT_STARLING_HOME = join(homedir(), ".starling");
 var DEFAULT_STARLING_SETTINGS_DIR = join(DEFAULT_STARLING_HOME, "settings");
 var DEFAULT_CLAUDE_SETTINGS_DIR = join(DEFAULT_STARLING_SETTINGS_DIR, "claude");
 var DEFAULT_CODEX_SETTINGS_DIR = join(DEFAULT_STARLING_SETTINGS_DIR, "codex");
@@ -530,11 +552,11 @@ function formatSpaceTree(spaces, bookmarks) {
 }
 
 // src/utils/fs.ts
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, mkdtempSync, chmodSync } from "fs";
+import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, writeFileSync, renameSync, unlinkSync, mkdtempSync, chmodSync } from "fs";
 import { dirname, join as join3 } from "path";
 function ensureDir(filePath) {
   const dir = dirname(filePath);
-  if (!existsSync(dir)) {
+  if (!existsSync2(dir)) {
     mkdirSync(dir, { recursive: true });
   }
 }
@@ -542,7 +564,7 @@ function atomicWriteJSON(filePath, data) {
   ensureDir(filePath);
   const dir = dirname(filePath);
   const tmpDir = join3(dir, ".starling-tmp");
-  if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
+  if (!existsSync2(tmpDir)) mkdirSync(tmpDir, { recursive: true });
   const prefix = join3(tmpDir, "starling-");
   const tmpPath = mkdtempSync(prefix) + "/tmp.json";
   try {
@@ -550,14 +572,14 @@ function atomicWriteJSON(filePath, data) {
     chmodSync(tmpPath, 384);
     renameSync(tmpPath, filePath);
   } finally {
-    if (existsSync(tmpPath)) {
+    if (existsSync2(tmpPath)) {
       unlinkSync(tmpPath);
     }
   }
 }
 function readJSON(filePath) {
-  if (!existsSync(filePath)) return null;
-  const raw = readFileSync(filePath, "utf-8");
+  if (!existsSync2(filePath)) return null;
+  const raw = readFileSync2(filePath, "utf-8");
   return JSON.parse(raw);
 }
 
@@ -786,7 +808,7 @@ function catalogPath(space, spaces = listSpaces()) {
 }
 
 // src/lib/sessionIndex.ts
-import { existsSync as existsSync2, readFileSync as readFileSync2, readdirSync as readdirSync2, statSync as statSync2, unlinkSync as unlinkSync2 } from "fs";
+import { existsSync as existsSync3, readFileSync as readFileSync3, readdirSync as readdirSync2, statSync as statSync2, unlinkSync as unlinkSync2 } from "fs";
 import { dirname as dirname2, join as join4 } from "path";
 var SESSION_INDEX_PATH = join4(DEFAULT_STARLING_HOME, "session-index.json");
 async function rebuildSessionIndex(provider) {
@@ -797,9 +819,9 @@ async function rebuildSessionIndex(provider) {
   return writeSessionIndex(sessions, collectSessionDirectoryEntries(provider));
 }
 function loadSessionIndex() {
-  if (!existsSync2(SESSION_INDEX_PATH)) return null;
+  if (!existsSync3(SESSION_INDEX_PATH)) return null;
   try {
-    const parsed = JSON.parse(readFileSync2(SESSION_INDEX_PATH, "utf-8"));
+    const parsed = JSON.parse(readFileSync3(SESSION_INDEX_PATH, "utf-8"));
     if (!isRecord2(parsed)) return null;
     if (parsed.version !== 1 || !Array.isArray(parsed.sessions)) return null;
     if (typeof parsed.built_at !== "string") return null;
@@ -855,7 +877,7 @@ async function refreshIndexedSessionsById(sessionIds, provider, options = {}) {
   return changed ? writeSessionIndex(sessions, index.directories ?? []) : index;
 }
 function clearSessionIndex() {
-  if (!existsSync2(SESSION_INDEX_PATH)) return false;
+  if (!existsSync3(SESSION_INDEX_PATH)) return false;
   unlinkSync2(SESSION_INDEX_PATH);
   return true;
 }
@@ -942,7 +964,13 @@ function writeSessionIndex(sessions, directories = []) {
     directories,
     projects
   };
-  atomicWriteJSON(SESSION_INDEX_PATH, index);
+  try {
+    atomicWriteJSON(SESSION_INDEX_PATH, index);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`Warning: failed to write session index ${SESSION_INDEX_PATH}: ${message}
+`);
+  }
   return index;
 }
 function upsertSession(sessions, session) {
@@ -1184,7 +1212,7 @@ ${"\u2500".repeat(145)}`;
 Total: ${count} sessions`));
       if (pager && !pipeBroken) {
         pager.stdin.end();
-        await new Promise((resolve3) => pager.on("close", () => resolve3()));
+        await new Promise((resolve4) => pager.on("close", () => resolve4()));
       }
       return;
     }
@@ -1338,7 +1366,7 @@ Total: ${count} sessions`));
       console.error(chalk2.red(`Session file path is unknown: ${meta.session_id}`));
       process.exit(1);
     }
-    if (!existsSync3(meta.file_path)) {
+    if (!existsSync4(meta.file_path)) {
       console.error(chalk2.red(`Session file not found: ${meta.file_path}`));
       process.exit(1);
     }
@@ -2232,13 +2260,13 @@ function registerProjectCommand(program2) {
 import { Command as Command5 } from "commander";
 import chalk6 from "chalk";
 import { randomUUID as randomUUID2 } from "crypto";
-import { chmodSync as chmodSync4, existsSync as existsSync6, readFileSync as readFileSync5, readdirSync as readdirSync4, statSync as statSync4, unlinkSync as unlinkSync6, writeFileSync as writeFileSync4 } from "fs";
+import { chmodSync as chmodSync4, existsSync as existsSync7, readFileSync as readFileSync6, readdirSync as readdirSync4, statSync as statSync4, unlinkSync as unlinkSync6, writeFileSync as writeFileSync4 } from "fs";
 import { createInterface as createInterface3 } from "readline/promises";
 import { spawn as spawn2 } from "child_process";
 import { basename as basename2, extname as extname3, isAbsolute as isAbsolute2, join as join7, resolve as resolve2 } from "path";
 
 // src/lib/codexProvider.ts
-import { existsSync as existsSync4, readFileSync as readFileSync3, readdirSync as readdirSync3, writeFileSync as writeFileSync2, chmodSync as chmodSync2, unlinkSync as unlinkSync4, renameSync as renameSync2 } from "fs";
+import { existsSync as existsSync5, readFileSync as readFileSync4, readdirSync as readdirSync3, writeFileSync as writeFileSync2, chmodSync as chmodSync2, unlinkSync as unlinkSync4, renameSync as renameSync2 } from "fs";
 import { basename, extname as extname2, isAbsolute, join as join5, resolve } from "path";
 
 // src/lib/configPaths.ts
@@ -2271,7 +2299,7 @@ function saveCodexProviderProfile(profileName, patch) {
   const safeName = normalizeProfileName(profileName);
   const existingPath = resolveCodexConfigPath(safeName);
   const targetPath = existingPath ?? join5(DEFAULT_CODEX_SETTINGS_DIR, `${safeName}.toml`);
-  const existing = existsSync4(targetPath) ? parseCodexProfile(targetPath) : { auth: null, config: null, configObject: null };
+  const existing = existsSync5(targetPath) ? parseCodexProfile(targetPath) : { auth: null, config: null, configObject: null };
   const auth = mergeAuthPatch(existing.auth, patch);
   const config = mergeConfigPatch(existing.configObject, patch);
   if ((!auth || Object.keys(auth).length === 0) && (!config || Object.keys(config).length === 0)) {
@@ -2283,18 +2311,18 @@ function saveCodexProviderProfile(profileName, patch) {
 function resolveCodexConfigPath(nameOrPath) {
   migrateCodexJsonProfilesToToml();
   if (!nameOrPath) return null;
-  if (isAbsolute(nameOrPath) || existsSync4(nameOrPath)) {
-    if (!existsSync4(nameOrPath)) {
+  if (isAbsolute(nameOrPath) || existsSync5(nameOrPath)) {
+    if (!existsSync5(nameOrPath)) {
       return null;
     }
     return resolve(nameOrPath);
   }
   const base = join5(DEFAULT_CODEX_SETTINGS_DIR, basename(nameOrPath));
-  if (hasKnownConfigExtension(base, CODEX_PROVIDER_EXTENSIONS) && existsSync4(base)) return base;
+  if (hasKnownConfigExtension(base, CODEX_PROVIDER_EXTENSIONS) && existsSync5(base)) return base;
   if (hasKnownConfigExtension(base, CODEX_PROVIDER_EXTENSIONS)) return null;
   for (const ext of CODEX_PROVIDER_EXTENSIONS) {
     const candidate = `${base}${ext}`;
-    if (existsSync4(candidate)) return candidate;
+    if (existsSync5(candidate)) return candidate;
   }
   return null;
 }
@@ -2319,7 +2347,7 @@ function inspectCodexProfile(filePath) {
   return { filePath, hasConfig: false, hasAuth: false };
 }
 function migrateCodexJsonProfilesToToml() {
-  if (!existsSync4(DEFAULT_CODEX_SETTINGS_DIR)) return [];
+  if (!existsSync5(DEFAULT_CODEX_SETTINGS_DIR)) return [];
   const migrated = [];
   const entries = readdirSync3(DEFAULT_CODEX_SETTINGS_DIR, { withFileTypes: true });
   for (const entry of entries) {
@@ -2331,14 +2359,14 @@ function migrateCodexJsonProfilesToToml() {
     const targetPath = join5(DEFAULT_CODEX_SETTINGS_DIR, `${name}.toml`);
     const backupPath = `${sourcePath}.bak`;
     try {
-      if (!existsSync4(targetPath)) {
+      if (!existsSync5(targetPath)) {
         const parsed = parseCodexJsonProfile(sourcePath, extension === ".jsonc");
         writeCodexProfileToml(targetPath, parsed.auth, parsed.configObject);
         migrated.push(targetPath);
       }
-      if (!existsSync4(backupPath)) {
+      if (!existsSync5(backupPath)) {
         renameSync2(sourcePath, backupPath);
-      } else if (existsSync4(targetPath)) {
+      } else if (existsSync5(targetPath)) {
         unlinkSync4(sourcePath);
       }
     } catch {
@@ -2355,7 +2383,7 @@ function parseCodexProfile(filePath) {
   throw new Error(`Unsupported codex profile type: ${filePath}`);
 }
 function parseCodexJsonProfile(filePath, allowComments) {
-  const raw = readFileSync3(filePath, "utf-8");
+  const raw = readFileSync4(filePath, "utf-8");
   let parsed;
   try {
     parsed = JSON.parse(allowComments ? stripJsonComments(raw) : raw);
@@ -2374,7 +2402,7 @@ function parseCodexJsonProfile(filePath, allowComments) {
   return { auth, config, configObject };
 }
 function parseCodexTomlProfile(filePath) {
-  const raw = readFileSync3(filePath, "utf-8");
+  const raw = readFileSync4(filePath, "utf-8");
   const configObject = parseSimpleToml(raw);
   const providerName = stringValue(configObject.model_provider);
   const providers = isRecord3(configObject.model_providers) ? configObject.model_providers : {};
@@ -2680,11 +2708,11 @@ async function startCodexChatProxy(options) {
       });
     }
   });
-  await new Promise((resolve3, reject) => {
+  await new Promise((resolve4, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
-      resolve3();
+      resolve4();
     });
   });
   const address = server.address();
@@ -2697,8 +2725,8 @@ async function startCodexChatProxy(options) {
   };
 }
 function closeServer(server) {
-  return new Promise((resolve3) => {
-    server.close(() => resolve3());
+  return new Promise((resolve4) => {
+    server.close(() => resolve4());
   });
 }
 async function handleModels(req, res, upstreamBaseUrl, apiKey, search) {
@@ -3901,7 +3929,7 @@ function isRecord4(value) {
 }
 
 // src/lib/codexDefaultGuard.ts
-import { existsSync as existsSync5, readFileSync as readFileSync4, statSync as statSync3, unlinkSync as unlinkSync5, writeFileSync as writeFileSync3, chmodSync as chmodSync3 } from "fs";
+import { existsSync as existsSync6, readFileSync as readFileSync5, statSync as statSync3, unlinkSync as unlinkSync5, writeFileSync as writeFileSync3, chmodSync as chmodSync3 } from "fs";
 import { join as join6 } from "path";
 function snapshotCodexDefaultConfig() {
   return {
@@ -3918,20 +3946,20 @@ function restoreCodexDefaultConfig(snapshot) {
   }
 }
 function snapshotFile(path) {
-  if (!existsSync5(path)) {
+  if (!existsSync6(path)) {
     return { path, existed: false };
   }
   const st = statSync3(path);
   return {
     path,
     existed: true,
-    content: readFileSync4(path, "utf-8"),
+    content: readFileSync5(path, "utf-8"),
     mode: st.mode & 511
   };
 }
 function restoreFile(snapshot) {
   if (!snapshot.existed) {
-    if (existsSync5(snapshot.path)) {
+    if (existsSync6(snapshot.path)) {
       unlinkSync5(snapshot.path);
     }
     return;
@@ -4233,7 +4261,7 @@ var CLAUDE_SETTINGS_SYNC_KEYS = [
   "disabledMcpjsonServers"
 ];
 function syncClaudeProfileSettingsFromRunSettings(sourceConfigPath, runSettingsPath) {
-  if (!sourceConfigPath || !runSettingsPath || !existsSync6(runSettingsPath)) return false;
+  if (!sourceConfigPath || !runSettingsPath || !existsSync7(runSettingsPath)) return false;
   const sourceExt = extname3(sourceConfigPath).toLowerCase();
   if (sourceExt !== ".json" && sourceExt !== ".jsonc") return false;
   try {
@@ -4280,7 +4308,7 @@ function ensureCodexRunHookConfig(config) {
   const hookText = codexSessionStartHookToml(eventsPath);
   if (config?.cleanupPaths[0] && config.args.includes("--profile")) {
     const profilePath2 = config.cleanupPaths[0];
-    const existing = readFileSync5(profilePath2, "utf-8");
+    const existing = readFileSync6(profilePath2, "utf-8");
     writeFileSync4(profilePath2, `${existing.trimEnd()}
 
 ${hookText}`, "utf-8");
@@ -4373,7 +4401,7 @@ function syncCodexProfileProjectTrustFromRunConfig(sourceConfigPath, runConfig) 
   if (sourceExt !== ".json" && sourceExt !== ".jsonc" && sourceExt !== ".toml") return;
   const trustedProjects = /* @__PURE__ */ new Set();
   for (const path of runConfig.cleanupPaths) {
-    if (!path.endsWith(".config.toml") || !existsSync6(path)) continue;
+    if (!path.endsWith(".config.toml") || !existsSync7(path)) continue;
     for (const projectPath of readTrustedProjectsFromCodexToml(path)) {
       trustedProjects.add(projectPath);
     }
@@ -4384,7 +4412,7 @@ function syncCodexProfileProjectTrustFromRunConfig(sourceConfigPath, runConfig) 
     return;
   }
   try {
-    const raw = readFileSync5(sourceConfigPath, "utf-8");
+    const raw = readFileSync6(sourceConfigPath, "utf-8");
     const parsed = JSON.parse(sourceExt === ".jsonc" ? stripJsonComments2(raw) : raw);
     if (!isRecord5(parsed)) return;
     const config = isRecord5(parsed.config) ? parsed.config : {};
@@ -4407,7 +4435,7 @@ function syncCodexProfileProjectTrustFromRunConfig(sourceConfigPath, runConfig) 
 }
 function syncCodexTomlProjectTrust(sourceConfigPath, trustedProjects) {
   try {
-    let raw = readFileSync5(sourceConfigPath, "utf-8");
+    let raw = readFileSync6(sourceConfigPath, "utf-8");
     let changed = false;
     for (const projectPath of trustedProjects) {
       const updated = upsertCodexTomlProjectTrust(raw, projectPath);
@@ -4457,7 +4485,7 @@ trust_level = "trusted"
   return nextLines.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 function readTrustedProjectsFromCodexToml(filePath) {
-  const raw = readFileSync5(filePath, "utf-8");
+  const raw = readFileSync6(filePath, "utf-8");
   const trusted = [];
   let currentProject = null;
   let currentTrusted = false;
@@ -4481,7 +4509,7 @@ function readTrustedProjectsFromCodexToml(filePath) {
 }
 function readCodexJsonProfileForRun(configPath, allowComments) {
   try {
-    const raw = readFileSync5(configPath, "utf-8");
+    const raw = readFileSync6(configPath, "utf-8");
     const parsed = JSON.parse(allowComments ? stripJsonComments2(raw) : raw);
     if (!isRecord5(parsed)) {
       console.error(chalk6.red(`Codex config must be a JSON object: ${configPath}`));
@@ -4501,7 +4529,7 @@ function readCodexJsonProfileForRun(configPath, allowComments) {
 }
 function readCodexTomlProfileForRun(configPath) {
   try {
-    const configText = readFileSync5(configPath, "utf-8");
+    const configText = readFileSync6(configPath, "utf-8");
     const config = parseSimpleToml2(configText);
     const auth = resolveCodexTomlAuth(config);
     const profile = { config };
@@ -4823,10 +4851,10 @@ function convertCodexJsonToToml(value) {
 ` : "";
 }
 function readRunHookSessionId(eventsPath) {
-  if (!eventsPath || !existsSync6(eventsPath)) return null;
+  if (!eventsPath || !existsSync7(eventsPath)) return null;
   let raw = "";
   try {
-    raw = readFileSync5(eventsPath, "utf-8");
+    raw = readFileSync6(eventsPath, "utf-8");
   } catch {
     return null;
   }
@@ -4864,7 +4892,7 @@ function readClaudeSettingsObject(configPath) {
   return null;
 }
 function readSettingsJsonObject(filePath, allowComments) {
-  const raw = readFileSync5(filePath, "utf-8");
+  const raw = readFileSync6(filePath, "utf-8");
   const parsed = JSON.parse(allowComments ? stripJsonComments2(raw) : raw);
   return isRecord5(parsed) ? parsed : null;
 }
@@ -4882,8 +4910,8 @@ function shellQuote(value) {
 }
 function resolveConfigFilePath(provider, configFile) {
   if (!configFile) return null;
-  if (isAbsolute2(configFile) || existsSync6(configFile)) {
-    if (!existsSync6(configFile)) {
+  if (isAbsolute2(configFile) || existsSync7(configFile)) {
+    if (!existsSync7(configFile)) {
       console.error(chalk6.red(`Config file not found: ${configFile}`));
       process.exit(1);
     }
@@ -4892,13 +4920,13 @@ function resolveConfigFilePath(provider, configFile) {
   const baseDir = provider === "claude" ? DEFAULT_CLAUDE_SETTINGS_DIR : DEFAULT_CODEX_SETTINGS_DIR;
   const fileName = basename2(configFile);
   const candidate = join7(baseDir, fileName);
-  if (existsSync6(candidate)) return candidate;
+  if (existsSync7(candidate)) return candidate;
   const candidatesTried = [candidate];
   if (!hasKnownConfigExtension(fileName, CONFIG_FILE_EXTENSIONS)) {
     for (const ext of CONFIG_FILE_EXTENSIONS) {
       const candidateWithExtension = `${candidate}${ext}`;
       candidatesTried.push(candidateWithExtension);
-      if (existsSync6(candidateWithExtension)) return candidateWithExtension;
+      if (existsSync7(candidateWithExtension)) return candidateWithExtension;
     }
   }
   console.error(chalk6.red(`Config file not found: ${configFile}`));
@@ -5537,7 +5565,7 @@ function normalizeAgent(input) {
 import { Command as Command6 } from "commander";
 import chalk7 from "chalk";
 import Table4 from "cli-table3";
-import { existsSync as existsSync7, readFileSync as readFileSync6, readdirSync as readdirSync5, unlinkSync as unlinkSync7 } from "fs";
+import { existsSync as existsSync8, readFileSync as readFileSync7, readdirSync as readdirSync5, unlinkSync as unlinkSync7 } from "fs";
 import { basename as basename3, extname as extname4, join as join8 } from "path";
 import { homedir as homedir2 } from "os";
 var SUPPORTED_EXTENSIONS = /* @__PURE__ */ new Set([".json", ".jsonc", ".toml"]);
@@ -5602,7 +5630,7 @@ function addModelProfile(name, agent, opts) {
     }
   }
   const source = join8(DEFAULT_CLAUDE_SETTINGS_DIR, `${profileName}.json`);
-  if (existsSync7(source) && !opts.force) {
+  if (existsSync8(source) && !opts.force) {
     console.error(chalk7.red(`Model profile already exists: ${profileName}`));
     console.error(chalk7.gray(`  Source: ${source}`));
     console.error(chalk7.gray("Use --force to overwrite it."));
@@ -5651,7 +5679,7 @@ function deleteModelProfile(name, agent) {
 function findModelProfileSources(profileName, agent) {
   const dir = agent === "claude" ? DEFAULT_CLAUDE_SETTINGS_DIR : DEFAULT_CODEX_SETTINGS_DIR;
   const extensions = agent === "claude" ? [".json", ".jsonc"] : [".toml", ".json", ".jsonc"];
-  return extensions.map((extension) => join8(dir, `${profileName}${extension}`)).filter((source) => existsSync7(source));
+  return extensions.map((extension) => join8(dir, `${profileName}${extension}`)).filter((source) => existsSync8(source));
 }
 function buildClaudeProfile(opts, model) {
   const env = {
@@ -5729,7 +5757,7 @@ function collectCodexConfigs() {
   ];
 }
 function listProfileFiles(dir) {
-  if (!existsSync7(dir)) return [];
+  if (!existsSync8(dir)) return [];
   return readdirSync5(dir, { withFileTypes: true }).filter((entry) => entry.isFile()).map((entry) => join8(dir, entry.name)).filter((filePath) => SUPPORTED_EXTENSIONS.has(extname4(filePath).toLowerCase())).sort((a, b) => a.localeCompare(b));
 }
 function summarizeClaudeProfile(filePath, name) {
@@ -5752,7 +5780,7 @@ function summarizeClaudeJson(filePath, name, scope) {
     scope,
     name,
     source: filePath,
-    exists: existsSync7(filePath)
+    exists: existsSync8(filePath)
   };
   if (!base.exists) return base;
   try {
@@ -5809,12 +5837,12 @@ function summarizeCodexToml(filePath, name, scope, auth) {
     scope,
     name,
     source: filePath,
-    exists: existsSync7(filePath),
+    exists: existsSync8(filePath),
     auth
   };
   if (!base.exists) return base;
   try {
-    const raw = readFileSync6(filePath, "utf-8");
+    const raw = readFileSync7(filePath, "utf-8");
     const provider = parseTomlValue(raw, "model_provider");
     const providerSection = provider ? parseTomlSection(raw, `model_providers.${provider}`) : {};
     return {
@@ -5846,7 +5874,7 @@ function summarizeCodexConfigObject(base, config, auth) {
 }
 function readCodexAuthState() {
   const authPath = join8(DEFAULT_CODEX_HOME, "auth.json");
-  if (!existsSync7(authPath)) return "none";
+  if (!existsSync8(authPath)) return "none";
   try {
     const parsed = parseJsonFile(authPath);
     if (hasAnySecret(parsed, ["OPENAI_API_KEY", "api_key", "apiKey", "access_token", "refresh_token"])) {
@@ -5858,9 +5886,9 @@ function readCodexAuthState() {
   }
 }
 function readCodexTomlAuthState(filePath) {
-  if (!existsSync7(filePath)) return "none";
+  if (!existsSync8(filePath)) return "none";
   try {
-    const raw = readFileSync6(filePath, "utf-8");
+    const raw = readFileSync7(filePath, "utf-8");
     return /^\s*(experimental_bearer_token|OPENAI_API_KEY)\s*=\s*["'][^"']+["']/m.test(raw) ? "configured" : "none";
   } catch {
     return "unreadable";
@@ -5909,7 +5937,7 @@ function formatModelTable(rows) {
   return table.toString();
 }
 function parseJsonFile(filePath) {
-  const raw = readFileSync6(filePath, "utf-8");
+  const raw = readFileSync7(filePath, "utf-8");
   const parsed = JSON.parse(stripJsonComments3(raw));
   if (!isRecord6(parsed)) {
     throw new Error("JSON root is not an object");
@@ -5978,16 +6006,180 @@ function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// src/commands/config.ts
+import { copyFileSync, cpSync, existsSync as existsSync9, readFileSync as readFileSync8 } from "fs";
+import { homedir as homedir3 } from "os";
+import { join as join9, resolve as resolve3 } from "path";
+import { Command as Command7 } from "commander";
+import chalk8 from "chalk";
+function registerConfigCommand(program2) {
+  const config = new Command7("config").description("Manage Starling CLI settings");
+  config.command("show").alias("ls").description("Show Starling CLI settings").option("--json", "output JSON").action((opts) => {
+    const fileConfig = readCliConfig();
+    const payload = {
+      configPath: CLI_CONFIG_PATH,
+      configuredHomePath: fileConfig.homePath ?? null,
+      effectiveHomePath: DEFAULT_STARLING_HOME,
+      homeSource: STARLING_HOME_SOURCE,
+      storePath: DEFAULT_STORE_PATH,
+      settingsPath: DEFAULT_STARLING_SETTINGS_DIR
+    };
+    if (opts.json) {
+      console.log(JSON.stringify(payload, null, 2));
+      return;
+    }
+    console.log(chalk8.green("Starling config"));
+    console.log(`  Config:   ${payload.configPath}`);
+    console.log(`  Home:     ${payload.effectiveHomePath}`);
+    console.log(`  Source:   ${payload.homeSource}`);
+    if (payload.configuredHomePath) {
+      console.log(`  Saved:    ${payload.configuredHomePath}`);
+    }
+    console.log(`  Store:    ${payload.storePath}`);
+    console.log(`  Settings: ${payload.settingsPath}`);
+  });
+  config.command("set <key> <value>").description("Set a Starling CLI setting").option("--migrate", "copy existing Starling metadata into the new home when target files do not exist").action((key, value, opts) => {
+    if (key !== "home") {
+      console.error(chalk8.red(`Unknown config key: ${key}`));
+      console.error(chalk8.gray("Allowed keys: home"));
+      process.exit(1);
+    }
+    const homePath = normalizeHomePath(value);
+    const migrated = opts.migrate ? migrateStarlingData(homePath) : [];
+    const fileConfig = readCliConfig();
+    fileConfig.homePath = homePath;
+    atomicWriteJSON(CLI_CONFIG_PATH, fileConfig);
+    console.log(chalk8.green("Updated Starling config"));
+    console.log(`  Home:   ${homePath}`);
+    console.log(`  Config: ${CLI_CONFIG_PATH}`);
+    for (const entry of migrated) {
+      console.log(chalk8.gray(`  Migrated: ${entry}`));
+    }
+    if (process.env.STARLING_HOME?.trim()) {
+      console.log(chalk8.yellow("  Note: STARLING_HOME is currently set and overrides this saved value for this process."));
+    }
+  });
+  config.command("unset <key>").description("Unset a Starling CLI setting").action((key) => {
+    if (key !== "home") {
+      console.error(chalk8.red(`Unknown config key: ${key}`));
+      console.error(chalk8.gray("Allowed keys: home"));
+      process.exit(1);
+    }
+    const fileConfig = readCliConfig();
+    delete fileConfig.homePath;
+    atomicWriteJSON(CLI_CONFIG_PATH, fileConfig);
+    console.log(chalk8.green("Updated Starling config"));
+    console.log("  Home:   default");
+    console.log(`  Config: ${CLI_CONFIG_PATH}`);
+  });
+  program2.addCommand(config);
+}
+function readCliConfig() {
+  if (!existsSync9(CLI_CONFIG_PATH)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync8(CLI_CONFIG_PATH, "utf-8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const homePath = parsed.homePath;
+    return typeof homePath === "string" && homePath.trim() ? { homePath: homePath.trim() } : {};
+  } catch {
+    return {};
+  }
+}
+function normalizeHomePath(value) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    console.error(chalk8.red("Home path cannot be empty."));
+    process.exit(1);
+  }
+  if (trimmed === "~") return homedir3();
+  if (trimmed.startsWith("~/")) return resolve3(homedir3(), trimmed.slice(2));
+  return resolve3(trimmed);
+}
+function migrateStarlingData(targetHome) {
+  const migrated = [];
+  const targetStore = join9(targetHome, "store.json");
+  if (existsSync9(DEFAULT_STORE_PATH) && !existsSync9(targetStore)) {
+    ensureDir(targetStore);
+    copyFileSync(DEFAULT_STORE_PATH, targetStore);
+    migrated.push(targetStore);
+  }
+  const targetSettings = join9(targetHome, "settings");
+  if (existsSync9(DEFAULT_STARLING_SETTINGS_DIR) && !existsSync9(targetSettings)) {
+    ensureDir(targetSettings);
+    cpSync(DEFAULT_STARLING_SETTINGS_DIR, targetSettings, { recursive: true });
+    migrated.push(targetSettings);
+  }
+  for (const name of ["session-index.json", "project-session-index.json", "codex-provider.json"]) {
+    const source = join9(DEFAULT_STARLING_HOME, name);
+    const target = join9(targetHome, name);
+    if (existsSync9(source) && !existsSync9(target)) {
+      ensureDir(target);
+      copyFileSync(source, target);
+      migrated.push(target);
+    }
+  }
+  return migrated;
+}
+
+// package.json
+var package_default = {
+  name: "starling-ai",
+  version: "0.0.9",
+  description: "Agent session manager \u2014 discover, bookmark, and organize AI coding sessions",
+  type: "module",
+  repository: {
+    type: "git",
+    url: "https://github.com/huang-sh/Starling"
+  },
+  bin: {
+    starling: "dist/index.js"
+  },
+  files: [
+    "dist",
+    "skills",
+    "scripts/install-agent-skills.js",
+    "docs",
+    "package.json",
+    "README.md",
+    "LICENSE"
+  ],
+  scripts: {
+    build: "tsup",
+    dev: "tsup --watch",
+    postinstall: "node scripts/install-agent-skills.js",
+    "install:skill": "node scripts/install-agent-skills.js",
+    prepack: "npm run build",
+    test: "vitest run",
+    lint: "tsc --noEmit"
+  },
+  dependencies: {
+    chalk: "^5.3.0",
+    "cli-table3": "^0.6.5",
+    commander: "^12.1.0"
+  },
+  devDependencies: {
+    "@types/node": "^20.14.0",
+    tsup: "^8.1.0",
+    typescript: "^5.5.0",
+    vitest: "^1.6.0"
+  },
+  engines: {
+    node: ">=20.0.0"
+  },
+  license: "MIT"
+};
+
 // src/index.ts
-var program = new Command7();
+var program = new Command8();
 program.enablePositionalOptions();
-program.name("starling").description("Agent session manager \u2014 discover, pin, and organize AI coding sessions").version("0.0.6");
+program.name("starling").description("Agent session manager \u2014 discover, pin, and organize AI coding sessions").version(package_default.version);
 registerSessionCommand(program);
 registerPinCommand(program);
 registerSpaceCommand(program);
 registerProjectCommand(program);
 registerRunCommand(program);
 registerModelCommand(program);
+registerConfigCommand(program);
 program.command("resume <session-id>").description("Resume an agent session directly").action(async (sessionId) => {
   await resumeSession(sessionId);
 });

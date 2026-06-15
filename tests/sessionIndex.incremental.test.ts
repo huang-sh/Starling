@@ -6,6 +6,7 @@ const children = new Map<string, string[]>();
 const parsedFiles: string[] = [];
 const statCalls: string[] = [];
 let writtenJson: unknown = null;
+let writeError: Error | null = null;
 
 function addDir(path: string, names: string[]): void {
   stats.set(path, { mtimeMs: 1, directory: true });
@@ -48,6 +49,7 @@ vi.mock("../src/constants.js", () => ({
 
 vi.mock("../src/utils/fs.js", () => ({
   atomicWriteJSON: vi.fn((_path: string, value: unknown) => {
+    if (writeError) throw writeError;
     writtenJson = value;
   }),
 }));
@@ -91,6 +93,7 @@ describe("loadSessionIndexWithNewFiles", () => {
     parsedFiles.length = 0;
     statCalls.length = 0;
     writtenJson = null;
+    writeError = null;
 
     files.set(
       "/starling/session-index.json",
@@ -135,6 +138,22 @@ describe("loadSessionIndexWithNewFiles", () => {
       session_count: 2,
       project_count: 2,
     });
+  });
+
+  it("returns an updated in-memory index when persistence fails", async () => {
+    writeError = Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const { loadSessionIndexWithNewFiles } = await import("../src/lib/sessionIndex.js");
+
+    const index = await loadSessionIndexWithNewFiles();
+
+    expect(parsedFiles).toEqual(["head:/sessions/claude/project/new.jsonl"]);
+    expect(index.session_count).toBe(2);
+    expect(index.project_count).toBe(2);
+    expect(index.sessions.map((session) => session.session_id).sort()).toEqual(["existing", "new"]);
+    expect(writtenJson).toBeNull();
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining("failed to write session index"));
+    stderr.mockRestore();
   });
 
   it("refreshes indexed sessions by id when their files changed", async () => {

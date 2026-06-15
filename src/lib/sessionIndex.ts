@@ -283,7 +283,12 @@ function writeSessionIndex(
     directories,
     projects,
   };
-  atomicWriteJSON(SESSION_INDEX_PATH, index);
+  try {
+    atomicWriteJSON(SESSION_INDEX_PATH, index);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`Warning: failed to write session index ${SESSION_INDEX_PATH}: ${message}\n`);
+  }
   return index;
 }
 
