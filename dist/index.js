@@ -6326,13 +6326,8 @@ function parseAgentSpec(spec) {
     throw new Error("Empty agent spec. Use the form `provider:profile`, e.g. `claude:ds`.");
   }
   const colonIndex = trimmed.indexOf(":");
-  if (colonIndex === -1) {
-    throw new Error(
-      `Invalid agent spec "${spec}": missing ":". Use the form \`provider:profile\`, e.g. \`claude:ds\`.`
-    );
-  }
-  const provider = trimmed.slice(0, colonIndex);
-  const profile = trimmed.slice(colonIndex + 1);
+  const provider = colonIndex === -1 ? trimmed : trimmed.slice(0, colonIndex);
+  const profile = colonIndex === -1 ? "" : trimmed.slice(colonIndex + 1);
   if (provider !== "claude" && provider !== "codex") {
     throw new Error(
       `Invalid agent spec "${spec}": unknown provider "${provider}". Allowed: claude, codex.`
@@ -6689,7 +6684,7 @@ function formatReportJson(report) {
 
 // src/commands/diagnose.ts
 function registerDiagnoseCommand(program2) {
-  const diagnose = new Command8("diagnose").alias("diag").description("Run a benchmark task against one or more agents and have a judge agent assess them").option("--task <task>", "benchmark task id", "personality").option("--judge <provider:profile>", "judge/launcher agent, e.g. claude:sonnet / codex:gpt5 / claude:").option("--agent <provider:profile>", "evaluatee agent (repeatable)", accumulate, []).option("--timeout <ms>", "per-call timeout in ms", "120000").option("--concurrency <n>", "max evaluatees to run in parallel; 0 = all at once", "0").option("--json", "emit full report as JSON on stdout").option("--out <file>", "write the JSON report to a file").action(async (opts) => {
+  const diagnose = new Command8("diagnose").alias("diag").description("Run a benchmark task against one or more agents and have a judge agent assess them").option("--task <task>", "benchmark task id", "personality").option("--judge <provider[:profile]>", "judge/launcher agent, e.g. claude:sonnet / codex:gpt5 / claude (bare provider = default config)").option("--agent <provider[:profile]>", "evaluatee agent (repeatable)", accumulate, []).option("--timeout <ms>", "per-call timeout in ms", "120000").option("--concurrency <n>", "max evaluatees to run in parallel; 0 = all at once", "0").option("--json", "emit full report as JSON on stdout").option("--out <file>", "write the JSON report to a file").action(async (opts) => {
     await runDiagnose(opts).catch((err) => {
       console.error(chalk11.red(err instanceof Error ? err.message : String(err)));
       process.exit(1);

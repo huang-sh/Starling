@@ -32,13 +32,9 @@ export function parseAgentSpec(spec: string): AgentSpec {
     throw new Error("Empty agent spec. Use the form `provider:profile`, e.g. `claude:ds`.");
   }
   const colonIndex = trimmed.indexOf(":");
-  if (colonIndex === -1) {
-    throw new Error(
-      `Invalid agent spec "${spec}": missing ":". Use the form \`provider:profile\`, e.g. \`claude:ds\`.`
-    );
-  }
-  const provider = trimmed.slice(0, colonIndex);
-  const profile = trimmed.slice(colonIndex + 1);
+  // A bare provider name (e.g. "claude", "codex") with no colon = default config.
+  const provider = colonIndex === -1 ? trimmed : trimmed.slice(0, colonIndex);
+  const profile = colonIndex === -1 ? "" : trimmed.slice(colonIndex + 1);
   if (provider !== "claude" && provider !== "codex") {
     throw new Error(
       `Invalid agent spec "${spec}": unknown provider "${provider}". Allowed: claude, codex.`

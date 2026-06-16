@@ -54,14 +54,21 @@ describe("parseAgentSpec", () => {
     expect(spec.profile).toBe("gpt5");
   });
 
-  it("rejects missing colon", async () => {
+  it("parses bare provider as default config (no colon)", async () => {
     const parse = await loadParse();
-    expect(() => parse("claude")).toThrow(/missing ":"/);
+    const claude = parse("claude") as { provider: string; profile: string; raw: string };
+    expect(claude.provider).toBe("claude");
+    expect(claude.profile).toBe("");
+    expect(claude.raw).toBe("claude");
+    const codex = parse("codex") as { provider: string; profile: string };
+    expect(codex.provider).toBe("codex");
+    expect(codex.profile).toBe("");
   });
 
   it("rejects unknown provider", async () => {
     const parse = await loadParse();
     expect(() => parse("foo:bar")).toThrow(/unknown provider/);
+    expect(() => parse("foo")).toThrow(/unknown provider/);
   });
 
   it("rejects empty spec", async () => {
