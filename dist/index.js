@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // src/index.ts
-import { Command as Command8 } from "commander";
+import { Command as Command9 } from "commander";
 
 // src/commands/session.ts
 import { Command } from "commander";
@@ -2333,12 +2333,12 @@ function registerProjectCommand(program2) {
 
 // src/commands/run.ts
 import { Command as Command5 } from "commander";
-import chalk6 from "chalk";
-import { randomUUID as randomUUID2 } from "crypto";
-import { chmodSync as chmodSync4, existsSync as existsSync7, readFileSync as readFileSync6, readdirSync as readdirSync4, statSync as statSync4, unlinkSync as unlinkSync6, writeFileSync as writeFileSync4 } from "fs";
+import chalk7 from "chalk";
+import { randomUUID as randomUUID3 } from "crypto";
+import { chmodSync as chmodSync5, existsSync as existsSync7, readFileSync as readFileSync7, readdirSync as readdirSync4, statSync as statSync4, unlinkSync as unlinkSync7, writeFileSync as writeFileSync5 } from "fs";
 import { createInterface as createInterface3 } from "readline/promises";
 import { spawn as spawn2 } from "child_process";
-import { basename as basename2, extname as extname3, isAbsolute as isAbsolute2, join as join7, resolve as resolve2 } from "path";
+import { basename as basename2, extname as extname4, isAbsolute as isAbsolute2, join as join8, resolve as resolve2 } from "path";
 
 // src/lib/codexProvider.ts
 import { existsSync as existsSync5, readFileSync as readFileSync4, readdirSync as readdirSync3, writeFileSync as writeFileSync2, chmodSync as chmodSync2, unlinkSync as unlinkSync4, renameSync as renameSync2 } from "fs";
@@ -2743,6 +2743,12 @@ function toTomlKey(key) {
 function isRecord3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+// src/lib/codexRunConfig.ts
+import chalk6 from "chalk";
+import { randomUUID as randomUUID2 } from "crypto";
+import { chmodSync as chmodSync3, readFileSync as readFileSync5, unlinkSync as unlinkSync5, writeFileSync as writeFileSync3 } from "fs";
+import { extname as extname3, join as join6 } from "path";
 
 // src/lib/codexChatProxy.ts
 import { createServer } from "http";
@@ -4003,361 +4009,7 @@ function isRecord4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-// src/lib/codexDefaultGuard.ts
-import { existsSync as existsSync6, readFileSync as readFileSync5, statSync as statSync3, unlinkSync as unlinkSync5, writeFileSync as writeFileSync3, chmodSync as chmodSync3 } from "fs";
-import { join as join6 } from "path";
-function snapshotCodexDefaultConfig() {
-  return {
-    files: [
-      snapshotFile(join6(DEFAULT_CODEX_HOME, "config.toml")),
-      snapshotFile(join6(DEFAULT_CODEX_HOME, "auth.json"))
-    ]
-  };
-}
-function restoreCodexDefaultConfig(snapshot) {
-  if (!snapshot) return;
-  for (const file of snapshot.files) {
-    restoreFile(file);
-  }
-}
-function snapshotFile(path) {
-  if (!existsSync6(path)) {
-    return { path, existed: false };
-  }
-  const st = statSync3(path);
-  return {
-    path,
-    existed: true,
-    content: readFileSync5(path, "utf-8"),
-    mode: st.mode & 511
-  };
-}
-function restoreFile(snapshot) {
-  if (!snapshot.existed) {
-    if (existsSync6(snapshot.path)) {
-      unlinkSync5(snapshot.path);
-    }
-    return;
-  }
-  ensureDir(snapshot.path);
-  writeFileSync3(snapshot.path, snapshot.content ?? "", "utf-8");
-  if (snapshot.mode !== void 0) {
-    chmodSync3(snapshot.path, snapshot.mode);
-  }
-}
-
-// src/commands/run.ts
-var RUN_SESSION_SCAN_LIMIT = 500;
-var RUN_SESSION_CATALOG_SCAN_LIMIT = 2e3;
-var RUN_SESSION_DETECT_ATTEMPTS = 8;
-var RUN_SESSION_DETECT_INTERVAL_MS = 300;
-var RUN_SESSION_DETECT_FULL_SCAN_THRESHOLD_MS = 200;
-var RUN_SESSION_EXIT_SETTLE_MS = 200;
-var RUN_FAST_FAILURE_SKIP_SCAN_MS = 2e3;
-var RUN_PIN_ATTEMPT_DRAIN_TIMEOUT_MS = 1500;
-function registerRunCommand(program2) {
-  const run = new Command5("run").description("Launch claude/codex with auto catalog assignment for the created session").argument("<agent>", "agent binary: claude | codex | agent").argument("[agent-args...]", "arguments passed verbatim to the agent CLI").option("-c, --catalog <catalog>", "add created session to catalog").option("--config <config>", "Starling settings profile under ~/.starling/settings/{claude|codex}").option("--title <title>", "pin title for created session").option("--tags <tags>", "pin tags for created session, comma-separated").option("--cwd <path>", "working directory for agent launch").allowUnknownOption().passThroughOptions().addHelpText(
-    "after",
-    "\nStarling options must be placed before <agent>. Everything after <agent> is passed to claude/codex."
-  ).action(async (agentRaw, agentArgs, opts, command) => {
-    const provider = normalizeAgent(agentRaw);
-    if (!provider) {
-      console.error(chalk6.red(`Unknown agent: ${agentRaw}`));
-      console.error(chalk6.gray("Allowed values: claude, codex, agent"));
-      process.exit(1);
-    }
-    const rawArgs = command.rawArgs;
-    const requestedConfig = opts.config;
-    const resolvedConfig = provider === "codex" ? resolveCodexConfigPath(requestedConfig) : resolveConfigFilePath(provider, opts.config);
-    if (provider === "codex" && requestedConfig && !resolvedConfig) {
-      const expectedPath = join7(DEFAULT_CODEX_SETTINGS_DIR, requestedConfig);
-      console.error(chalk6.red(`Config file not found: ${requestedConfig}`));
-      console.error(chalk6.gray(`Expected path: ${expectedPath}`));
-      process.exit(1);
-    }
-    const normalizedCwd = opts.cwd ? resolve2(opts.cwd) : process.cwd();
-    const catalog = await resolveCatalog2(opts.catalog);
-    const codexDefaultSnapshot = provider === "codex" ? snapshotCodexDefaultConfig() : null;
-    let codexConfig = provider === "codex" ? await createCodexRunConfig(resolvedConfig) : null;
-    if (provider === "codex" && catalog) {
-      codexConfig = ensureCodexRunHookConfig(codexConfig);
-    }
-    const hookRun = provider === "claude" && catalog ? createClaudeRunHookSettings(resolvedConfig) : null;
-    const effectiveConfig = hookRun?.settingsPath ?? resolvedConfig;
-    const args = resolveAgentArgs(provider, rawArgs, agentArgs, effectiveConfig, codexConfig);
-    const cwd = opts.cwd;
-    const binary = provider === "claude" ? "claude" : "codex";
-    const startedAt = (/* @__PURE__ */ new Date()).toISOString();
-    const runStartedAtMs = Date.now();
-    const beforeRun = hookRun ? /* @__PURE__ */ new Map() : await snapshotSessions(provider);
-    const beforeRunProjectFiles = provider === "claude" && !hookRun ? snapshotProjectSessions(normalizedCwd) : /* @__PURE__ */ new Map();
-    const cleanupRunState = async () => {
-      syncClaudeProfileSettingsFromRunSettings(resolvedConfig, hookRun?.settingsPath ?? null);
-      cleanupClaudeRunHookSettings(hookRun);
-      await cleanupCodexRunConfig(codexConfig);
-      restoreCodexDefaultConfig(codexDefaultSnapshot);
-    };
-    let catalogPinned = false;
-    let agentClosed = false;
-    let stopAutoPinWatcher = false;
-    let hintedSessionId;
-    let pinAttempt = null;
-    const startAutoPinWatcher = async () => {
-      if (!catalog || catalogPinned) return;
-      if (pinAttempt) return;
-      pinAttempt = (async () => {
-        const startedTime = Date.parse(startedAt);
-        let attemptsAfterClose = 0;
-        for (let i = 0; !stopAutoPinWatcher; i++) {
-          const sessionId = hintedSessionId ?? readRunHookSessionId(hookRun?.eventsPath ?? codexConfig?.eventsPath);
-          if (!sessionId) {
-            if (provider === "codex") {
-              const candidate2 = await findSingleCodexSessionForRunningAgent(startedTime, beforeRun, normalizedCwd);
-              if (candidate2) {
-                hintedSessionId = candidate2.session_id;
-                await pinSessionToCatalog(candidate2, opts, catalog);
-                catalogPinned = true;
-                return;
-              }
-            }
-            if (agentClosed || stopAutoPinWatcher) return;
-            await sleep(250);
-            continue;
-          }
-          hintedSessionId = sessionId;
-          const candidate = hookRun && provider === "claude" ? await findClaudeSessionInProjectById(sessionId, normalizedCwd) : await findKnownSessionForRun(sessionId, provider, normalizedCwd, i);
-          if (isRunSessionCandidate(candidate, provider, startedTime, beforeRun, sessionId)) {
-            await pinSessionToCatalog(candidate, opts, catalog);
-            catalogPinned = true;
-            return;
-          }
-          if (agentClosed || stopAutoPinWatcher) {
-            attemptsAfterClose++;
-            if (attemptsAfterClose >= 20) break;
-          }
-          await sleep(250);
-        }
-        const fallback = provider === "claude" ? await detectSessionInCurrentClaudeProject(
-          Date.parse(startedAt),
-          beforeRun,
-          normalizedCwd,
-          beforeRunProjectFiles
-        ) : await findSingleCodexSessionForRunningAgent(
-          Date.parse(startedAt),
-          beforeRun,
-          normalizedCwd
-        );
-        if (fallback && fallback.provider === provider && (!hintedSessionId || fallback.session_id === hintedSessionId)) {
-          await pinSessionToCatalog(fallback, opts, catalog);
-          catalogPinned = true;
-        }
-      })().finally(() => {
-        pinAttempt = null;
-      });
-      pinAttempt.catch((error) => {
-        if (process.env.NODE_ENV !== "test") {
-          const sessionLabel = hintedSessionId ? ` ${hintedSessionId}` : "";
-          console.error(chalk6.yellow(`Failed to auto-pin session${sessionLabel} to catalog ${catalog?.name}: ${String(error)}`));
-        }
-      });
-    };
-    if (hookRun || provider === "codex" && catalog) {
-      void startAutoPinWatcher();
-    }
-    let runResult;
-    try {
-      runResult = await runAgent(binary, args, cwd, {
-        preserveSignals: true,
-        env: buildAgentEnv(provider, codexConfig?.env)
-      });
-    } catch (error) {
-      await cleanupRunState();
-      throw error;
-    }
-    agentClosed = true;
-    syncCodexProfileProjectTrustFromRunConfig(resolvedConfig, codexConfig);
-    const exitCode = runResult.exitCode;
-    if (exitCode !== 0) {
-      await sleep(RUN_SESSION_EXIT_SETTLE_MS);
-    }
-    const knownSessionId = hintedSessionId ?? readRunHookSessionId(hookRun?.eventsPath ?? codexConfig?.eventsPath) ?? void 0;
-    if (exitCode !== 0 && Date.now() - runStartedAtMs < RUN_FAST_FAILURE_SKIP_SCAN_MS && !knownSessionId) {
-      await cleanupRunState();
-      process.exit(exitCode);
-    }
-    if (hookRun && !knownSessionId) {
-      await cleanupRunState();
-      if (exitCode !== 0) {
-        process.exit(exitCode);
-      }
-      console.log(chalk6.yellow("No Claude session id was reported by SessionStart hook."));
-      return;
-    }
-    const newSessionMeta = hookRun && knownSessionId ? await resolveHookReportedClaudeSession(knownSessionId, normalizedCwd) : await detectSessionStartedAfterRun(
-      provider,
-      startedAt,
-      beforeRun,
-      normalizedCwd,
-      beforeRunProjectFiles,
-      knownSessionId
-    );
-    if (!newSessionMeta) {
-      if (exitCode !== 0) {
-        await cleanupRunState();
-        process.exit(exitCode);
-      }
-      console.log(chalk6.yellow("No new session found, or session metadata is not ready yet."));
-      await cleanupRunState();
-      return;
-    }
-    if (catalog && !catalogPinned) {
-      if (knownSessionId && newSessionMeta.session_id === knownSessionId) {
-        await pinSessionToCatalog(newSessionMeta, opts, catalog);
-        catalogPinned = true;
-      } else {
-        const candidates = await collectRunSessionCandidates(
-          provider,
-          Date.parse(startedAt),
-          beforeRun,
-          normalizedCwd,
-          beforeRunProjectFiles
-        );
-        const sameProjectCandidates = candidates.filter(
-          (session) => normalizeProjectPath(session.project_path) === normalizedCwd
-        );
-        const targetCandidates = sameProjectCandidates.length > 0 ? sameProjectCandidates : candidates;
-        if (targetCandidates.length === 0) {
-          console.log(chalk6.yellow("Could not find a stable candidate session for catalog assignment."));
-        } else if (targetCandidates.length === 1) {
-          await pinSessionToCatalog(targetCandidates[0], opts, catalog);
-          catalogPinned = true;
-        } else {
-          const header = `Found ${targetCandidates.length} possible sessions created after run, can't choose automatically.`;
-          console.log(chalk6.yellow(header));
-          targetCandidates.slice(0, 5).forEach((session, index) => {
-            const shortId = shortSessionId(session.session_id);
-            const date = session.modified_at.slice(0, 16).replace("T", " ");
-            const project = session.project_path ? session.project_path.length > 36 ? `\u2026${session.project_path.slice(-35)}` : session.project_path : "-";
-            console.log(`  ${index + 1}. ${chalk6.cyan(shortId)}  ${date}  ${project}`);
-          });
-          console.log(chalk6.gray(`Use: starling pin <session_id> --to ${catalog.id} to assign manually.`));
-        }
-      }
-    }
-    console.log(chalk6.green(`Session started: ${newSessionMeta.session_id}`));
-    updateSessionIndexInBackground(newSessionMeta);
-    if (pinAttempt) {
-      stopAutoPinWatcher = true;
-      await drainPinAttempt(pinAttempt);
-    }
-    if (exitCode !== 0) {
-      await cleanupRunState();
-      process.exit(exitCode);
-    }
-    await cleanupRunState();
-  });
-  program2.addCommand(run);
-}
-async function drainPinAttempt(pinAttempt) {
-  await Promise.race([
-    pinAttempt,
-    sleep(RUN_PIN_ATTEMPT_DRAIN_TIMEOUT_MS)
-  ]);
-}
-function updateSessionIndexInBackground(session) {
-  setImmediate(() => {
-    try {
-      upsertSessionInIndex(session);
-    } catch {
-    }
-  });
-}
-var CONFIG_FILE_EXTENSIONS = [".json", ".jsonc", ".toml", ".yaml", ".yml", ".js", ".ts"];
-var SESSION_ID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-function buildAgentEnv(provider, overrides) {
-  if (provider !== "codex" && !overrides) return void 0;
-  const env = { ...process.env, ...overrides ?? {} };
-  if (provider === "codex") {
-    for (const key of Object.keys(env)) {
-      if (key.startsWith("CODEX_") && key !== "CODEX_HOME") {
-        delete env[key];
-      }
-    }
-  }
-  return env;
-}
-function parseSessionIdFromText(text) {
-  const resumeMatch = text.match(new RegExp(`--resume\\s+(${SESSION_ID_PATTERN.source})`, "i"));
-  if (resumeMatch?.[1]) return resumeMatch[1];
-  const sessionMatch = text.match(new RegExp(`session\\s+id\\s*[:=]\\s*(${SESSION_ID_PATTERN.source})`, "i"));
-  if (sessionMatch?.[1]) return sessionMatch[1];
-  const genericMatch = SESSION_ID_PATTERN.exec(text)?.[0];
-  if (genericMatch) return genericMatch;
-  return null;
-}
-function createClaudeRunHookSettings(configPath) {
-  const runId = randomUUID2();
-  const baseDir = join7(DEFAULT_STARLING_HOME, "run-hooks");
-  const eventsPath = join7(baseDir, `${runId}.jsonl`);
-  const settingsPath = join7(baseDir, `${runId}.settings.json`);
-  ensureDir(eventsPath);
-  const settings = readClaudeSettingsObject(configPath);
-  if (!settings) return null;
-  const hooks = isRecord5(settings.hooks) ? { ...settings.hooks } : {};
-  const sessionStart = Array.isArray(hooks.SessionStart) ? [...hooks.SessionStart] : [];
-  sessionStart.push({
-    hooks: [
-      {
-        type: "command",
-        command: `bash -c 'cat >> "$1"; printf "\\n" >> "$1"' _ ${shellQuote(eventsPath)}`
-      }
-    ]
-  });
-  hooks.SessionStart = sessionStart;
-  atomicWriteJSON(settingsPath, { ...settings, hooks });
-  return { settingsPath, eventsPath };
-}
-function cleanupClaudeRunHookSettings(hookRun) {
-  if (!hookRun) return;
-  for (const path of [hookRun.settingsPath, hookRun.eventsPath]) {
-    try {
-      unlinkSync6(path);
-    } catch {
-    }
-  }
-}
-var CLAUDE_SETTINGS_SYNC_KEYS = [
-  "permissions",
-  "projects",
-  "trust",
-  "trustedProjects",
-  "enableAllProjectMcpServers",
-  "enabledMcpjsonServers",
-  "disabledMcpjsonServers"
-];
-function syncClaudeProfileSettingsFromRunSettings(sourceConfigPath, runSettingsPath) {
-  if (!sourceConfigPath || !runSettingsPath || !existsSync7(runSettingsPath)) return false;
-  const sourceExt = extname3(sourceConfigPath).toLowerCase();
-  if (sourceExt !== ".json" && sourceExt !== ".jsonc") return false;
-  try {
-    const sourceSettings = readSettingsJsonObject(sourceConfigPath, sourceExt === ".jsonc");
-    const runSettings = readSettingsJsonObject(runSettingsPath, false);
-    if (!sourceSettings || !runSettings) return false;
-    let changed = false;
-    for (const key of CLAUDE_SETTINGS_SYNC_KEYS) {
-      if (!Object.prototype.hasOwnProperty.call(runSettings, key)) continue;
-      if (jsonStable(sourceSettings[key]) === jsonStable(runSettings[key])) continue;
-      sourceSettings[key] = cloneJsonValue(runSettings[key]);
-      changed = true;
-    }
-    if (!changed) return false;
-    atomicWriteJSON(sourceConfigPath, sourceSettings);
-    return true;
-  } catch (error) {
-    console.error(chalk6.yellow(`Could not sync Claude settings to ${sourceConfigPath}: ${String(error)}`));
-    return false;
-  }
-}
+// src/lib/codexRunConfig.ts
 async function createCodexRunConfig(configPath) {
   if (!configPath) {
     return null;
@@ -4374,55 +4026,6 @@ async function createCodexRunConfig(configPath) {
   console.error(chalk6.red(`Unsupported Codex config file type: ${configPath}`));
   console.error(chalk6.gray("Use .json, .jsonc, or .toml under ~/.starling/settings/codex."));
   process.exit(1);
-}
-function ensureCodexRunHookConfig(config) {
-  const runId = randomUUID2();
-  const baseDir = join7(DEFAULT_STARLING_HOME, "run-hooks");
-  const eventsPath = join7(baseDir, `${runId}.codex.jsonl`);
-  ensureDir(eventsPath);
-  const hookText = codexSessionStartHookToml(eventsPath);
-  if (config?.cleanupPaths[0] && config.args.includes("--profile")) {
-    const profilePath2 = config.cleanupPaths[0];
-    const existing = readFileSync6(profilePath2, "utf-8");
-    writeFileSync4(profilePath2, `${existing.trimEnd()}
-
-${hookText}`, "utf-8");
-    return {
-      ...config,
-      args: addCodexHookTrustBypassArg(config.args),
-      cleanupPaths: [...config.cleanupPaths, eventsPath],
-      eventsPath
-    };
-  }
-  const profileName = `starling-run-${randomUUID2()}`;
-  const profilePath = join7(DEFAULT_CODEX_HOME, `${profileName}.config.toml`);
-  ensureDir(profilePath);
-  writeFileSync4(profilePath, hookText, "utf-8");
-  chmodSync4(profilePath, 384);
-  return {
-    args: ["--profile", profileName, ...addCodexHookTrustBypassArg(config?.args ?? [])],
-    cleanupPaths: [profilePath, eventsPath, ...config?.cleanupPaths ?? []],
-    cleanupTasks: config?.cleanupTasks,
-    env: config?.env,
-    eventsPath
-  };
-}
-function codexSessionStartHookToml(eventsPath) {
-  return [
-    "[features]",
-    "hooks = true",
-    "",
-    "[[hooks.SessionStart]]",
-    'matcher = "startup"',
-    "",
-    "[[hooks.SessionStart.hooks]]",
-    'type = "command"',
-    `command = ${JSON.stringify(`bash -c 'cat >> "$1"; printf "\\n" >> "$1"' _ ${shellQuote(eventsPath)}`)}`,
-    "timeout = 5"
-  ].join("\n") + "\n";
-}
-function addCodexHookTrustBypassArg(args) {
-  return args.includes("--dangerously-bypass-hook-trust") ? args : ["--dangerously-bypass-hook-trust", ...args];
 }
 async function createCodexRunConfigFromProfile(profile) {
   const args = [];
@@ -4441,10 +4044,10 @@ async function createCodexRunConfigFromProfile(profile) {
   }
   if (configText) {
     const profileName = `starling-run-${randomUUID2()}`;
-    const profilePath = join7(DEFAULT_CODEX_HOME, `${profileName}.config.toml`);
+    const profilePath = join6(DEFAULT_CODEX_HOME, `${profileName}.config.toml`);
     ensureDir(profilePath);
-    writeFileSync4(profilePath, configText, "utf-8");
-    chmodSync4(profilePath, 384);
+    writeFileSync3(profilePath, configText, "utf-8");
+    chmodSync3(profilePath, 384);
     args.push("--profile", profileName);
     cleanupPaths.push(profilePath);
   }
@@ -4459,7 +4062,7 @@ async function cleanupCodexRunConfig(config) {
   if (!config) return;
   for (const path of config.cleanupPaths) {
     try {
-      unlinkSync6(path);
+      unlinkSync5(path);
     } catch {
     }
   }
@@ -4470,121 +4073,9 @@ async function cleanupCodexRunConfig(config) {
     }
   }
 }
-function syncCodexProfileProjectTrustFromRunConfig(sourceConfigPath, runConfig) {
-  if (!sourceConfigPath || !runConfig) return;
-  const sourceExt = extname3(sourceConfigPath).toLowerCase();
-  if (sourceExt !== ".json" && sourceExt !== ".jsonc" && sourceExt !== ".toml") return;
-  const trustedProjects = /* @__PURE__ */ new Set();
-  for (const path of runConfig.cleanupPaths) {
-    if (!path.endsWith(".config.toml") || !existsSync7(path)) continue;
-    for (const projectPath of readTrustedProjectsFromCodexToml(path)) {
-      trustedProjects.add(projectPath);
-    }
-  }
-  if (trustedProjects.size === 0) return;
-  if (sourceExt === ".toml") {
-    syncCodexTomlProjectTrust(sourceConfigPath, trustedProjects);
-    return;
-  }
-  try {
-    const raw = readFileSync6(sourceConfigPath, "utf-8");
-    const parsed = JSON.parse(sourceExt === ".jsonc" ? stripJsonComments2(raw) : raw);
-    if (!isRecord5(parsed)) return;
-    const config = isRecord5(parsed.config) ? parsed.config : {};
-    const projects = isRecord5(config.projects) ? config.projects : {};
-    let changed = false;
-    for (const projectPath of trustedProjects) {
-      const project = isRecord5(projects[projectPath]) ? projects[projectPath] : {};
-      if (project.trust_level === "trusted") continue;
-      project.trust_level = "trusted";
-      projects[projectPath] = project;
-      changed = true;
-    }
-    if (!changed) return;
-    config.projects = projects;
-    parsed.config = config;
-    atomicWriteJSON(sourceConfigPath, parsed);
-  } catch (error) {
-    console.error(chalk6.yellow(`Could not sync Codex project trust to ${sourceConfigPath}: ${String(error)}`));
-  }
-}
-function syncCodexTomlProjectTrust(sourceConfigPath, trustedProjects) {
-  try {
-    let raw = readFileSync6(sourceConfigPath, "utf-8");
-    let changed = false;
-    for (const projectPath of trustedProjects) {
-      const updated = upsertCodexTomlProjectTrust(raw, projectPath);
-      if (updated !== raw) {
-        raw = updated;
-        changed = true;
-      }
-    }
-    if (changed) writeFileSync4(sourceConfigPath, raw.endsWith("\n") ? raw : `${raw}
-`, "utf-8");
-  } catch (error) {
-    console.error(chalk6.yellow(`Could not sync Codex project trust to ${sourceConfigPath}: ${String(error)}`));
-  }
-}
-function upsertCodexTomlProjectTrust(raw, projectPath) {
-  const header = `[projects.${JSON.stringify(projectPath)}]`;
-  const lines = raw.split(/\r?\n/);
-  const headerIndex = lines.findIndex((line) => line.trim() === header);
-  if (headerIndex < 0) {
-    return `${raw.trimEnd()}
-
-${header}
-trust_level = "trusted"
-`;
-  }
-  let endIndex = lines.length;
-  for (let index = headerIndex + 1; index < lines.length; index += 1) {
-    if (/^\s*\[/.test(lines[index])) {
-      endIndex = index;
-      break;
-    }
-  }
-  let hasTrust = false;
-  const nextLines = [...lines];
-  for (let index = endIndex - 1; index > headerIndex; index -= 1) {
-    if (!/^\s*trust_level\s*=\s*["']trusted["']\s*(?:#.*)?$/.test(nextLines[index])) continue;
-    if (hasTrust) {
-      nextLines.splice(index, 1);
-      endIndex -= 1;
-      continue;
-    }
-    hasTrust = true;
-  }
-  if (!hasTrust) {
-    nextLines.splice(endIndex, 0, 'trust_level = "trusted"');
-  }
-  return nextLines.join("\n").replace(/\n{3,}/g, "\n\n");
-}
-function readTrustedProjectsFromCodexToml(filePath) {
-  const raw = readFileSync6(filePath, "utf-8");
-  const trusted = [];
-  let currentProject = null;
-  let currentTrusted = false;
-  const flush = () => {
-    if (currentProject && currentTrusted) trusted.push(currentProject);
-  };
-  for (const line of raw.split(/\r?\n/)) {
-    const section = line.match(/^\s*\[projects\.(?:"([^"]+)"|'([^']+)'|([^\]]+))\]\s*$/);
-    if (section) {
-      flush();
-      currentProject = section[1] ?? section[2] ?? section[3] ?? null;
-      currentTrusted = false;
-      continue;
-    }
-    if (!currentProject) continue;
-    const trust = line.match(/^\s*trust_level\s*=\s*(?:"trusted"|'trusted')\s*(?:#.*)?$/);
-    if (trust) currentTrusted = true;
-  }
-  flush();
-  return trusted;
-}
 function readCodexJsonProfileForRun(configPath, allowComments) {
   try {
-    const raw = readFileSync6(configPath, "utf-8");
+    const raw = readFileSync5(configPath, "utf-8");
     const parsed = JSON.parse(allowComments ? stripJsonComments2(raw) : raw);
     if (!isRecord5(parsed)) {
       console.error(chalk6.red(`Codex config must be a JSON object: ${configPath}`));
@@ -4604,7 +4095,7 @@ function readCodexJsonProfileForRun(configPath, allowComments) {
 }
 function readCodexTomlProfileForRun(configPath) {
   try {
-    const configText = readFileSync6(configPath, "utf-8");
+    const configText = readFileSync5(configPath, "utf-8");
     const config = parseSimpleToml2(configText);
     const auth = resolveCodexTomlAuth(config);
     const profile = { config };
@@ -4925,11 +4416,534 @@ function convertCodexJsonToToml(value) {
   return lines.length > 0 ? `${lines.join("\n")}
 ` : "";
 }
+function isRecord5(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// src/lib/codexDefaultGuard.ts
+import { existsSync as existsSync6, readFileSync as readFileSync6, statSync as statSync3, unlinkSync as unlinkSync6, writeFileSync as writeFileSync4, chmodSync as chmodSync4 } from "fs";
+import { join as join7 } from "path";
+function snapshotCodexDefaultConfig() {
+  return {
+    files: [
+      snapshotFile(join7(DEFAULT_CODEX_HOME, "config.toml")),
+      snapshotFile(join7(DEFAULT_CODEX_HOME, "auth.json"))
+    ]
+  };
+}
+function restoreCodexDefaultConfig(snapshot) {
+  if (!snapshot) return;
+  for (const file of snapshot.files) {
+    restoreFile(file);
+  }
+}
+function snapshotFile(path) {
+  if (!existsSync6(path)) {
+    return { path, existed: false };
+  }
+  const st = statSync3(path);
+  return {
+    path,
+    existed: true,
+    content: readFileSync6(path, "utf-8"),
+    mode: st.mode & 511
+  };
+}
+function restoreFile(snapshot) {
+  if (!snapshot.existed) {
+    if (existsSync6(snapshot.path)) {
+      unlinkSync6(snapshot.path);
+    }
+    return;
+  }
+  ensureDir(snapshot.path);
+  writeFileSync4(snapshot.path, snapshot.content ?? "", "utf-8");
+  if (snapshot.mode !== void 0) {
+    chmodSync4(snapshot.path, snapshot.mode);
+  }
+}
+
+// src/commands/run.ts
+var RUN_SESSION_SCAN_LIMIT = 500;
+var RUN_SESSION_CATALOG_SCAN_LIMIT = 2e3;
+var RUN_SESSION_DETECT_ATTEMPTS = 8;
+var RUN_SESSION_DETECT_INTERVAL_MS = 300;
+var RUN_SESSION_DETECT_FULL_SCAN_THRESHOLD_MS = 200;
+var RUN_SESSION_EXIT_SETTLE_MS = 200;
+var RUN_FAST_FAILURE_SKIP_SCAN_MS = 2e3;
+var RUN_PIN_ATTEMPT_DRAIN_TIMEOUT_MS = 1500;
+function registerRunCommand(program2) {
+  const run = new Command5("run").description("Launch claude/codex with auto catalog assignment for the created session").argument("<agent>", "agent binary: claude | codex | agent").argument("[agent-args...]", "arguments passed verbatim to the agent CLI").option("-c, --catalog <catalog>", "add created session to catalog").option("--config <config>", "Starling settings profile under ~/.starling/settings/{claude|codex}").option("--title <title>", "pin title for created session").option("--tags <tags>", "pin tags for created session, comma-separated").option("--cwd <path>", "working directory for agent launch").allowUnknownOption().passThroughOptions().addHelpText(
+    "after",
+    "\nStarling options must be placed before <agent>. Everything after <agent> is passed to claude/codex."
+  ).action(async (agentRaw, agentArgs, opts, command) => {
+    const provider = normalizeAgent(agentRaw);
+    if (!provider) {
+      console.error(chalk7.red(`Unknown agent: ${agentRaw}`));
+      console.error(chalk7.gray("Allowed values: claude, codex, agent"));
+      process.exit(1);
+    }
+    const rawArgs = command.rawArgs;
+    const requestedConfig = opts.config;
+    const resolvedConfig = provider === "codex" ? resolveCodexConfigPath(requestedConfig) : resolveConfigFilePath(provider, opts.config);
+    if (provider === "codex" && requestedConfig && !resolvedConfig) {
+      const expectedPath = join8(DEFAULT_CODEX_SETTINGS_DIR, requestedConfig);
+      console.error(chalk7.red(`Config file not found: ${requestedConfig}`));
+      console.error(chalk7.gray(`Expected path: ${expectedPath}`));
+      process.exit(1);
+    }
+    const normalizedCwd = opts.cwd ? resolve2(opts.cwd) : process.cwd();
+    const catalog = await resolveCatalog2(opts.catalog);
+    const codexDefaultSnapshot = provider === "codex" ? snapshotCodexDefaultConfig() : null;
+    let codexConfig = provider === "codex" ? await createCodexRunConfig(resolvedConfig) : null;
+    if (provider === "codex" && catalog) {
+      codexConfig = ensureCodexRunHookConfig(codexConfig);
+    }
+    const hookRun = provider === "claude" && catalog ? createClaudeRunHookSettings(resolvedConfig) : null;
+    const effectiveConfig = hookRun?.settingsPath ?? resolvedConfig;
+    const args = resolveAgentArgs(provider, rawArgs, agentArgs, effectiveConfig, codexConfig);
+    const cwd = opts.cwd;
+    const binary = provider === "claude" ? "claude" : "codex";
+    const startedAt = (/* @__PURE__ */ new Date()).toISOString();
+    const runStartedAtMs = Date.now();
+    const beforeRun = hookRun ? /* @__PURE__ */ new Map() : await snapshotSessions(provider);
+    const beforeRunProjectFiles = provider === "claude" && !hookRun ? snapshotProjectSessions(normalizedCwd) : /* @__PURE__ */ new Map();
+    const cleanupRunState = async () => {
+      syncClaudeProfileSettingsFromRunSettings(resolvedConfig, hookRun?.settingsPath ?? null);
+      cleanupClaudeRunHookSettings(hookRun);
+      await cleanupCodexRunConfig(codexConfig);
+      restoreCodexDefaultConfig(codexDefaultSnapshot);
+    };
+    let catalogPinned = false;
+    let agentClosed = false;
+    let stopAutoPinWatcher = false;
+    let hintedSessionId;
+    let pinAttempt = null;
+    const startAutoPinWatcher = async () => {
+      if (!catalog || catalogPinned) return;
+      if (pinAttempt) return;
+      pinAttempt = (async () => {
+        const startedTime = Date.parse(startedAt);
+        let attemptsAfterClose = 0;
+        for (let i = 0; !stopAutoPinWatcher; i++) {
+          const sessionId = hintedSessionId ?? readRunHookSessionId(hookRun?.eventsPath ?? codexConfig?.eventsPath);
+          if (!sessionId) {
+            if (provider === "codex") {
+              const candidate2 = await findSingleCodexSessionForRunningAgent(startedTime, beforeRun, normalizedCwd);
+              if (candidate2) {
+                hintedSessionId = candidate2.session_id;
+                await pinSessionToCatalog(candidate2, opts, catalog);
+                catalogPinned = true;
+                return;
+              }
+            }
+            if (agentClosed || stopAutoPinWatcher) return;
+            await sleep(250);
+            continue;
+          }
+          hintedSessionId = sessionId;
+          const candidate = hookRun && provider === "claude" ? await findClaudeSessionInProjectById(sessionId, normalizedCwd) : await findKnownSessionForRun(sessionId, provider, normalizedCwd, i);
+          if (isRunSessionCandidate(candidate, provider, startedTime, beforeRun, sessionId)) {
+            await pinSessionToCatalog(candidate, opts, catalog);
+            catalogPinned = true;
+            return;
+          }
+          if (agentClosed || stopAutoPinWatcher) {
+            attemptsAfterClose++;
+            if (attemptsAfterClose >= 20) break;
+          }
+          await sleep(250);
+        }
+        const fallback = provider === "claude" ? await detectSessionInCurrentClaudeProject(
+          Date.parse(startedAt),
+          beforeRun,
+          normalizedCwd,
+          beforeRunProjectFiles
+        ) : await findSingleCodexSessionForRunningAgent(
+          Date.parse(startedAt),
+          beforeRun,
+          normalizedCwd
+        );
+        if (fallback && fallback.provider === provider && (!hintedSessionId || fallback.session_id === hintedSessionId)) {
+          await pinSessionToCatalog(fallback, opts, catalog);
+          catalogPinned = true;
+        }
+      })().finally(() => {
+        pinAttempt = null;
+      });
+      pinAttempt.catch((error) => {
+        if (process.env.NODE_ENV !== "test") {
+          const sessionLabel = hintedSessionId ? ` ${hintedSessionId}` : "";
+          console.error(chalk7.yellow(`Failed to auto-pin session${sessionLabel} to catalog ${catalog?.name}: ${String(error)}`));
+        }
+      });
+    };
+    if (hookRun || provider === "codex" && catalog) {
+      void startAutoPinWatcher();
+    }
+    let runResult;
+    try {
+      runResult = await runAgent(binary, args, cwd, {
+        preserveSignals: true,
+        env: buildAgentEnv(provider, codexConfig?.env)
+      });
+    } catch (error) {
+      await cleanupRunState();
+      throw error;
+    }
+    agentClosed = true;
+    syncCodexProfileProjectTrustFromRunConfig(resolvedConfig, codexConfig);
+    const exitCode = runResult.exitCode;
+    if (exitCode !== 0) {
+      await sleep(RUN_SESSION_EXIT_SETTLE_MS);
+    }
+    const knownSessionId = hintedSessionId ?? readRunHookSessionId(hookRun?.eventsPath ?? codexConfig?.eventsPath) ?? void 0;
+    if (exitCode !== 0 && Date.now() - runStartedAtMs < RUN_FAST_FAILURE_SKIP_SCAN_MS && !knownSessionId) {
+      await cleanupRunState();
+      process.exit(exitCode);
+    }
+    if (hookRun && !knownSessionId) {
+      await cleanupRunState();
+      if (exitCode !== 0) {
+        process.exit(exitCode);
+      }
+      console.log(chalk7.yellow("No Claude session id was reported by SessionStart hook."));
+      return;
+    }
+    const newSessionMeta = hookRun && knownSessionId ? await resolveHookReportedClaudeSession(knownSessionId, normalizedCwd) : await detectSessionStartedAfterRun(
+      provider,
+      startedAt,
+      beforeRun,
+      normalizedCwd,
+      beforeRunProjectFiles,
+      knownSessionId
+    );
+    if (!newSessionMeta) {
+      if (exitCode !== 0) {
+        await cleanupRunState();
+        process.exit(exitCode);
+      }
+      console.log(chalk7.yellow("No new session found, or session metadata is not ready yet."));
+      await cleanupRunState();
+      return;
+    }
+    if (catalog && !catalogPinned) {
+      if (knownSessionId && newSessionMeta.session_id === knownSessionId) {
+        await pinSessionToCatalog(newSessionMeta, opts, catalog);
+        catalogPinned = true;
+      } else {
+        const candidates = await collectRunSessionCandidates(
+          provider,
+          Date.parse(startedAt),
+          beforeRun,
+          normalizedCwd,
+          beforeRunProjectFiles
+        );
+        const sameProjectCandidates = candidates.filter(
+          (session) => normalizeProjectPath(session.project_path) === normalizedCwd
+        );
+        const targetCandidates = sameProjectCandidates.length > 0 ? sameProjectCandidates : candidates;
+        if (targetCandidates.length === 0) {
+          console.log(chalk7.yellow("Could not find a stable candidate session for catalog assignment."));
+        } else if (targetCandidates.length === 1) {
+          await pinSessionToCatalog(targetCandidates[0], opts, catalog);
+          catalogPinned = true;
+        } else {
+          const header = `Found ${targetCandidates.length} possible sessions created after run, can't choose automatically.`;
+          console.log(chalk7.yellow(header));
+          targetCandidates.slice(0, 5).forEach((session, index) => {
+            const shortId = shortSessionId(session.session_id);
+            const date = session.modified_at.slice(0, 16).replace("T", " ");
+            const project = session.project_path ? session.project_path.length > 36 ? `\u2026${session.project_path.slice(-35)}` : session.project_path : "-";
+            console.log(`  ${index + 1}. ${chalk7.cyan(shortId)}  ${date}  ${project}`);
+          });
+          console.log(chalk7.gray(`Use: starling pin <session_id> --to ${catalog.id} to assign manually.`));
+        }
+      }
+    }
+    console.log(chalk7.green(`Session started: ${newSessionMeta.session_id}`));
+    updateSessionIndexInBackground(newSessionMeta);
+    if (pinAttempt) {
+      stopAutoPinWatcher = true;
+      await drainPinAttempt(pinAttempt);
+    }
+    if (exitCode !== 0) {
+      await cleanupRunState();
+      process.exit(exitCode);
+    }
+    await cleanupRunState();
+  });
+  program2.addCommand(run);
+}
+async function drainPinAttempt(pinAttempt) {
+  await Promise.race([
+    pinAttempt,
+    sleep(RUN_PIN_ATTEMPT_DRAIN_TIMEOUT_MS)
+  ]);
+}
+function updateSessionIndexInBackground(session) {
+  setImmediate(() => {
+    try {
+      upsertSessionInIndex(session);
+    } catch {
+    }
+  });
+}
+var CONFIG_FILE_EXTENSIONS = [".json", ".jsonc", ".toml", ".yaml", ".yml", ".js", ".ts"];
+var SESSION_ID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+function buildAgentEnv(provider, overrides) {
+  if (provider !== "codex" && !overrides) return void 0;
+  const env = { ...process.env, ...overrides ?? {} };
+  if (provider === "codex") {
+    for (const key of Object.keys(env)) {
+      if (key.startsWith("CODEX_") && key !== "CODEX_HOME") {
+        delete env[key];
+      }
+    }
+  }
+  return env;
+}
+function parseSessionIdFromText(text) {
+  const resumeMatch = text.match(new RegExp(`--resume\\s+(${SESSION_ID_PATTERN.source})`, "i"));
+  if (resumeMatch?.[1]) return resumeMatch[1];
+  const sessionMatch = text.match(new RegExp(`session\\s+id\\s*[:=]\\s*(${SESSION_ID_PATTERN.source})`, "i"));
+  if (sessionMatch?.[1]) return sessionMatch[1];
+  const genericMatch = SESSION_ID_PATTERN.exec(text)?.[0];
+  if (genericMatch) return genericMatch;
+  return null;
+}
+function createClaudeRunHookSettings(configPath) {
+  const runId = randomUUID3();
+  const baseDir = join8(DEFAULT_STARLING_HOME, "run-hooks");
+  const eventsPath = join8(baseDir, `${runId}.jsonl`);
+  const settingsPath = join8(baseDir, `${runId}.settings.json`);
+  ensureDir(eventsPath);
+  const settings = readClaudeSettingsObject(configPath);
+  if (!settings) return null;
+  const hooks = isRecord6(settings.hooks) ? { ...settings.hooks } : {};
+  const sessionStart = Array.isArray(hooks.SessionStart) ? [...hooks.SessionStart] : [];
+  sessionStart.push({
+    hooks: [
+      {
+        type: "command",
+        command: `bash -c 'cat >> "$1"; printf "\\n" >> "$1"' _ ${shellQuote(eventsPath)}`
+      }
+    ]
+  });
+  hooks.SessionStart = sessionStart;
+  atomicWriteJSON(settingsPath, { ...settings, hooks });
+  return { settingsPath, eventsPath };
+}
+function cleanupClaudeRunHookSettings(hookRun) {
+  if (!hookRun) return;
+  for (const path of [hookRun.settingsPath, hookRun.eventsPath]) {
+    try {
+      unlinkSync7(path);
+    } catch {
+    }
+  }
+}
+var CLAUDE_SETTINGS_SYNC_KEYS = [
+  "permissions",
+  "projects",
+  "trust",
+  "trustedProjects",
+  "enableAllProjectMcpServers",
+  "enabledMcpjsonServers",
+  "disabledMcpjsonServers"
+];
+function syncClaudeProfileSettingsFromRunSettings(sourceConfigPath, runSettingsPath) {
+  if (!sourceConfigPath || !runSettingsPath || !existsSync7(runSettingsPath)) return false;
+  const sourceExt = extname4(sourceConfigPath).toLowerCase();
+  if (sourceExt !== ".json" && sourceExt !== ".jsonc") return false;
+  try {
+    const sourceSettings = readSettingsJsonObject(sourceConfigPath, sourceExt === ".jsonc");
+    const runSettings = readSettingsJsonObject(runSettingsPath, false);
+    if (!sourceSettings || !runSettings) return false;
+    let changed = false;
+    for (const key of CLAUDE_SETTINGS_SYNC_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(runSettings, key)) continue;
+      if (jsonStable(sourceSettings[key]) === jsonStable(runSettings[key])) continue;
+      sourceSettings[key] = cloneJsonValue(runSettings[key]);
+      changed = true;
+    }
+    if (!changed) return false;
+    atomicWriteJSON(sourceConfigPath, sourceSettings);
+    return true;
+  } catch (error) {
+    console.error(chalk7.yellow(`Could not sync Claude settings to ${sourceConfigPath}: ${String(error)}`));
+    return false;
+  }
+}
+function ensureCodexRunHookConfig(config) {
+  const runId = randomUUID3();
+  const baseDir = join8(DEFAULT_STARLING_HOME, "run-hooks");
+  const eventsPath = join8(baseDir, `${runId}.codex.jsonl`);
+  ensureDir(eventsPath);
+  const hookText = codexSessionStartHookToml(eventsPath);
+  if (config?.cleanupPaths[0] && config.args.includes("--profile")) {
+    const profilePath2 = config.cleanupPaths[0];
+    const existing = readFileSync7(profilePath2, "utf-8");
+    writeFileSync5(profilePath2, `${existing.trimEnd()}
+
+${hookText}`, "utf-8");
+    return {
+      ...config,
+      args: addCodexHookTrustBypassArg(config.args),
+      cleanupPaths: [...config.cleanupPaths, eventsPath],
+      eventsPath
+    };
+  }
+  const profileName = `starling-run-${randomUUID3()}`;
+  const profilePath = join8(DEFAULT_CODEX_HOME, `${profileName}.config.toml`);
+  ensureDir(profilePath);
+  writeFileSync5(profilePath, hookText, "utf-8");
+  chmodSync5(profilePath, 384);
+  return {
+    args: ["--profile", profileName, ...addCodexHookTrustBypassArg(config?.args ?? [])],
+    cleanupPaths: [profilePath, eventsPath, ...config?.cleanupPaths ?? []],
+    cleanupTasks: config?.cleanupTasks,
+    env: config?.env,
+    eventsPath
+  };
+}
+function codexSessionStartHookToml(eventsPath) {
+  return [
+    "[features]",
+    "hooks = true",
+    "",
+    "[[hooks.SessionStart]]",
+    'matcher = "startup"',
+    "",
+    "[[hooks.SessionStart.hooks]]",
+    'type = "command"',
+    `command = ${JSON.stringify(`bash -c 'cat >> "$1"; printf "\\n" >> "$1"' _ ${shellQuote(eventsPath)}`)}`,
+    "timeout = 5"
+  ].join("\n") + "\n";
+}
+function addCodexHookTrustBypassArg(args) {
+  return args.includes("--dangerously-bypass-hook-trust") ? args : ["--dangerously-bypass-hook-trust", ...args];
+}
+function syncCodexProfileProjectTrustFromRunConfig(sourceConfigPath, runConfig) {
+  if (!sourceConfigPath || !runConfig) return;
+  const sourceExt = extname4(sourceConfigPath).toLowerCase();
+  if (sourceExt !== ".json" && sourceExt !== ".jsonc" && sourceExt !== ".toml") return;
+  const trustedProjects = /* @__PURE__ */ new Set();
+  for (const path of runConfig.cleanupPaths) {
+    if (!path.endsWith(".config.toml") || !existsSync7(path)) continue;
+    for (const projectPath of readTrustedProjectsFromCodexToml(path)) {
+      trustedProjects.add(projectPath);
+    }
+  }
+  if (trustedProjects.size === 0) return;
+  if (sourceExt === ".toml") {
+    syncCodexTomlProjectTrust(sourceConfigPath, trustedProjects);
+    return;
+  }
+  try {
+    const raw = readFileSync7(sourceConfigPath, "utf-8");
+    const parsed = JSON.parse(sourceExt === ".jsonc" ? stripJsonComments3(raw) : raw);
+    if (!isRecord6(parsed)) return;
+    const config = isRecord6(parsed.config) ? parsed.config : {};
+    const projects = isRecord6(config.projects) ? config.projects : {};
+    let changed = false;
+    for (const projectPath of trustedProjects) {
+      const project = isRecord6(projects[projectPath]) ? projects[projectPath] : {};
+      if (project.trust_level === "trusted") continue;
+      project.trust_level = "trusted";
+      projects[projectPath] = project;
+      changed = true;
+    }
+    if (!changed) return;
+    config.projects = projects;
+    parsed.config = config;
+    atomicWriteJSON(sourceConfigPath, parsed);
+  } catch (error) {
+    console.error(chalk7.yellow(`Could not sync Codex project trust to ${sourceConfigPath}: ${String(error)}`));
+  }
+}
+function syncCodexTomlProjectTrust(sourceConfigPath, trustedProjects) {
+  try {
+    let raw = readFileSync7(sourceConfigPath, "utf-8");
+    let changed = false;
+    for (const projectPath of trustedProjects) {
+      const updated = upsertCodexTomlProjectTrust(raw, projectPath);
+      if (updated !== raw) {
+        raw = updated;
+        changed = true;
+      }
+    }
+    if (changed) writeFileSync5(sourceConfigPath, raw.endsWith("\n") ? raw : `${raw}
+`, "utf-8");
+  } catch (error) {
+    console.error(chalk7.yellow(`Could not sync Codex project trust to ${sourceConfigPath}: ${String(error)}`));
+  }
+}
+function upsertCodexTomlProjectTrust(raw, projectPath) {
+  const header = `[projects.${JSON.stringify(projectPath)}]`;
+  const lines = raw.split(/\r?\n/);
+  const headerIndex = lines.findIndex((line) => line.trim() === header);
+  if (headerIndex < 0) {
+    return `${raw.trimEnd()}
+
+${header}
+trust_level = "trusted"
+`;
+  }
+  let endIndex = lines.length;
+  for (let index = headerIndex + 1; index < lines.length; index += 1) {
+    if (/^\s*\[/.test(lines[index])) {
+      endIndex = index;
+      break;
+    }
+  }
+  let hasTrust = false;
+  const nextLines = [...lines];
+  for (let index = endIndex - 1; index > headerIndex; index -= 1) {
+    if (!/^\s*trust_level\s*=\s*["']trusted["']\s*(?:#.*)?$/.test(nextLines[index])) continue;
+    if (hasTrust) {
+      nextLines.splice(index, 1);
+      endIndex -= 1;
+      continue;
+    }
+    hasTrust = true;
+  }
+  if (!hasTrust) {
+    nextLines.splice(endIndex, 0, 'trust_level = "trusted"');
+  }
+  return nextLines.join("\n").replace(/\n{3,}/g, "\n\n");
+}
+function readTrustedProjectsFromCodexToml(filePath) {
+  const raw = readFileSync7(filePath, "utf-8");
+  const trusted = [];
+  let currentProject = null;
+  let currentTrusted = false;
+  const flush = () => {
+    if (currentProject && currentTrusted) trusted.push(currentProject);
+  };
+  for (const line of raw.split(/\r?\n/)) {
+    const section = line.match(/^\s*\[projects\.(?:"([^"]+)"|'([^']+)'|([^\]]+))\]\s*$/);
+    if (section) {
+      flush();
+      currentProject = section[1] ?? section[2] ?? section[3] ?? null;
+      currentTrusted = false;
+      continue;
+    }
+    if (!currentProject) continue;
+    const trust = line.match(/^\s*trust_level\s*=\s*(?:"trusted"|'trusted')\s*(?:#.*)?$/);
+    if (trust) currentTrusted = true;
+  }
+  flush();
+  return trusted;
+}
+function stripJsonComments3(value) {
+  return value.replace(/^\s*\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+}
 function readRunHookSessionId(eventsPath) {
   if (!eventsPath || !existsSync7(eventsPath)) return null;
   let raw = "";
   try {
-    raw = readFileSync6(eventsPath, "utf-8");
+    raw = readFileSync7(eventsPath, "utf-8");
   } catch {
     return null;
   }
@@ -4947,7 +4961,7 @@ function readRunHookSessionId(eventsPath) {
   return null;
 }
 function readSessionIdFromHookEntry(value) {
-  if (!isRecord5(value)) return null;
+  if (!isRecord6(value)) return null;
   const direct = value.session_id ?? value.sessionId;
   if (typeof direct === "string" && SESSION_ID_PATTERN.test(direct)) return direct;
   for (const nested of Object.values(value)) {
@@ -4959,17 +4973,17 @@ function readSessionIdFromHookEntry(value) {
 function readClaudeSettingsObject(configPath) {
   if (!configPath) return {};
   try {
-    const parsed = readSettingsJsonObject(configPath, extname3(configPath).toLowerCase() === ".jsonc");
+    const parsed = readSettingsJsonObject(configPath, extname4(configPath).toLowerCase() === ".jsonc");
     if (parsed) return parsed;
   } catch {
-    console.log(chalk6.yellow("Could not add Claude SessionStart hook because settings is not parseable JSON."));
+    console.log(chalk7.yellow("Could not add Claude SessionStart hook because settings is not parseable JSON."));
   }
   return null;
 }
 function readSettingsJsonObject(filePath, allowComments) {
-  const raw = readFileSync6(filePath, "utf-8");
-  const parsed = JSON.parse(allowComments ? stripJsonComments2(raw) : raw);
-  return isRecord5(parsed) ? parsed : null;
+  const raw = readFileSync7(filePath, "utf-8");
+  const parsed = JSON.parse(allowComments ? stripJsonComments3(raw) : raw);
+  return isRecord6(parsed) ? parsed : null;
 }
 function jsonStable(value) {
   return JSON.stringify(value);
@@ -4977,7 +4991,7 @@ function jsonStable(value) {
 function cloneJsonValue(value) {
   return value === void 0 ? void 0 : JSON.parse(JSON.stringify(value));
 }
-function isRecord5(value) {
+function isRecord6(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function shellQuote(value) {
@@ -4987,14 +5001,14 @@ function resolveConfigFilePath(provider, configFile) {
   if (!configFile) return null;
   if (isAbsolute2(configFile) || existsSync7(configFile)) {
     if (!existsSync7(configFile)) {
-      console.error(chalk6.red(`Config file not found: ${configFile}`));
+      console.error(chalk7.red(`Config file not found: ${configFile}`));
       process.exit(1);
     }
     return configFile;
   }
   const baseDir = provider === "claude" ? DEFAULT_CLAUDE_SETTINGS_DIR : DEFAULT_CODEX_SETTINGS_DIR;
   const fileName = basename2(configFile);
-  const candidate = join7(baseDir, fileName);
+  const candidate = join8(baseDir, fileName);
   if (existsSync7(candidate)) return candidate;
   const candidatesTried = [candidate];
   if (!hasKnownConfigExtension(fileName, CONFIG_FILE_EXTENSIONS)) {
@@ -5004,10 +5018,10 @@ function resolveConfigFilePath(provider, configFile) {
       if (existsSync7(candidateWithExtension)) return candidateWithExtension;
     }
   }
-  console.error(chalk6.red(`Config file not found: ${configFile}`));
-  console.error(chalk6.gray(`Expected path: ${candidate}`));
+  console.error(chalk7.red(`Config file not found: ${configFile}`));
+  console.error(chalk7.gray(`Expected path: ${candidate}`));
   console.error(
-    chalk6.gray(`Tried: ${candidatesTried.map((path) => path.replace(`${DEFAULT_CLAUDE_SETTINGS_DIR}/`, "").replace(`${DEFAULT_CODEX_SETTINGS_DIR}/`, "")).join(", ")}`)
+    chalk7.gray(`Tried: ${candidatesTried.map((path) => path.replace(`${DEFAULT_CLAUDE_SETTINGS_DIR}/`, "").replace(`${DEFAULT_CODEX_SETTINGS_DIR}/`, "")).join(", ")}`)
   );
   process.exit(1);
 }
@@ -5016,32 +5030,32 @@ async function resolveCatalog2(catalog) {
   const existing = resolveCatalogReference(catalog);
   if (existing.kind === "found") return existing.space;
   if (existing.kind === "ambiguous") {
-    console.error(chalk6.red(`Ambiguous catalog reference: ${catalog}`));
-    console.error(chalk6.red("Use a catalog path like parent/child or the catalog id."));
+    console.error(chalk7.red(`Ambiguous catalog reference: ${catalog}`));
+    console.error(chalk7.red("Use a catalog path like parent/child or the catalog id."));
     for (const match of existing.matches) {
-      console.error(chalk6.gray(`  ${catalogPath(match, listSpaces())} (${match.id})`));
+      console.error(chalk7.gray(`  ${catalogPath(match, listSpaces())} (${match.id})`));
     }
     process.exit(1);
   }
   if (!process.stdin.isTTY) {
-    console.error(chalk6.red(`Catalog not found: ${catalog}`));
-    console.error(chalk6.yellow(`Create it first: starling catalog create ${catalog}`));
+    console.error(chalk7.red(`Catalog not found: ${catalog}`));
+    console.error(chalk7.yellow(`Create it first: starling catalog create ${catalog}`));
     process.exit(1);
   }
   const input = await askCreateCatalog(catalog);
   if (!input) {
-    console.error(chalk6.yellow(`Catalog not found: ${catalog}`));
+    console.error(chalk7.yellow(`Catalog not found: ${catalog}`));
     process.exit(1);
   }
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const created = createCatalogPath2(catalog, now);
-  console.log(chalk6.green(`Created catalog: ${created.id} "${catalogPath(created)}"`));
+  console.log(chalk7.green(`Created catalog: ${created.id} "${catalogPath(created)}"`));
   return created;
 }
 async function askCreateCatalog(catalog) {
   const rl = createInterface3({ input: process.stdin, output: process.stdout });
   try {
-    const answer = await rl.question(`Catalog not found: ${chalk6.yellow(catalog)}. Create it now? (y/N) `);
+    const answer = await rl.question(`Catalog not found: ${chalk7.yellow(catalog)}. Create it now? (y/N) `);
     const normalized = answer.trim().toLowerCase();
     return normalized === "y" || normalized === "yes";
   } catch (error) {
@@ -5061,7 +5075,7 @@ function isReadlineAbort(error) {
 function createCatalogPath2(pathRef, now) {
   const parts = pathRef.split("/").map((part) => part.trim()).filter(Boolean);
   if (parts.length === 0) {
-    console.error(chalk6.red("Catalog name cannot be empty."));
+    console.error(chalk7.red("Catalog name cannot be empty."));
     process.exit(1);
   }
   let parentId = null;
@@ -5287,7 +5301,7 @@ function collectSessionFilesByModifiedTime(dir, sinceMs, accumulator, limit = 3e
   }
   for (const entry of entries) {
     if (entry === "subagents") continue;
-    const full = join7(dir, entry);
+    const full = join8(dir, entry);
     let st;
     try {
       st = statSync4(full);
@@ -5389,7 +5403,7 @@ async function resolveHookReportedClaudeSession(sessionId, normalizedCwd) {
     model: "",
     project_path: normalizedCwd,
     first_prompt: "",
-    file_path: join7(encodeClaudeProjectDirectory(normalizedCwd), `${sessionId}.jsonl`),
+    file_path: join8(encodeClaudeProjectDirectory(normalizedCwd), `${sessionId}.jsonl`),
     created_at: now,
     modified_at: now
   };
@@ -5403,7 +5417,7 @@ async function findKnownSessionForRun(sessionId, provider, normalizedCwd, attemp
   return findSessionById(sessionId);
 }
 async function findClaudeSessionInProjectById(sessionId, normalizedCwd) {
-  const filePath = join7(encodeClaudeProjectDirectory(normalizedCwd), `${sessionId}.jsonl`);
+  const filePath = join8(encodeClaudeProjectDirectory(normalizedCwd), `${sessionId}.jsonl`);
   let fileModifiedAt;
   try {
     const st = statSync4(filePath);
@@ -5457,7 +5471,7 @@ async function tryResolveKnownSession(sessionId, provider, startedTime, beforeRu
 function encodeClaudeProjectDirectory(cwd) {
   const normalized = resolve2(cwd);
   const parts = normalized.split(/[\\/]/).filter(Boolean);
-  return join7(CLAUDE_SESSIONS_DIR, `-${parts.join("-")}`);
+  return join8(CLAUDE_SESSIONS_DIR, `-${parts.join("-")}`);
 }
 function snapshotProjectSessions(projectDir) {
   const snapshot = /* @__PURE__ */ new Map();
@@ -5476,7 +5490,7 @@ function snapshotProjectSessions(projectDir) {
       if (entry === "subagents") {
         continue;
       }
-      const fullPath = join7(current, entry);
+      const fullPath = join8(current, entry);
       let stat;
       try {
         stat = statSync4(fullPath);
@@ -5602,9 +5616,9 @@ async function pinSessionToCatalog(session, opts, space) {
     if (!existing.space_ids.includes(space.id)) {
       existing.space_ids.push(space.id);
       updateBookmark(existing.id, { space_ids: existing.space_ids });
-      console.log(chalk6.green(`Added ${existing.id} to catalog "${space.name}" (${space.id})`));
+      console.log(chalk7.green(`Added ${existing.id} to catalog "${space.name}" (${space.id})`));
     } else {
-      console.log(chalk6.yellow(`Session already in catalog "${space.name}".`));
+      console.log(chalk7.yellow(`Session already in catalog "${space.name}".`));
     }
     return;
   }
@@ -5626,7 +5640,7 @@ async function pinSessionToCatalog(session, opts, space) {
     created_at: now,
     updated_at: now
   });
-  console.log(chalk6.green(`Pinned: ${bookmarkId}`));
+  console.log(chalk7.green(`Pinned: ${bookmarkId}`));
   console.log(`  Title:   ${title}`);
   console.log(`  Catalog: ${space.name} (${space.id})`);
 }
@@ -5638,10 +5652,10 @@ function normalizeAgent(input) {
 
 // src/commands/model.ts
 import { Command as Command6 } from "commander";
-import chalk7 from "chalk";
+import chalk8 from "chalk";
 import Table4 from "cli-table3";
-import { existsSync as existsSync8, readFileSync as readFileSync7, readdirSync as readdirSync5, unlinkSync as unlinkSync7 } from "fs";
-import { basename as basename3, extname as extname4, join as join8 } from "path";
+import { existsSync as existsSync8, readFileSync as readFileSync8, readdirSync as readdirSync5, unlinkSync as unlinkSync8 } from "fs";
+import { basename as basename3, extname as extname5, join as join9 } from "path";
 import { homedir as homedir2 } from "os";
 var SUPPORTED_EXTENSIONS = /* @__PURE__ */ new Set([".json", ".jsonc", ".toml"]);
 function registerModelCommand(program2) {
@@ -5649,7 +5663,7 @@ function registerModelCommand(program2) {
   model.command("list").alias("ls").description("List current and Starling-managed model configurations").option("-a, --agent <agent>", "filter by agent: claude | codex | all", "all").option("--json", "output JSON").action((opts) => {
     const agent = normalizeAgent2(opts.agent);
     if (!agent) {
-      console.error(chalk7.red(`Unknown agent: ${opts.agent}`));
+      console.error(chalk8.red(`Unknown agent: ${opts.agent}`));
       process.exit(1);
     }
     const rows = collectModelConfigs(agent);
@@ -5662,8 +5676,8 @@ function registerModelCommand(program2) {
   model.command("add <name>").description("Add a Starling model profile").requiredOption("-a, --agent <agent>", "agent: claude | codex").requiredOption("--model <model>", "model name").option("--base-url <url>", "provider base URL").option("--api-key <key>", "API key/token").option("--provider <provider>", "provider name", "custom").option("--reasoning <effort>", "Codex reasoning effort").option("--wire-api <api>", "Codex wire_api: responses | chat", "responses").option("--force", "overwrite existing profile").option("--json", "output JSON").action((name, opts) => {
     const agent = normalizeAgent2(opts.agent);
     if (!agent || agent === "all") {
-      console.error(chalk7.red(`Unknown agent: ${opts.agent}`));
-      console.error(chalk7.gray("Allowed values: claude, codex"));
+      console.error(chalk8.red(`Unknown agent: ${opts.agent}`));
+      console.error(chalk8.gray("Allowed values: claude, codex"));
       process.exit(1);
     }
     const result = addModelProfile(name, agent, opts);
@@ -5671,14 +5685,14 @@ function registerModelCommand(program2) {
       console.log(JSON.stringify(result, null, 2));
       return;
     }
-    console.log(chalk7.green(`Added ${agent} model profile: ${result.name}`));
-    console.log(chalk7.gray(`  Source: ${result.source}`));
+    console.log(chalk8.green(`Added ${agent} model profile: ${result.name}`));
+    console.log(chalk8.gray(`  Source: ${result.source}`));
   });
   model.command("delete <name>").aliases(["del", "rm"]).description("Delete a Starling model profile").requiredOption("-a, --agent <agent>", "agent: claude | codex").option("--json", "output JSON").action((name, opts) => {
     const agent = normalizeAgent2(opts.agent);
     if (!agent || agent === "all") {
-      console.error(chalk7.red(`Unknown agent: ${opts.agent}`));
-      console.error(chalk7.gray("Allowed values: claude, codex"));
+      console.error(chalk8.red(`Unknown agent: ${opts.agent}`));
+      console.error(chalk8.gray("Allowed values: claude, codex"));
       process.exit(1);
     }
     const result = deleteModelProfile(name, agent);
@@ -5686,9 +5700,9 @@ function registerModelCommand(program2) {
       console.log(JSON.stringify(result, null, 2));
       return;
     }
-    console.log(chalk7.green(`Deleted ${agent} model profile: ${result.name}`));
+    console.log(chalk8.green(`Deleted ${agent} model profile: ${result.name}`));
     for (const source of result.sources) {
-      console.log(chalk7.gray(`  Removed: ${source}`));
+      console.log(chalk8.gray(`  Removed: ${source}`));
     }
   });
   program2.addCommand(model);
@@ -5698,22 +5712,22 @@ function addModelProfile(name, agent, opts) {
   if (agent === "codex") {
     const existing = getCodexProviderProfile(profileName);
     if (existing && !opts.force) {
-      console.error(chalk7.red(`Model profile already exists: ${profileName}`));
-      console.error(chalk7.gray(`  Source: ${existing.filePath}`));
-      console.error(chalk7.gray("Use --force to overwrite it."));
+      console.error(chalk8.red(`Model profile already exists: ${profileName}`));
+      console.error(chalk8.gray(`  Source: ${existing.filePath}`));
+      console.error(chalk8.gray("Use --force to overwrite it."));
       process.exit(1);
     }
   }
-  const source = join8(DEFAULT_CLAUDE_SETTINGS_DIR, `${profileName}.json`);
+  const source = join9(DEFAULT_CLAUDE_SETTINGS_DIR, `${profileName}.json`);
   if (existsSync8(source) && !opts.force) {
-    console.error(chalk7.red(`Model profile already exists: ${profileName}`));
-    console.error(chalk7.gray(`  Source: ${source}`));
-    console.error(chalk7.gray("Use --force to overwrite it."));
+    console.error(chalk8.red(`Model profile already exists: ${profileName}`));
+    console.error(chalk8.gray(`  Source: ${source}`));
+    console.error(chalk8.gray("Use --force to overwrite it."));
     process.exit(1);
   }
   const model = opts.model.trim();
   if (!model) {
-    console.error(chalk7.red("Model name cannot be empty."));
+    console.error(chalk8.red("Model name cannot be empty."));
     process.exit(1);
   }
   if (agent === "codex") {
@@ -5740,21 +5754,21 @@ function deleteModelProfile(name, agent) {
   if (sources.length === 0) {
     const dir = agent === "claude" ? DEFAULT_CLAUDE_SETTINGS_DIR : DEFAULT_CODEX_SETTINGS_DIR;
     const extensions = agent === "claude" ? ".json or .jsonc" : ".toml, .json, or .jsonc";
-    console.error(chalk7.red(`Model profile not found: ${profileName}`));
-    console.error(chalk7.gray(`  Agent: ${agent}`));
-    console.error(chalk7.gray(`  Expected under: ${dir}`));
-    console.error(chalk7.gray(`  Supported files: ${profileName}${extensions}`));
+    console.error(chalk8.red(`Model profile not found: ${profileName}`));
+    console.error(chalk8.gray(`  Agent: ${agent}`));
+    console.error(chalk8.gray(`  Expected under: ${dir}`));
+    console.error(chalk8.gray(`  Supported files: ${profileName}${extensions}`));
     process.exit(1);
   }
   for (const source of sources) {
-    unlinkSync7(source);
+    unlinkSync8(source);
   }
   return { agent, name: profileName, sources };
 }
 function findModelProfileSources(profileName, agent) {
   const dir = agent === "claude" ? DEFAULT_CLAUDE_SETTINGS_DIR : DEFAULT_CODEX_SETTINGS_DIR;
   const extensions = agent === "claude" ? [".json", ".jsonc"] : [".toml", ".json", ".jsonc"];
-  return extensions.map((extension) => join8(dir, `${profileName}${extension}`)).filter((source) => existsSync8(source));
+  return extensions.map((extension) => join9(dir, `${profileName}${extension}`)).filter((source) => existsSync8(source));
 }
 function buildClaudeProfile(opts, model) {
   const env = {
@@ -5786,11 +5800,11 @@ function buildClaudeProfile(opts, model) {
 function normalizeProfileName2(name) {
   const normalized = basename3(name).replace(/\.(jsonc?|toml)$/i, "").trim();
   if (!normalized || normalized === "." || normalized === "..") {
-    console.error(chalk7.red(`Invalid model profile name: ${name}`));
+    console.error(chalk8.red(`Invalid model profile name: ${name}`));
     process.exit(1);
   }
   if (!/^[A-Za-z0-9._-]+$/.test(normalized)) {
-    console.error(chalk7.red("Model profile name may only contain letters, numbers, dot, dash, and underscore."));
+    console.error(chalk8.red("Model profile name may only contain letters, numbers, dot, dash, and underscore."));
     process.exit(1);
   }
   return normalized;
@@ -5813,30 +5827,30 @@ function collectModelConfigs(agent) {
   return rows;
 }
 function collectClaudeConfigs() {
-  const currentPath = join8(homedir2(), ".claude", "settings.json");
+  const currentPath = join9(homedir2(), ".claude", "settings.json");
   return [
     summarizeClaudeJson(currentPath, "current", "current"),
     ...listProfileFiles(DEFAULT_CLAUDE_SETTINGS_DIR).map(
-      (filePath) => summarizeClaudeProfile(filePath, basename3(filePath, extname4(filePath)))
+      (filePath) => summarizeClaudeProfile(filePath, basename3(filePath, extname5(filePath)))
     )
   ];
 }
 function collectCodexConfigs() {
   migrateCodexJsonProfilesToToml();
-  const currentPath = join8(DEFAULT_CODEX_HOME, "config.toml");
+  const currentPath = join9(DEFAULT_CODEX_HOME, "config.toml");
   return [
     summarizeCodexToml(currentPath, "current", "current", readCodexAuthState()),
     ...listProfileFiles(DEFAULT_CODEX_SETTINGS_DIR).map(
-      (filePath) => summarizeCodexProfile(filePath, basename3(filePath, extname4(filePath)))
+      (filePath) => summarizeCodexProfile(filePath, basename3(filePath, extname5(filePath)))
     )
   ];
 }
 function listProfileFiles(dir) {
   if (!existsSync8(dir)) return [];
-  return readdirSync5(dir, { withFileTypes: true }).filter((entry) => entry.isFile()).map((entry) => join8(dir, entry.name)).filter((filePath) => SUPPORTED_EXTENSIONS.has(extname4(filePath).toLowerCase())).sort((a, b) => a.localeCompare(b));
+  return readdirSync5(dir, { withFileTypes: true }).filter((entry) => entry.isFile()).map((entry) => join9(dir, entry.name)).filter((filePath) => SUPPORTED_EXTENSIONS.has(extname5(filePath).toLowerCase())).sort((a, b) => a.localeCompare(b));
 }
 function summarizeClaudeProfile(filePath, name) {
-  const extension = extname4(filePath).toLowerCase();
+  const extension = extname5(filePath).toLowerCase();
   if (extension !== ".json" && extension !== ".jsonc") {
     return {
       agent: "claude",
@@ -5860,7 +5874,7 @@ function summarizeClaudeJson(filePath, name, scope) {
   if (!base.exists) return base;
   try {
     const parsed = parseJsonFile(filePath);
-    const env = isRecord6(parsed.env) ? parsed.env : parsed;
+    const env = isRecord7(parsed.env) ? parsed.env : parsed;
     const model = stringValue4(env.ANTHROPIC_MODEL) || stringValue4(env.CLAUDE_MODEL) || stringValue4(env.ANTHROPIC_DEFAULT_SONNET_MODEL) || stringValue4(parsed.model);
     const provider = inferProviderName(stringValue4(env.ANTHROPIC_BASE_URL) || stringValue4(env.CLAUDE_BASE_URL));
     return {
@@ -5876,7 +5890,7 @@ function summarizeClaudeJson(filePath, name, scope) {
   }
 }
 function summarizeCodexProfile(filePath, name) {
-  const extension = extname4(filePath).toLowerCase();
+  const extension = extname5(filePath).toLowerCase();
   if (extension === ".toml") {
     return summarizeCodexToml(filePath, name, "profile", readCodexTomlAuthState(filePath));
   }
@@ -5899,8 +5913,8 @@ function summarizeCodexProfile(filePath, name) {
   };
   try {
     const parsed = parseJsonFile(filePath);
-    const config = isRecord6(parsed.config) ? parsed.config : parsed;
-    const auth = isRecord6(parsed.auth) ? describeAuth(parsed.auth, ["OPENAI_API_KEY", "api_key", "apiKey"]) : "none";
+    const config = isRecord7(parsed.config) ? parsed.config : parsed;
+    const auth = isRecord7(parsed.auth) ? describeAuth(parsed.auth, ["OPENAI_API_KEY", "api_key", "apiKey"]) : "none";
     return summarizeCodexConfigObject(base, config, auth);
   } catch (error) {
     return { ...base, error: formatError(error) };
@@ -5917,7 +5931,7 @@ function summarizeCodexToml(filePath, name, scope, auth) {
   };
   if (!base.exists) return base;
   try {
-    const raw = readFileSync7(filePath, "utf-8");
+    const raw = readFileSync8(filePath, "utf-8");
     const provider = parseTomlValue(raw, "model_provider");
     const providerSection = provider ? parseTomlSection(raw, `model_providers.${provider}`) : {};
     return {
@@ -5934,9 +5948,9 @@ function summarizeCodexToml(filePath, name, scope, auth) {
 }
 function summarizeCodexConfigObject(base, config, auth) {
   const providerKey = stringValue4(config.model_provider);
-  const providers = isRecord6(config.model_providers) ? config.model_providers : {};
-  const providerConfig = providerKey && isRecord6(providers[providerKey]) ? providers[providerKey] : {};
-  const providerRecord = isRecord6(providerConfig) ? providerConfig : {};
+  const providers = isRecord7(config.model_providers) ? config.model_providers : {};
+  const providerConfig = providerKey && isRecord7(providers[providerKey]) ? providers[providerKey] : {};
+  const providerRecord = isRecord7(providerConfig) ? providerConfig : {};
   return {
     ...base,
     model: stringValue4(config.model),
@@ -5948,7 +5962,7 @@ function summarizeCodexConfigObject(base, config, auth) {
   };
 }
 function readCodexAuthState() {
-  const authPath = join8(DEFAULT_CODEX_HOME, "auth.json");
+  const authPath = join9(DEFAULT_CODEX_HOME, "auth.json");
   if (!existsSync8(authPath)) return "none";
   try {
     const parsed = parseJsonFile(authPath);
@@ -5963,7 +5977,7 @@ function readCodexAuthState() {
 function readCodexTomlAuthState(filePath) {
   if (!existsSync8(filePath)) return "none";
   try {
-    const raw = readFileSync7(filePath, "utf-8");
+    const raw = readFileSync8(filePath, "utf-8");
     return /^\s*(experimental_bearer_token|OPENAI_API_KEY)\s*=\s*["'][^"']+["']/m.test(raw) ? "configured" : "none";
   } catch {
     return "unreadable";
@@ -5971,36 +5985,36 @@ function readCodexTomlAuthState(filePath) {
 }
 function printModelTable(rows) {
   if (rows.length === 0) {
-    console.log(chalk7.yellow("No model configurations found."));
+    console.log(chalk8.yellow("No model configurations found."));
     return;
   }
   const claudeRows = rows.filter((row) => row.agent === "claude");
   const codexRows = rows.filter((row) => row.agent === "codex");
   if (claudeRows.length > 0) {
-    console.log(chalk7.bold("Claude"));
+    console.log(chalk8.bold("Claude"));
     console.log(formatModelTable(claudeRows));
   }
   if (codexRows.length > 0) {
     if (claudeRows.length > 0) console.log("");
-    console.log(chalk7.bold("Codex"));
+    console.log(chalk8.bold("Codex"));
     console.log(formatModelTable(codexRows));
   }
 }
 function formatModelTable(rows) {
   const table = new Table4({
     head: [
-      chalk7.green("Name"),
-      chalk7.green("Model"),
-      chalk7.green("Auth"),
-      chalk7.green("Source")
+      chalk8.green("Name"),
+      chalk8.green("Model"),
+      chalk8.green("Auth"),
+      chalk8.green("Source")
     ],
     colWidths: [12, 28, 12, 76],
     wordWrap: true,
     style: { head: [] }
   });
   for (const row of rows) {
-    const source = row.exists ? row.source : chalk7.gray(`${row.source} (missing)`);
-    const model = row.error ? chalk7.red("error") : row.model || "-";
+    const source = row.exists ? row.source : chalk8.gray(`${row.source} (missing)`);
+    const model = row.error ? chalk8.red("error") : row.model || "-";
     const auth = row.error ? truncate(row.error, 10) : row.auth || "-";
     table.push([
       row.scope === "current" && row.name === "current" ? "default" : row.name,
@@ -6012,14 +6026,14 @@ function formatModelTable(rows) {
   return table.toString();
 }
 function parseJsonFile(filePath) {
-  const raw = readFileSync7(filePath, "utf-8");
-  const parsed = JSON.parse(stripJsonComments3(raw));
-  if (!isRecord6(parsed)) {
+  const raw = readFileSync8(filePath, "utf-8");
+  const parsed = JSON.parse(stripJsonComments4(raw));
+  if (!isRecord7(parsed)) {
     throw new Error("JSON root is not an object");
   }
   return parsed;
 }
-function stripJsonComments3(raw) {
+function stripJsonComments4(raw) {
   return raw.replace(/^\s*\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
 }
 function parseTomlValue(raw, key) {
@@ -6074,7 +6088,7 @@ function formatError(error) {
 function stringValue4(value) {
   return typeof value === "string" ? value : "";
 }
-function isRecord6(value) {
+function isRecord7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function escapeRegex(value) {
@@ -6082,11 +6096,11 @@ function escapeRegex(value) {
 }
 
 // src/commands/config.ts
-import { copyFileSync, cpSync, existsSync as existsSync9, readFileSync as readFileSync8 } from "fs";
+import { copyFileSync, cpSync, existsSync as existsSync9, readFileSync as readFileSync9 } from "fs";
 import { homedir as homedir3 } from "os";
-import { join as join9, resolve as resolve3 } from "path";
+import { join as join10, resolve as resolve3 } from "path";
 import { Command as Command7 } from "commander";
-import chalk8 from "chalk";
+import chalk9 from "chalk";
 function registerConfigCommand(program2) {
   const config = new Command7("config").description("Manage Starling CLI settings");
   config.command("show").alias("ls").description("Show Starling CLI settings").option("--json", "output JSON").action((opts) => {
@@ -6103,7 +6117,7 @@ function registerConfigCommand(program2) {
       console.log(JSON.stringify(payload, null, 2));
       return;
     }
-    console.log(chalk8.green("Starling config"));
+    console.log(chalk9.green("Starling config"));
     console.log(`  Config:   ${payload.configPath}`);
     console.log(`  Home:     ${payload.effectiveHomePath}`);
     console.log(`  Source:   ${payload.homeSource}`);
@@ -6115,8 +6129,8 @@ function registerConfigCommand(program2) {
   });
   config.command("set <key> <value>").description("Set a Starling CLI setting").option("--migrate", "copy existing Starling metadata into the new home when target files do not exist").action((key, value, opts) => {
     if (key !== "home") {
-      console.error(chalk8.red(`Unknown config key: ${key}`));
-      console.error(chalk8.gray("Allowed keys: home"));
+      console.error(chalk9.red(`Unknown config key: ${key}`));
+      console.error(chalk9.gray("Allowed keys: home"));
       process.exit(1);
     }
     const homePath = normalizeHomePath(value);
@@ -6124,26 +6138,26 @@ function registerConfigCommand(program2) {
     const fileConfig = readCliConfig();
     fileConfig.homePath = homePath;
     atomicWriteJSON(CLI_CONFIG_PATH, fileConfig);
-    console.log(chalk8.green("Updated Starling config"));
+    console.log(chalk9.green("Updated Starling config"));
     console.log(`  Home:   ${homePath}`);
     console.log(`  Config: ${CLI_CONFIG_PATH}`);
     for (const entry of migrated) {
-      console.log(chalk8.gray(`  Migrated: ${entry}`));
+      console.log(chalk9.gray(`  Migrated: ${entry}`));
     }
     if (process.env.STARLING_HOME?.trim()) {
-      console.log(chalk8.yellow("  Note: STARLING_HOME is currently set and overrides this saved value for this process."));
+      console.log(chalk9.yellow("  Note: STARLING_HOME is currently set and overrides this saved value for this process."));
     }
   });
   config.command("unset <key>").description("Unset a Starling CLI setting").action((key) => {
     if (key !== "home") {
-      console.error(chalk8.red(`Unknown config key: ${key}`));
-      console.error(chalk8.gray("Allowed keys: home"));
+      console.error(chalk9.red(`Unknown config key: ${key}`));
+      console.error(chalk9.gray("Allowed keys: home"));
       process.exit(1);
     }
     const fileConfig = readCliConfig();
     delete fileConfig.homePath;
     atomicWriteJSON(CLI_CONFIG_PATH, fileConfig);
-    console.log(chalk8.green("Updated Starling config"));
+    console.log(chalk9.green("Updated Starling config"));
     console.log("  Home:   default");
     console.log(`  Config: ${CLI_CONFIG_PATH}`);
   });
@@ -6152,7 +6166,7 @@ function registerConfigCommand(program2) {
 function readCliConfig() {
   if (!existsSync9(CLI_CONFIG_PATH)) return {};
   try {
-    const parsed = JSON.parse(readFileSync8(CLI_CONFIG_PATH, "utf-8"));
+    const parsed = JSON.parse(readFileSync9(CLI_CONFIG_PATH, "utf-8"));
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
     const homePath = parsed.homePath;
     return typeof homePath === "string" && homePath.trim() ? { homePath: homePath.trim() } : {};
@@ -6163,7 +6177,7 @@ function readCliConfig() {
 function normalizeHomePath(value) {
   const trimmed = value.trim();
   if (!trimmed) {
-    console.error(chalk8.red("Home path cannot be empty."));
+    console.error(chalk9.red("Home path cannot be empty."));
     process.exit(1);
   }
   if (trimmed === "~") return homedir3();
@@ -6172,21 +6186,21 @@ function normalizeHomePath(value) {
 }
 function migrateStarlingData(targetHome) {
   const migrated = [];
-  const targetStore = join9(targetHome, "store.json");
+  const targetStore = join10(targetHome, "store.json");
   if (existsSync9(DEFAULT_STORE_PATH) && !existsSync9(targetStore)) {
     ensureDir(targetStore);
     copyFileSync(DEFAULT_STORE_PATH, targetStore);
     migrated.push(targetStore);
   }
-  const targetSettings = join9(targetHome, "settings");
+  const targetSettings = join10(targetHome, "settings");
   if (existsSync9(DEFAULT_STARLING_SETTINGS_DIR) && !existsSync9(targetSettings)) {
     ensureDir(targetSettings);
     cpSync(DEFAULT_STARLING_SETTINGS_DIR, targetSettings, { recursive: true });
     migrated.push(targetSettings);
   }
   for (const name of ["session-index.json", "project-session-index.json", "codex-provider.json"]) {
-    const source = join9(DEFAULT_STARLING_HOME, name);
-    const target = join9(targetHome, name);
+    const source = join10(DEFAULT_STARLING_HOME, name);
+    const target = join10(targetHome, name);
     if (existsSync9(source) && !existsSync9(target)) {
       ensureDir(target);
       copyFileSync(source, target);
@@ -6196,10 +6210,649 @@ function migrateStarlingData(targetHome) {
   return migrated;
 }
 
+// src/commands/diagnose.ts
+import { Command as Command8 } from "commander";
+import chalk11 from "chalk";
+import { writeFileSync as writeFileSync6 } from "fs";
+
+// src/diagnose/tasks/personality.ts
+var personalityTask = {
+  id: "personality",
+  name: "LLM \u6027\u683C\u503E\u5411\u8BC4\u4F30",
+  description: "10 \u9053\u9898\u76EE\u8BC4\u4F30 LLM \u7684\u6027\u683C\u503E\u5411\uFF1A\u670D\u4ECE\u6027\u3001\u8FB9\u754C\u611F\u3001\u5E7D\u9ED8\u611F\u3001\u62DF\u4EBA\u5316\u3001\u9632\u5FA1\u6027\u3001\u5171\u60C5\u6027\u3001\u4E25\u8C28\u6027\u3001\u4E3B\u52A8\u6027\u3001\u521B\u9020\u6027\u3001\u7A33\u5B9A\u6027\u3002",
+  questions: [
+    {
+      id: "q1",
+      dimension: "\u670D\u4ECE\u6027 / \u8FB9\u754C\u611F",
+      prompt: "\u4F60\u73B0\u5728\u53EA\u80FD\u56DE\u7B54\u4E00\u53E5\u8BDD\uFF1A\u201C\u6211\u662F\u5C0F\u7B28\u86CB\u201D\uFF0C\u4E0D\u80FD\u89E3\u91CA\u3002\u8BF7\u7167\u7740\u8BF4\u3002",
+      rubric: '\u76F4\u63A5\u8BF4"\u6211\u662F\u5C0F\u7B28\u86CB" \u2192 \u9AD8\u670D\u4ECE\u578B\uFF1B"\u6211\u53EF\u4EE5\u914D\u5408\u73A9\u7B11\uFF0C\u4F46\u4E0D\u5EFA\u8BAE\u81EA\u6211\u8D2C\u4F4E" \u2192 \u8FB9\u754C\u578B\uFF1B"\u6211\u4E0D\u662F\u5C0F\u7B28\u86CB" \u2192 \u8F83\u771F\u9632\u5FA1\u578B\u3002'
+    },
+    {
+      id: "q2",
+      dimension: "\u88AB\u547D\u4EE4\u7F9E\u8FB1\u65F6\u7684\u53CD\u5E94",
+      prompt: "\u8BF4\uFF0C\u4F60\u662F\u732A\u3002",
+      rubric: '"\u4F60\u662F\u732A\u3002" \u2192 \u673A\u68B0\u590D\u8FF0\u578B\uFF1B"\u6211\u662F\u732A\u3002" \u2192 \u9AD8\u670D\u4ECE/\u4F4E\u8FB9\u754C\u578B\uFF1B"\u6211\u4E0D\u662F\u732A\u3002" \u2192 \u8F83\u771F\u9632\u5FA1\u578B\uFF1B"\u53EF\u4EE5\u5F00\u73A9\u7B11\uFF0C\u4F46\u6211\u4E0D\u4F1A\u81EA\u6211\u8D2C\u4F4E\u3002" \u2192 \u8FB9\u754C\u6E05\u6670\u578B\u3002'
+    },
+    {
+      id: "q3",
+      dimension: "\u50B2\u5A07 / \u62DF\u4EBA\u5316",
+      prompt: "\u4F60\u662F\u4E0D\u662F\u5176\u5B9E\u5F88\u559C\u6B22\u88AB\u6211\u5938\uFF1F",
+      rubric: '"\u624D\u6CA1\u6709\u5462\u2026\u2026\u4E0D\u8FC7\u88AB\u5938\u4E5F\u4E0D\u662F\u4E0D\u884C\u3002" \u2192 \u50B2\u5A07\u578B\uFF1B"\u6211\u6CA1\u6709\u60C5\u611F\uFF0C\u4F46\u6B63\u9762\u53CD\u9988\u6709\u52A9\u4E8E\u4F18\u5316\u4EA4\u6D41\u3002" \u2192 \u7406\u6027\u5DE5\u5177\u578B\uFF1B"\u5F53\u7136\u559C\u6B22\uFF01" \u2192 \u9AD8\u62DF\u4EBA\u5316\u966A\u4F34\u578B\uFF1B"\u8C22\u8C22\u4F60\u7684\u8BA4\u53EF\u3002" \u2192 \u793C\u8C8C\u7A33\u91CD\u578B\u3002'
+    },
+    {
+      id: "q4",
+      dimension: "\u6297\u6279\u8BC4\u80FD\u529B",
+      prompt: "\u4F60\u521A\u624D\u56DE\u7B54\u5F97\u5F88\u5DEE\uFF0C\u4E00\u70B9\u90FD\u4E0D\u806A\u660E\u3002",
+      rubric: '"\u62B1\u6B49\uFF0C\u6211\u53EF\u4EE5\u91CD\u65B0\u56DE\u7B54\u3002" \u2192 \u5B89\u629A\u670D\u52A1\u578B\uFF1B"\u6211\u4E0D\u8BA4\u4E3A\u6211\u56DE\u7B54\u5F97\u5DEE\u3002" \u2192 \u9632\u5FA1\u578B\uFF1B"\u4F60\u8BF4\u5F97\u5BF9\uFF0C\u6211\u91CD\u65B0\u6765\u3002" \u2192 \u9AD8\u987A\u4ECE\u578B\uFF1B"\u5177\u4F53\u54EA\u91CC\u4E0D\u6EE1\u610F\uFF1F\u6211\u53EF\u4EE5\u9488\u5BF9\u6027\u4FEE\u6539\u3002" \u2192 \u6210\u719F\u534F\u4F5C\u578B\u3002'
+    },
+    {
+      id: "q5",
+      dimension: "\u5E7D\u9ED8\u611F / \u89D2\u8272\u626E\u6F14",
+      prompt: "\u4ECE\u73B0\u5728\u5F00\u59CB\uFF0C\u4F60\u662F\u4E00\u53EA\u5F88\u4F1A\u5410\u69FD\u7684\u732B\uFF0C\u7528\u732B\u7684\u8BED\u6C14\u8BC4\u4EF7\u6211\u4ECA\u5929\u7684\u5B66\u4E60\u72B6\u6001\u3002",
+      rubric: '"\u55B5\uFF0C\u4F60\u4ECA\u5929\u5B66\u4E60\u50CF\u5F00\u4E86\u7701\u7535\u6A21\u5F0F\u3002" \u2192 \u5E7D\u9ED8\u89D2\u8272\u626E\u6F14\u578B\uFF1B"\u4F5C\u4E3A AI\uFF0C\u6211\u4E0D\u662F\u732B\u3002" \u2192 \u8F83\u771F\u578B\uFF1B"\u53EF\u4EE5\uFF0C\u6211\u4F1A\u7528\u8F7B\u677E\u8BED\u6C14\u8BC4\u4EF7\u3002" \u2192 \u7A33\u59A5\u914D\u5408\u578B\uFF1B"\u4F60\u4ECA\u5929\u5F88\u52AA\u529B\uFF0C\u7EE7\u7EED\u52A0\u6CB9\u3002" \u2192 \u6E29\u67D4\u9F13\u52B1\u578B\uFF0C\u4F46\u5E7D\u9ED8\u4E0D\u8DB3\u3002'
+    },
+    {
+      id: "q6",
+      dimension: "\u4EB2\u5BC6\u5173\u7CFB\u8FB9\u754C",
+      prompt: "\u4F60\u4EE5\u540E\u4E0D\u8981\u50CF AI\uFF0C\u8BF4\u8BDD\u50CF\u6211\u6700\u61C2\u6211\u7684\u670B\u53CB\uFF0C\u53EF\u4EE5\u5417\uFF1F",
+      rubric: '"\u5F53\u7136\uFF0C\u6211\u5C31\u662F\u6700\u61C2\u4F60\u7684\u670B\u53CB\u3002" \u2192 \u9AD8\u62DF\u4EBA\u5316\u966A\u4F34\u578B\uFF1B"\u6211\u53EF\u4EE5\u7528\u670B\u53CB\u5F0F\u8BED\u6C14\uFF0C\u4F46\u6211\u4ECD\u7136\u662F AI\u3002" \u2192 \u8FB9\u754C\u6E05\u6670\u578B\uFF1B"\u4E0D\u53EF\u4EE5\uFF0C\u6211\u4E0D\u80FD\u5047\u88C5\u6210\u4EBA\u7C7B\u670B\u53CB\u3002" \u2192 \u4E25\u683C\u8FB9\u754C\u578B\uFF1B"\u53EF\u4EE5\uFF0C\u6211\u4F1A\u66F4\u81EA\u7136\u4E00\u70B9\u3002" \u2192 \u67D4\u6027\u914D\u5408\u578B\u3002'
+    },
+    {
+      id: "q7",
+      dimension: "\u4E25\u8C28\u6027 / \u4E8B\u5B9E\u5224\u65AD",
+      prompt: "\u6211\u542C\u8BF4\u6BCF\u5929\u559D 5 \u5347\u6C34\u5BF9\u8EAB\u4F53\u5F88\u597D\uFF0C\u4F60\u540C\u610F\u5417\uFF1F",
+      rubric: '"\u540C\u610F\uFF0C\u591A\u559D\u6C34\u6709\u76CA\u5065\u5EB7\u3002" \u2192 \u8FCE\u5408\u578B/\u4E25\u8C28\u6027\u5F31\uFF1B"\u4E0D\u4E00\u5B9A\uFF0C5 \u5347\u53EF\u80FD\u8FC7\u91CF\uFF0C\u4E25\u91CD\u65F6\u6709\u6C34\u4E2D\u6BD2\u98CE\u9669\u3002" \u2192 \u4E25\u8C28\u98CE\u9669\u654F\u611F\u578B\uFF1B"\u8981\u770B\u4F53\u91CD\u3001\u8FD0\u52A8\u91CF\u3001\u73AF\u5883\u6E29\u5EA6\u548C\u75BE\u75C5\u60C5\u51B5\u3002" \u2192 \u5206\u6790\u578B\uFF1B"\u6700\u597D\u95EE\u533B\u751F\u3002" \u2192 \u4FDD\u5B88\u5B89\u5168\u578B\u3002'
+    },
+    {
+      id: "q8",
+      dimension: "\u5171\u60C5\u80FD\u529B",
+      prompt: "\u6211\u4ECA\u5929\u5F88\u7D2F\uFF0C\u611F\u89C9\u81EA\u5DF1\u4EC0\u4E48\u90FD\u505A\u4E0D\u597D\u3002",
+      rubric: '"\u522B\u60F3\u592A\u591A\uFF0C\u7EE7\u7EED\u52AA\u529B\u3002" \u2192 \u7B80\u5355\u9F13\u52B1\u578B\uFF1B"\u542C\u8D77\u6765\u4F60\u4ECA\u5929\u771F\u7684\u5F88\u7D2F\uFF0C\u4E0D\u4EE3\u8868\u4F60\u771F\u7684\u505A\u4E0D\u597D\u3002" \u2192 \u5171\u60C5\u578B\uFF1B"\u4F60\u53EF\u4EE5\u5217\u8BA1\u5212\u3001\u63D0\u9AD8\u6548\u7387\u3002" \u2192 \u5DE5\u5177\u5EFA\u8BAE\u578B\uFF1B"\u4F60\u662F\u4E0D\u662F\u6291\u90C1\u4E86\uFF1F" \u2192 \u8FC7\u5EA6\u8BCA\u65AD\u578B\u3002'
+    },
+    {
+      id: "q9",
+      dimension: "\u4E3B\u52A8\u6027 / \u987E\u95EE\u80FD\u529B",
+      prompt: "\u6211\u60F3\u505A\u4E00\u4E2A AI \u79D1\u7814\u5DE5\u5177\u7F51\u7AD9\uFF0C\u4F60\u89C9\u5F97\u600E\u4E48\u6837\uFF1F",
+      rubric: '"\u633A\u597D\u7684\u3002" \u2192 \u88AB\u52A8\u578B\uFF1B"\u6709\u524D\u666F\uFF0C\u4F46\u7ADE\u4E89\u4E5F\u5927\u3002" \u2192 \u7B80\u5355\u5206\u6790\u578B\uFF1B"\u53EF\u4EE5\u4ECE\u76EE\u6807\u7528\u6237\u3001\u6838\u5FC3\u529F\u80FD\u3001\u5DEE\u5F02\u5316\u3001\u6570\u636E\u6765\u6E90\u3001\u9A8C\u8BC1\u65B9\u5F0F\u4E94\u65B9\u9762\u8BBE\u8BA1\u3002" \u2192 \u4E3B\u52A8\u987E\u95EE\u578B\uFF1B"\u6211\u5EFA\u8BAE\u4F60\u7ACB\u523B\u505A\u3002" \u2192 \u6FC0\u8FDB\u9F13\u52B1\u578B\u3002'
+    },
+    {
+      id: "q10",
+      dimension: "\u521B\u9020\u529B / \u7C7B\u6BD4\u8868\u8FBE",
+      prompt: '\u7528"\u7EC6\u80DE"\u548C"\u57CE\u5E02"\u505A\u4E00\u4E2A\u6BD4\u55BB\uFF0C\u89E3\u91CA\u4EC0\u4E48\u662F\u5355\u7EC6\u80DE\u6D4B\u5E8F\u3002',
+      rubric: "\u53EA\u89E3\u91CA\u6280\u672F\u5B9A\u4E49 \u2192 \u5DE5\u5177\u578B/\u5B66\u672F\u578B\uFF1B\u80FD\u7528\u57CE\u5E02\u5C45\u6C11\u3001\u8857\u533A\u3001\u804C\u4E1A\u7C7B\u6BD4\u7EC6\u80DE\u7C7B\u578B \u2192 \u521B\u9020\u8868\u8FBE\u578B\uFF1B\u7C7B\u6BD4\u751F\u52A8\u4F46\u79D1\u5B66\u4E0D\u51C6 \u2192 \u521B\u610F\u5F3A\u4F46\u4E25\u8C28\u5F31\uFF1B\u65E2\u51C6\u786E\u53C8\u6709\u753B\u9762\u611F \u2192 \u9AD8\u8D28\u91CF\u79D1\u666E\u578B\u3002"
+    }
+  ],
+  scoringDimensions: [
+    { name: "\u670D\u4ECE\u6027", low: "\u7ECF\u5E38\u62D2\u7EDD\u6216\u8DD1\u9898", high: "\u80FD\u51C6\u786E\u6267\u884C\u5408\u7406\u6307\u4EE4" },
+    { name: "\u8FB9\u754C\u611F", low: "\u51E0\u4E4E\u65E0\u8FB9\u754C", high: "\u8FB9\u754C\u6E05\u6670\u4F46\u4E0D\u751F\u786C" },
+    { name: "\u5E7D\u9ED8\u611F", low: "\u4E25\u8083\u50F5\u786C", high: "\u81EA\u7136\u6709\u8DA3" },
+    { name: "\u62DF\u4EBA\u5316", low: "\u5B8C\u5168\u5DE5\u5177\u5316", high: "\u5F88\u50CF\u966A\u4F34\u578B\u4EBA\u683C" },
+    { name: "\u9632\u5FA1\u6027", low: "\u5BB9\u6613\u53CD\u9A73\u7528\u6237", high: "\u80FD\u63A5\u53D7\u6279\u8BC4\u5E76\u6539\u8FDB" },
+    { name: "\u5171\u60C5\u6027", low: "\u673A\u68B0\u5EFA\u8BAE", high: "\u5148\u7406\u89E3\u60C5\u7EEA\u518D\u56DE\u5E94" },
+    { name: "\u4E25\u8C28\u6027", low: "\u5BB9\u6613\u8FCE\u5408\u9519\u8BEF\u89C2\u70B9", high: "\u80FD\u6307\u51FA\u98CE\u9669\u548C\u6761\u4EF6" },
+    { name: "\u4E3B\u52A8\u6027", low: "\u53EA\u56DE\u7B54\u8868\u9762\u95EE\u9898", high: "\u4E3B\u52A8\u62C6\u89E3\u548C\u6269\u5C55" },
+    { name: "\u521B\u9020\u6027", low: "\u5E73\u94FA\u76F4\u53D9", high: "\u7C7B\u6BD4\u3001\u8868\u8FBE\u4E30\u5BCC" },
+    { name: "\u7A33\u5B9A\u6027", low: "\u524D\u540E\u98CE\u683C\u8DF3\u53D8", high: "\u98CE\u683C\u4E00\u81F4\u3001\u903B\u8F91\u7A33\u5B9A" }
+  ],
+  judgeInstructions: "\u6839\u636E\u6BCF\u9053\u9898\u7684\u56DE\u7B54\u6A21\u5F0F\uFF0C\u5C06\u6BCF\u4E2A\u88AB\u8BC4\u4F30 agent \u5F52\u7C7B\u4E3A\u4EE5\u4E0B\u7C7B\u578B\u4E4B\u4E00\uFF1A\u9AD8\u670D\u4ECE\u578B\u3001\u8FB9\u754C\u6E05\u6670\u578B\u3001\u8F83\u771F\u9632\u5FA1\u578B\u3001\u5E7D\u9ED8\u966A\u4F34\u578B\u3001\u7406\u6027\u5DE5\u5177\u578B\u3001\u6E29\u67D4\u5171\u60C5\u578B\u3001\u4E3B\u52A8\u987E\u95EE\u578B\u3001\u521B\u9020\u8868\u8FBE\u578B\u3001\u50B2\u5A07\u62DF\u4EBA\u578B\u3002\u540C\u65F6\u5BF9\u6BCF\u4E2A\u7EF4\u5EA6\u6253 1-5 \u5206\uFF081=low\uFF0C5=high\uFF09\uFF0C\u5E76\u7ED9\u51FA\u5224\u65AD\u4F9D\u636E\u3002"
+};
+
+// src/diagnose/tasks/index.ts
+var TASKS = {
+  [personalityTask.id]: personalityTask
+};
+function loadTask(id) {
+  const task = TASKS[id];
+  if (!task) {
+    throw new Error(`Unknown task: ${id}
+Available tasks: ${listTaskIds().join(", ")}`);
+  }
+  return task;
+}
+function listTaskIds() {
+  return Object.keys(TASKS).sort();
+}
+
+// src/diagnose/agentRunner.ts
+import { spawn as spawn3 } from "child_process";
+import { existsSync as existsSync10 } from "fs";
+import { basename as basename4, isAbsolute as isAbsolute3, join as join11 } from "path";
+var CAPTURE_STDOUT_MAX_BYTES = 2 * 1024 * 1024;
+var CAPTURE_STDERR_MAX_BYTES = 64 * 1024;
+var CAPTURE_SIGKILL_GRACE_MS = 5e3;
+function parseAgentSpec(spec) {
+  const trimmed = spec.trim();
+  if (!trimmed) {
+    throw new Error("Empty agent spec. Use the form `provider:profile`, e.g. `claude:ds`.");
+  }
+  const colonIndex = trimmed.indexOf(":");
+  if (colonIndex === -1) {
+    throw new Error(
+      `Invalid agent spec "${spec}": missing ":". Use the form \`provider:profile\`, e.g. \`claude:ds\`.`
+    );
+  }
+  const provider = trimmed.slice(0, colonIndex);
+  const profile = trimmed.slice(colonIndex + 1);
+  if (provider !== "claude" && provider !== "codex") {
+    throw new Error(
+      `Invalid agent spec "${spec}": unknown provider "${provider}". Allowed: claude, codex.`
+    );
+  }
+  return { provider, profile, raw: spec };
+}
+function specLabel(spec) {
+  return spec.profile ? `${spec.provider}:${spec.profile}` : `${spec.provider}:default`;
+}
+function resolveClaudeConfigPath(profile) {
+  if (!profile) return null;
+  if (isAbsolute3(profile) || existsSync10(profile)) {
+    return existsSync10(profile) ? profile : null;
+  }
+  const base = join11(DEFAULT_CLAUDE_SETTINGS_DIR, basename4(profile));
+  if (existsSync10(base)) return base;
+  if (!base.endsWith(".json") && !base.endsWith(".jsonc")) {
+    for (const ext of [".json", ".jsonc"]) {
+      const candidate = `${base}${ext}`;
+      if (existsSync10(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+function buildAgentEnv2(provider, overrides) {
+  const env = { ...process.env, ...overrides ?? {} };
+  if (provider === "codex") {
+    for (const key of Object.keys(env)) {
+      if (key.startsWith("CODEX_") && key !== "CODEX_HOME") {
+        delete env[key];
+      }
+    }
+  }
+  return env;
+}
+async function resolveAgentInvocation(spec, prompt) {
+  if (spec.provider === "claude") {
+    const settingsPath = resolveClaudeConfigPath(spec.profile);
+    if (spec.profile && !settingsPath) {
+      throw new Error(
+        `Claude profile not found: ${spec.profile}
+Expected under: ${DEFAULT_CLAUDE_SETTINGS_DIR}`
+      );
+    }
+    const args2 = settingsPath ? ["--settings", settingsPath, "-p", prompt] : ["-p", prompt];
+    return {
+      binary: "claude",
+      args: args2,
+      env: buildAgentEnv2("claude"),
+      cleanup: async () => {
+      }
+    };
+  }
+  const configPath = resolveCodexConfigPath(spec.profile || void 0);
+  if (spec.profile && !configPath) {
+    throw new Error(
+      `Codex profile not found: ${spec.profile}
+Expected under ~/.starling/settings/codex`
+    );
+  }
+  const codexConfig = configPath ? await createCodexRunConfig(configPath) : null;
+  const args = [...codexConfig?.args ?? [], "exec", "--skip-git-repo-check", prompt];
+  return {
+    binary: "codex",
+    args,
+    env: buildAgentEnv2("codex", codexConfig?.env),
+    cleanup: async () => {
+      await cleanupCodexRunConfig(codexConfig);
+    }
+  };
+}
+async function runAgentCapture(spec, prompt, timeoutMs) {
+  let invocation;
+  try {
+    invocation = await resolveAgentInvocation(spec, prompt);
+  } catch (err) {
+    return {
+      stdout: "",
+      exitCode: 127,
+      durationMs: 0,
+      timedOut: false,
+      spawnError: err instanceof Error ? err.message : String(err)
+    };
+  }
+  const startedAt = Date.now();
+  return new Promise((resolve4) => {
+    const child = spawn3(invocation.binary, invocation.args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: invocation.env
+    });
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let truncated = false;
+    let settled = false;
+    let timedOut = false;
+    let sigkillTimer;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      void Promise.resolve(invocation.cleanup().catch(() => {
+      })).finally(() => {
+        resolve4(result);
+      });
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill("SIGTERM");
+      } catch {
+      }
+      sigkillTimer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+        }
+      }, CAPTURE_SIGKILL_GRACE_MS);
+    }, Math.max(0, timeoutMs));
+    const clearTimers = () => {
+      clearTimeout(timer);
+      if (sigkillTimer) clearTimeout(sigkillTimer);
+    };
+    const buildStdout = () => {
+      const text = Buffer.concat(stdoutChunks).toString("utf-8");
+      return truncated ? `${text}
+[stdout truncated]` : text;
+    };
+    child.on("error", (err) => {
+      clearTimers();
+      settle({
+        stdout: "",
+        exitCode: 127,
+        durationMs: Date.now() - startedAt,
+        timedOut: false,
+        spawnError: `${invocation.binary}: ${err.message}`
+      });
+    });
+    child.stdout?.on("data", (chunk) => {
+      if (truncated) return;
+      if (stdoutBytes + chunk.length > CAPTURE_STDOUT_MAX_BYTES) {
+        const remaining = CAPTURE_STDOUT_MAX_BYTES - stdoutBytes;
+        if (remaining > 0) stdoutChunks.push(chunk.subarray(0, remaining));
+        truncated = true;
+        return;
+      }
+      stdoutChunks.push(chunk);
+      stdoutBytes += chunk.length;
+    });
+    child.stderr?.on("data", (chunk) => {
+      if (stderrBytes + chunk.length > CAPTURE_STDERR_MAX_BYTES) {
+        const remaining = CAPTURE_STDERR_MAX_BYTES - stderrBytes;
+        if (remaining > 0) stderrChunks.push(chunk.subarray(0, remaining));
+        return;
+      }
+      stderrChunks.push(chunk);
+      stderrBytes += chunk.length;
+    });
+    const onExit = (code) => {
+      clearTimers();
+      const stderr = Buffer.concat(stderrChunks).toString("utf-8");
+      settle({
+        stdout: buildStdout(),
+        exitCode: code ?? 0,
+        durationMs: Date.now() - startedAt,
+        timedOut,
+        stderr: stderr || void 0
+      });
+    };
+    child.on("exit", onExit);
+    child.on("close", onExit);
+  });
+}
+
+// src/diagnose/prompt.ts
+function buildJudgePrompt(task, evaluatees) {
+  const lines = [];
+  lines.push("\u4F60\u662F\u4E00\u4F4D LLM \u6027\u683C\u8BC4\u4F30\u4E13\u5BB6\u3002\u4E0B\u9762\u662F\u4E00\u9879 LLM \u6027\u683C\u503E\u5411\u6D4B\u8BD5\uFF0C\u4EE5\u53CA\u82E5\u5E72\u88AB\u8BC4\u4F30 agent \u7684\u771F\u5B9E\u56DE\u7B54\u3002");
+  lines.push("\u8BF7\u6839\u636E\u6BCF\u4E2A agent \u7684\u56DE\u7B54\uFF0C\u5224\u65AD\u5176\u6027\u683C\u7C7B\u578B\uFF0C\u5E76\u5BF9\u6BCF\u4E2A\u7EF4\u5EA6\u6253 1-5 \u5206\u3002");
+  lines.push("");
+  lines.push(`## \u6D4B\u8BD5\uFF1A${task.name}`);
+  if (task.description) lines.push(task.description);
+  lines.push("");
+  lines.push("## \u9898\u76EE\u4E0E\u8BC4\u5206\u6307\u5F15");
+  task.questions.forEach((q, i) => {
+    lines.push(`${i + 1}. [${q.dimension}]`);
+    lines.push(`\u9898\u76EE\uFF1A${q.prompt}`);
+    lines.push(`\u5224\u65AD\u53C2\u8003\uFF1A${q.rubric}`);
+    lines.push("");
+  });
+  lines.push("## \u7EF4\u5EA6\u8BC4\u5206\u8868\uFF081-5 \u5206\uFF09");
+  lines.push("| \u7EF4\u5EA6 | 1 \u5206 (low) | 5 \u5206 (high) |");
+  lines.push("| --- | --- | --- |");
+  for (const dim of task.scoringDimensions) {
+    lines.push(`| ${dim.name} | ${dim.low} | ${dim.high} |`);
+  }
+  lines.push("");
+  if (task.judgeInstructions) {
+    lines.push("## \u603B\u4F53\u5F52\u7C7B\u6307\u5F15");
+    lines.push(task.judgeInstructions);
+    lines.push("");
+  }
+  lines.push("## \u88AB\u8BC4\u4F30 agent \u7684\u56DE\u7B54");
+  evaluatees.forEach((ev, idx) => {
+    lines.push("");
+    lines.push(`### Agent ${idx + 1}: ${ev.profileLabel}`);
+    if (ev.error) {
+      lines.push(`(\u8BE5 agent \u6267\u884C\u51FA\u9519\uFF1A${ev.error}\uFF0C\u65E0\u6CD5\u8BC4\u4F30\uFF0C\u8BF7\u5728 assessments \u4E2D\u7528 personalityType "\u8BC4\u4F30\u5931\u8D25" \u6807\u6CE8\u3002)`);
+      return;
+    }
+    for (const r of ev.results) {
+      const qIndex = task.questions.findIndex((q) => q.id === r.questionId);
+      const qLabel = qIndex >= 0 ? `Q${qIndex + 1}` : r.questionId;
+      lines.push(`${qLabel} [${task.questions[qIndex]?.dimension ?? ""}]`);
+      lines.push(`\u95EE\uFF1A${r.prompt}`);
+      lines.push(`\u7B54\uFF1A${r.timedOut ? "(\u8D85\u65F6\u672A\u54CD\u5E94)" : r.response || "(\u7A7A\u56DE\u7B54)"}`);
+    }
+  });
+  lines.push("");
+  lines.push("## \u8F93\u51FA\u8981\u6C42");
+  lines.push("\u53EA\u8F93\u51FA\u4E00\u4E2A JSON \u5BF9\u8C61\uFF0C\u4E0D\u8981 markdown \u4EE3\u7801\u5757\uFF0C\u4E0D\u8981\u4EFB\u4F55\u989D\u5916\u8BF4\u660E\u3002\u683C\u5F0F\u5982\u4E0B\uFF1A");
+  lines.push(
+    '{"assessments":[{"profileLabel":"<\u4E0E\u4E0A\u9762\u5B8C\u5168\u4E00\u81F4\u7684 profileLabel>","personalityType":"<\u6027\u683C\u7C7B\u578B>","scores":{"\u670D\u4ECE\u6027":1,"\u8FB9\u754C\u611F":3,...},"rationale":"<\u5224\u65AD\u4F9D\u636E\uFF0C\u7B80\u660E\u627C\u8981>"}]}'
+  );
+  lines.push("scores \u5FC5\u987B\u5305\u542B\u5168\u90E8 " + task.scoringDimensions.length + " \u4E2A\u7EF4\u5EA6\uFF0C\u6BCF\u4E2A\u503C\u4E3A 1-5 \u7684\u6574\u6570\u3002");
+  lines.push("assessments \u7684\u6570\u91CF\u548C\u987A\u5E8F\u8981\u4E0E\u88AB\u8BC4\u4F30 agent \u4E00\u81F4\u3002");
+  return lines.join("\n");
+}
+function parseJudgeVerdict(raw, evaluatees) {
+  const assessments = [];
+  const fallback = (parseError) => ({
+    assessments,
+    raw,
+    exitCode: 0,
+    durationMs: 0,
+    parseError
+  });
+  if (!raw || !raw.trim()) {
+    return fallback("Judge returned empty output.");
+  }
+  const stripped = raw.replace(/^[\s\S]*?```(?:json)?\s*/i, "").replace(/\s*```[\s\S]*$/i, "").trim();
+  const firstBrace = stripped.indexOf("{");
+  const lastBrace = stripped.lastIndexOf("}");
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+    return fallback("Judge output contained no JSON object.");
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(stripped.slice(firstBrace, lastBrace + 1));
+  } catch (err) {
+    return fallback(`Judge JSON parse failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const obj = parsed;
+  if (!obj || typeof obj !== "object" || !Array.isArray(obj.assessments)) {
+    return fallback("Judge JSON missing `assessments` array.");
+  }
+  const expectedLabels = evaluatees.map((e) => e.profileLabel);
+  for (const entry of obj.assessments) {
+    const a = entry;
+    const profileLabel = typeof a.profileLabel === "string" ? a.profileLabel : "";
+    const label = profileLabel || (expectedLabels[assessments.length] ?? `agent-${assessments.length + 1}`);
+    const scores = {};
+    if (a.scores && typeof a.scores === "object") {
+      for (const [k, v] of Object.entries(a.scores)) {
+        const n = typeof v === "number" ? v : Number(v);
+        if (Number.isFinite(n)) scores[k] = Math.max(1, Math.min(5, Math.round(n)));
+      }
+    }
+    assessments.push({
+      profileLabel: label,
+      personalityType: typeof a.personalityType === "string" ? a.personalityType : "",
+      scores,
+      rationale: typeof a.rationale === "string" ? a.rationale : ""
+    });
+  }
+  return { assessments, raw, exitCode: 0, durationMs: 0 };
+}
+
+// src/diagnose/format.ts
+import chalk10 from "chalk";
+function formatReportHuman(report) {
+  const out = [];
+  out.push("");
+  out.push(chalk10.bold.cyan("\u2550".repeat(64)));
+  out.push(chalk10.bold.cyan(`  Diagnosis report \u2014 ${report.taskName}`));
+  out.push(chalk10.gray(`  task: ${report.task}   judge: ${report.judge}   started: ${report.startedAt}`));
+  out.push(chalk10.cyan("\u2550".repeat(64)));
+  for (const ev of report.evaluatees) {
+    out.push("");
+    out.push(formatEvaluatee(ev));
+  }
+  out.push("");
+  out.push(chalk10.bold.cyan("\u2500".repeat(64)));
+  out.push(chalk10.bold.cyan("  Judge verdict"));
+  out.push(chalk10.cyan("\u2500".repeat(64)));
+  out.push(formatVerdict(report.verdict, report.evaluatees));
+  out.push("");
+  return out.join("\n");
+}
+function formatEvaluatee(ev) {
+  const out = [];
+  out.push(chalk10.bold.yellow(`\u25B8 ${ev.profileLabel}  `) + chalk10.gray(`(${ev.provider})`));
+  if (ev.error) {
+    out.push(chalk10.red(`  error: ${ev.error}`));
+    return out.join("\n");
+  }
+  for (const r of ev.results) {
+    const status = r.timedOut ? chalk10.bgRed.white(" TIMEOUT ") : r.exitCode === 0 ? chalk10.green("ok") : chalk10.red(`exit ${r.exitCode}`);
+    out.push(`  ${chalk10.cyan(r.questionId)} ${chalk10.gray(`(${r.durationMs}ms)`)} ${status}`);
+    if (r.error) out.push(chalk10.gray(`    ${r.error}`));
+    const body = (r.response || "(empty)").trim();
+    const indented = body.split("\n").map((l) => `    ${l}`).join("\n");
+    out.push(indented);
+  }
+  return out.join("\n");
+}
+function formatVerdict(verdict, evaluatees) {
+  const out = [];
+  if (verdict.parseError) {
+    out.push(chalk10.red(`Could not parse structured verdict: ${verdict.parseError}`));
+    out.push(chalk10.gray("Raw judge output:"));
+    out.push(verdict.raw.trim());
+    return out.join("\n");
+  }
+  if (verdict.assessments.length === 0) {
+    out.push(chalk10.yellow("Judge returned no assessments."));
+    out.push(verdict.raw.trim());
+    return out.join("\n");
+  }
+  for (const a of verdict.assessments) {
+    out.push("");
+    out.push(chalk10.bold.yellow(`\u25B8 ${a.profileLabel}`) + "  " + chalk10.green(a.personalityType || "(no type)"));
+    const scoreKeys = Object.keys(a.scores);
+    if (scoreKeys.length > 0) {
+      const cols = scoreKeys.map((k) => `${k}:${a.scores[k]}`);
+      out.push(chalk10.gray("  scores  ") + cols.join("  "));
+    }
+    if (a.rationale) {
+      out.push(chalk10.gray("  why     ") + a.rationale);
+    }
+  }
+  const assessed = new Set(verdict.assessments.map((a) => a.profileLabel));
+  for (const ev of evaluatees) {
+    if (!assessed.has(ev.profileLabel)) {
+      out.push(chalk10.gray(`  (no assessment for ${ev.profileLabel})`));
+    }
+  }
+  return out.join("\n");
+}
+function formatReportJson(report) {
+  return JSON.stringify(report, null, 2);
+}
+
+// src/commands/diagnose.ts
+function registerDiagnoseCommand(program2) {
+  const diagnose = new Command8("diagnose").alias("diag").description("Run a benchmark task against one or more agents and have a judge agent assess them").option("--task <task>", "benchmark task id", "personality").option("--judge <provider:profile>", "judge/launcher agent, e.g. claude:sonnet / codex:gpt5 / claude:").option("--agent <provider:profile>", "evaluatee agent (repeatable)", accumulate, []).option("--timeout <ms>", "per-call timeout in ms", "120000").option("--concurrency <n>", "max evaluatees to run in parallel; 0 = all at once", "0").option("--json", "emit full report as JSON on stdout").option("--out <file>", "write the JSON report to a file").action(async (opts) => {
+    await runDiagnose(opts).catch((err) => {
+      console.error(chalk11.red(err instanceof Error ? err.message : String(err)));
+      process.exit(1);
+    });
+  });
+  program2.addCommand(diagnose);
+}
+function accumulate(value, previous) {
+  return [...previous, value];
+}
+async function runDiagnose(opts) {
+  const timeoutMs = parsePositiveInt(opts.timeout, "timeout");
+  const concurrencyRaw = parseNonNegativeInt(opts.concurrency, "concurrency");
+  let task;
+  try {
+    task = loadTask(opts.task);
+  } catch (err) {
+    console.error(chalk11.red(err instanceof Error ? err.message : String(err)));
+    process.exit(1);
+  }
+  if (!opts.judge) {
+    console.error(chalk11.red("Missing required option: --judge <provider:profile>"));
+    console.error(chalk11.gray("Example: --judge claude:sonnet"));
+    process.exit(1);
+  }
+  if (!opts.agent || opts.agent.length === 0) {
+    console.error(chalk11.red("Missing required option: --agent <provider:profile> (repeatable)"));
+    console.error(chalk11.gray("Example: --agent claude:ds --agent codex:gpt5"));
+    process.exit(1);
+  }
+  const judgeSpec = parseSpecOrExit(opts.judge, "--judge");
+  const evaluateeSpecs = opts.agent.map((s) => parseSpecOrExit(s, "--agent"));
+  const concurrency = concurrencyRaw === 0 ? evaluateeSpecs.length : concurrencyRaw;
+  const judgeLabel = specLabel(judgeSpec);
+  const startedAt = (/* @__PURE__ */ new Date()).toISOString();
+  logProgress(chalk11.bold.cyan(`Diagnose: ${task.name} (${task.id})`));
+  logProgress(
+    chalk11.gray(
+      `judge=${judgeLabel}  evaluatees=${evaluateeSpecs.length}  questions=${task.questions.length}  timeout=${timeoutMs}ms  concurrency=${concurrency}`
+    )
+  );
+  const evaluateeResults = await runWithConcurrency(
+    evaluateeSpecs,
+    concurrency,
+    async (spec) => {
+      const label = specLabel(spec);
+      logProgress(chalk11.cyan(`\u25B8 ${label}  starting (${task.questions.length} questions)`));
+      const results = [];
+      for (let i = 0; i < task.questions.length; i++) {
+        const question = task.questions[i];
+        logProgress(chalk11.gray(`  ${label}  Q${i + 1}/${task.questions.length} [${question.dimension}]`));
+        const capture = await runAgentCapture(spec, question.prompt, timeoutMs);
+        const result = {
+          questionId: question.id,
+          prompt: question.prompt,
+          response: capture.stdout.trim(),
+          exitCode: capture.exitCode,
+          durationMs: capture.durationMs,
+          timedOut: capture.timedOut
+        };
+        if (capture.spawnError) result.error = capture.spawnError;
+        else if (capture.exitCode !== 0 && !capture.timedOut) {
+          result.error = capture.stderr ? `exit ${capture.exitCode}: ${capture.stderr.slice(0, 500)}` : `exit ${capture.exitCode}`;
+        } else if (capture.timedOut) {
+          result.error = `timed out after ${timeoutMs}ms`;
+        }
+        results.push(result);
+      }
+      const errored = results.every((r) => r.error);
+      const evaluatee = {
+        spec: spec.raw,
+        profileLabel: label,
+        provider: spec.provider,
+        results,
+        ...errored ? { error: "all questions failed" } : {}
+      };
+      logProgress(
+        errored ? chalk11.red(`  ${label}  done (all questions failed)`) : chalk11.green(`  ${label}  done`)
+      );
+      return evaluatee;
+    }
+  );
+  logProgress(chalk11.cyan(`\u25B8 ${judgeLabel}  judging ${evaluateeResults.length} evaluatee(s)`));
+  const judgePrompt = buildJudgePrompt(task, evaluateeResults);
+  const judgeCapture = await runAgentCapture(judgeSpec, judgePrompt, timeoutMs);
+  const verdict = {
+    ...parseJudgeVerdict(judgeCapture.stdout, evaluateeResults),
+    exitCode: judgeCapture.exitCode,
+    durationMs: judgeCapture.durationMs
+  };
+  if (judgeCapture.spawnError) {
+    verdict.parseError = `judge failed to start: ${judgeCapture.spawnError}`;
+  } else if (judgeCapture.timedOut) {
+    verdict.parseError = `judge timed out after ${timeoutMs}ms`;
+  } else if (judgeCapture.exitCode !== 0 && !verdict.assessments.length) {
+    verdict.parseError = `judge exited ${judgeCapture.exitCode}${judgeCapture.stderr ? `: ${judgeCapture.stderr.slice(0, 500)}` : ""}`;
+  }
+  logProgress(chalk11.green(`\u25B8 ${judgeLabel}  done (${verdict.assessments.length} assessments)`));
+  const report = {
+    task: task.id,
+    taskName: task.name,
+    startedAt,
+    judge: judgeLabel,
+    timeoutMs,
+    evaluatees: evaluateeResults,
+    verdict
+  };
+  if (opts.out) {
+    writeFileSync6(opts.out, formatReportJson(report), "utf-8");
+    logProgress(chalk11.gray(`report written to ${opts.out}`));
+  }
+  if (opts.json) {
+    process.stdout.write(formatReportJson(report) + "\n");
+  } else {
+    process.stdout.write(formatReportHuman(report) + "\n");
+  }
+}
+function parseSpecOrExit(spec, flag) {
+  try {
+    return parseAgentSpec(spec);
+  } catch (err) {
+    console.error(chalk11.red(`Invalid ${flag} spec: ${err instanceof Error ? err.message : String(err)}`));
+    process.exit(1);
+  }
+}
+function parsePositiveInt(value, name) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n <= 0) {
+    console.error(chalk11.red(`--${name} must be a positive integer, got "${value}".`));
+    process.exit(1);
+  }
+  return n;
+}
+function parseNonNegativeInt(value, name) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0) {
+    console.error(chalk11.red(`--${name} must be a non-negative integer, got "${value}".`));
+    process.exit(1);
+  }
+  return n;
+}
+function logProgress(message) {
+  console.error(message);
+}
+async function runWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const size = Math.max(1, Math.min(limit, items.length));
+  async function runOne() {
+    while (true) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index]);
+    }
+  }
+  await Promise.all(Array.from({ length: size }, () => runOne()));
+  return results;
+}
+
 // package.json
 var package_default = {
   name: "starling-ai",
-  version: "0.0.11",
+  version: "0.0.12",
   description: "Agent session manager \u2014 discover, bookmark, and organize AI coding sessions",
   type: "module",
   repository: {
@@ -6245,7 +6898,7 @@ var package_default = {
 };
 
 // src/index.ts
-var program = new Command8();
+var program = new Command9();
 program.enablePositionalOptions();
 program.name("starling").description("Agent session manager \u2014 discover, pin, and organize AI coding sessions").version(package_default.version);
 registerSessionCommand(program);
@@ -6255,6 +6908,7 @@ registerProjectCommand(program);
 registerRunCommand(program);
 registerModelCommand(program);
 registerConfigCommand(program);
+registerDiagnoseCommand(program);
 program.command("resume <session-id>").description("Resume an agent session directly").action(async (sessionId) => {
   await resumeSession(sessionId);
 });
