@@ -249,11 +249,8 @@ export function registerProjectCommand(program: Command): void {
           const short = shortSessionId(s.session_id);
           const agent = s.provider === "codex" ? "codex" : "claude";
           const date = s.modified_at.slice(0, 16).replace("T", " ");
-          const prompt = s.first_prompt
-            ? s.first_prompt.length > 40
-              ? s.first_prompt.slice(0, 37) + "…"
-              : s.first_prompt
-            : "";
+          const label = s.custom_title || s.first_prompt || "";
+          const prompt = label ? (label.length > 40 ? label.slice(0, 37) + "…" : label) : "";
           console.log(
             `  ${chalk.cyan(short)}  ${chalk.gray(agent.padEnd(7))}  ${(s.model || "-").padEnd(22)}  ${chalk.gray(date)}  ${chalk.gray(prompt)}`
           );

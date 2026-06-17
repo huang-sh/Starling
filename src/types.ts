@@ -42,6 +42,7 @@ export interface SessionMeta {
   model: string;
   project_path: string;
   first_prompt: string;
+  custom_title?: string;
   file_path: string;
   created_at: string;
   modified_at: string;

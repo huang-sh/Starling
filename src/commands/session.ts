@@ -592,7 +592,7 @@ function ensureSessionBookmark(
     id: generateBookmarkId(listBookmarks()),
     provider: meta.provider || "unknown",
     session_id: meta.session_id,
-    title: defaults.title ?? meta.first_prompt?.slice(0, 60) ?? meta.session_id.slice(0, 16),
+    title: defaults.title ?? meta.custom_title ?? meta.first_prompt?.slice(0, 60) ?? meta.session_id.slice(0, 16),
     category: "",
     tags: defaults.tags ?? [],
     project_path: meta.project_path ?? "",

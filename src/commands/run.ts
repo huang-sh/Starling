@@ -1514,7 +1514,7 @@ async function pinSessionToCatalog(session: SessionMeta, opts: RunOptions, space
 
   const now = new Date().toISOString();
   const bookmarkId = generateBookmarkId(listBookmarks());
-  const title = opts.title || session.first_prompt.slice(0, 60) || session.session_id.slice(0, 16);
+  const title = opts.title || session.custom_title || session.first_prompt.slice(0, 60) || session.session_id.slice(0, 16);
   const tagList = opts.tags ? opts.tags.split(",").map((tag) => tag.trim()).filter(Boolean) : [];
 
   addBookmark({

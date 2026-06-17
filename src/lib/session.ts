@@ -209,10 +209,17 @@ export function extractClaudeSessionMeta(
   let firstPrompt = "";
   const tokenUsage: TokenUsage = {};
   let hasTokenUsage = false;
+  let customTitle = "";
 
   for (const entry of entries) {
     if (entry.sessionId && typeof entry.sessionId === "string" && !sessionId) {
       sessionId = entry.sessionId;
+    }
+    // Claude writes a `custom-title` record (auto-generated topic slug, or a
+    // /rename value). Last record wins so a /rename is reflected.
+    if (entry.type === "custom-title") {
+      const t = entry.customTitle;
+      if (typeof t === "string" && t.trim()) customTitle = t.trim();
     }
     if (!model) {
       let candidate = "";
@@ -277,6 +284,7 @@ export function extractClaudeSessionMeta(
     created_at: modifiedAt,
     modified_at: modifiedAt,
     ...(hasTokenUsage ? { token_usage: tokenUsage } : {}),
+    ...(customTitle ? { custom_title: customTitle } : {}),
   };
 }
 

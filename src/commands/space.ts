@@ -169,7 +169,7 @@ export function registerSpaceCommand(program: Command): void {
         id: generateBookmarkId(listBookmarks()),
         provider: meta.provider || "unknown",
         session_id: meta.session_id,
-        title: opts.title ?? meta.first_prompt?.slice(0, 60) ?? meta.session_id.slice(0, 16),
+        title: opts.title ?? meta.custom_title ?? meta.first_prompt?.slice(0, 60) ?? meta.session_id.slice(0, 16),
         category: "",
         tags: opts.tags ? opts.tags.split(",").map((t) => t.trim()).filter(Boolean) : [],
         project_path: meta.project_path ?? "",

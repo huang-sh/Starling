@@ -191,9 +191,14 @@ function extractClaudeSessionMeta(entries, filePath, modifiedAt) {
   let firstPrompt = "";
   const tokenUsage = {};
   let hasTokenUsage = false;
+  let customTitle = "";
   for (const entry of entries) {
     if (entry.sessionId && typeof entry.sessionId === "string" && !sessionId) {
       sessionId = entry.sessionId;
+    }
+    if (entry.type === "custom-title") {
+      const t = entry.customTitle;
+      if (typeof t === "string" && t.trim()) customTitle = t.trim();
     }
     if (!model) {
       let candidate = "";
@@ -249,7 +254,8 @@ function extractClaudeSessionMeta(entries, filePath, modifiedAt) {
     file_path: filePath,
     created_at: modifiedAt,
     modified_at: modifiedAt,
-    ...hasTokenUsage ? { token_usage: tokenUsage } : {}
+    ...hasTokenUsage ? { token_usage: tokenUsage } : {},
+    ...customTitle ? { custom_title: customTitle } : {}
   };
 }
 function extractCodexSessionMeta(entries, filePath, modifiedAt) {
@@ -1613,7 +1619,7 @@ function ensureSessionBookmark(meta, defaults = {}) {
     id: generateBookmarkId(listBookmarks()),
     provider: meta.provider || "unknown",
     session_id: meta.session_id,
-    title: defaults.title ?? meta.first_prompt?.slice(0, 60) ?? meta.session_id.slice(0, 16),
+    title: defaults.title ?? meta.custom_title ?? meta.first_prompt?.slice(0, 60) ?? meta.session_id.slice(0, 16),
     category: "",
     tags: defaults.tags ?? [],
     project_path: meta.project_path ?? "",
@@ -1705,7 +1711,7 @@ function registerPinCommand(program2) {
       id: generateBookmarkId(listBookmarks()),
       provider: meta?.provider ?? "unknown",
       session_id: resolvedSessionId,
-      title: opts.title ?? meta?.first_prompt?.slice(0, 60) ?? resolvedSessionId.slice(0, 16),
+      title: opts.title ?? meta?.custom_title ?? meta?.first_prompt?.slice(0, 60) ?? resolvedSessionId.slice(0, 16),
       category: "",
       tags: opts.tags ? opts.tags.split(",").map((t) => t.trim()) : [],
       project_path: meta?.project_path ?? "",
@@ -1892,7 +1898,7 @@ ${chalk4.yellow(`Pins in ${row.name} (${row.id})`)}`);
       id: generateBookmarkId(listBookmarks()),
       provider: meta.provider || "unknown",
       session_id: meta.session_id,
-      title: opts.title ?? meta.first_prompt?.slice(0, 60) ?? meta.session_id.slice(0, 16),
+      title: opts.title ?? meta.custom_title ?? meta.first_prompt?.slice(0, 60) ?? meta.session_id.slice(0, 16),
       category: "",
       tags: opts.tags ? opts.tags.split(",").map((t) => t.trim()).filter(Boolean) : [],
       project_path: meta.project_path ?? "",
@@ -2321,7 +2327,8 @@ function registerProjectCommand(program2) {
         const short = shortSessionId(s.session_id);
         const agent = s.provider === "codex" ? "codex" : "claude";
         const date = s.modified_at.slice(0, 16).replace("T", " ");
-        const prompt = s.first_prompt ? s.first_prompt.length > 40 ? s.first_prompt.slice(0, 37) + "\u2026" : s.first_prompt : "";
+        const label = s.custom_title || s.first_prompt || "";
+        const prompt = label ? label.length > 40 ? label.slice(0, 37) + "\u2026" : label : "";
         console.log(
           `  ${chalk5.cyan(short)}  ${chalk5.gray(agent.padEnd(7))}  ${(s.model || "-").padEnd(22)}  ${chalk5.gray(date)}  ${chalk5.gray(prompt)}`
         );
@@ -5624,7 +5631,7 @@ async function pinSessionToCatalog(session, opts, space) {
   }
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const bookmarkId = generateBookmarkId(listBookmarks());
-  const title = opts.title || session.first_prompt.slice(0, 60) || session.session_id.slice(0, 16);
+  const title = opts.title || session.custom_title || session.first_prompt.slice(0, 60) || session.session_id.slice(0, 16);
   const tagList = opts.tags ? opts.tags.split(",").map((tag) => tag.trim()).filter(Boolean) : [];
   addBookmark({
     id: bookmarkId,
