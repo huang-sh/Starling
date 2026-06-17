@@ -6859,7 +6859,7 @@ async function runWithConcurrency(items, limit, worker) {
 // package.json
 var package_default = {
   name: "starling-ai",
-  version: "0.0.12",
+  version: "0.0.13",
   description: "Agent session manager \u2014 discover, bookmark, and organize AI coding sessions",
   type: "module",
   repository: {
