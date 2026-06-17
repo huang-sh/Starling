@@ -557,7 +557,7 @@ function formatSpaceTree(spaces, bookmarks) {
 }
 
 // src/utils/fs.ts
-import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, writeFileSync, renameSync, unlinkSync, mkdtempSync, chmodSync } from "fs";
+import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, writeFileSync, renameSync, unlinkSync, rmdirSync, mkdtempSync, chmodSync } from "fs";
 import { dirname, join as join3 } from "path";
 function ensureDir(filePath) {
   const dir = dirname(filePath);
@@ -571,7 +571,8 @@ function atomicWriteJSON(filePath, data) {
   const tmpDir = join3(dir, ".starling-tmp");
   if (!existsSync2(tmpDir)) mkdirSync(tmpDir, { recursive: true });
   const prefix = join3(tmpDir, "starling-");
-  const tmpPath = join3(mkdtempSync(prefix), "tmp.json");
+  const wrapperDir = mkdtempSync(prefix);
+  const tmpPath = join3(wrapperDir, "tmp.json");
   try {
     writeFileSync(tmpPath, JSON.stringify(data, null, 2), "utf-8");
     chmodSync(tmpPath, 384);
@@ -579,6 +580,10 @@ function atomicWriteJSON(filePath, data) {
   } finally {
     if (existsSync2(tmpPath)) {
       unlinkSync(tmpPath);
+    }
+    try {
+      rmdirSync(wrapperDir);
+    } catch {
     }
   }
 }

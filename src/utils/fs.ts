@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, mkdtempSync, chmodSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, rmdirSync, mkdtempSync, chmodSync } from "fs";
 import { dirname, join } from "path";
 
 export function ensureDir(filePath: string): void {
@@ -15,7 +15,8 @@ export function atomicWriteJSON(filePath: string, data: unknown): void {
   const tmpDir = join(dir, ".starling-tmp");
   if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
   const prefix = join(tmpDir, "starling-");
-  const tmpPath = join(mkdtempSync(prefix), "tmp.json");
+  const wrapperDir = mkdtempSync(prefix);
+  const tmpPath = join(wrapperDir, "tmp.json");
   try {
     writeFileSync(tmpPath, JSON.stringify(data, null, 2), "utf-8");
     chmodSync(tmpPath, 0o600);
@@ -23,6 +24,14 @@ export function atomicWriteJSON(filePath: string, data: unknown): void {
   } finally {
     if (existsSync(tmpPath)) {
       unlinkSync(tmpPath);
+    }
+    // mkdtempSync created an empty wrapper directory; remove it whether or not
+    // the rename succeeded. Best-effort — ignore errors if another concurrent
+    // writer is touching the same wrapper.
+    try {
+      rmdirSync(wrapperDir);
+    } catch {
+      // leave it for a later write to clean up; not worth failing the operation
     }
   }
 }
