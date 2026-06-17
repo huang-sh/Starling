@@ -1,5 +1,5 @@
 import { readdirSync, statSync } from "fs";
-import { join } from "path";
+import { join, basename } from "path";
 import { CLAUDE_SESSIONS_DIR, CODEX_SESSIONS_DIR } from "../constants.js";
 import { parseJsonlHead, extractClaudeSessionMeta, extractCodexSessionMeta } from "./session.js";
 import type { SessionMeta } from "../types.js";
@@ -163,7 +163,7 @@ async function collectSessionCandidatesByFilename(sessionId: string): Promise<Se
 
   for (const filePath of matchedFiles) {
     try {
-      const fileName = filePath.split("/").pop() ?? "";
+      const fileName = basename(filePath);
       let provider: Provider = "claude";
       if (filePath.includes(CODEX_SESSIONS_DIR)) {
         provider = "codex";

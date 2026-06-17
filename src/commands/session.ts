@@ -65,7 +65,7 @@ export function registerSessionCommand(program: Command): void {
         }
 
         const header = `${"SESSION".padEnd(15)}  ${"AGENT".padEnd(7)}  ${"MODEL".padEnd(18)}  ${"PROJECT".padEnd(42)}  MODIFIED  ${"INPUT".padEnd(10)} ${"OUTPUT".padEnd(10)} ${"TOTAL".padEnd(10)} ${"CACHE".padEnd(10)}\n${"─".repeat(145)}`;
-        const usePager = process.stdout.isTTY;
+        const usePager = process.stdout.isTTY && process.platform !== "win32";
         const pager = usePager ? spawn("less", ["-RFX"], { stdio: ["pipe", "inherit", "inherit"] }) : null;
         let pipeBroken = false;
 

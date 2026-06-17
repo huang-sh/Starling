@@ -1,27 +1,28 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { normalize } from "path";
 
 const stats = new Map<string, { mtimeMs: number; directory: boolean }>();
 const children = new Map<string, string[]>();
 const statCalls: string[] = [];
 
 function addDir(path: string, mtimeMs: number, names: string[]): void {
-  stats.set(path, { mtimeMs, directory: true });
-  children.set(path, names);
+  stats.set(normalize(path), { mtimeMs, directory: true });
+  children.set(normalize(path), names);
 }
 
 function addFile(path: string, mtimeMs: number): void {
-  stats.set(path, { mtimeMs, directory: false });
+  stats.set(normalize(path), { mtimeMs, directory: false });
 }
 
 vi.mock("fs", () => ({
   readdirSync: vi.fn((dir: string) => {
-    const names = children.get(dir);
+    const names = children.get(normalize(dir));
     if (!names) throw new Error(`missing directory: ${dir}`);
     return names;
   }),
   statSync: vi.fn((path: string) => {
     statCalls.push(path);
-    const st = stats.get(path);
+    const st = stats.get(normalize(path));
     if (!st) throw new Error(`missing stat: ${path}`);
     return {
       mtimeMs: st.mtimeMs,
@@ -30,15 +31,18 @@ vi.mock("fs", () => ({
   }),
 }));
 
-vi.mock("../src/constants.js", () => ({
-  CLAUDE_SESSIONS_DIR: "/sessions/claude",
-  CODEX_SESSIONS_DIR: "/sessions/codex",
-}));
+vi.mock("../src/constants.js", () => {
+  const { normalize } = require("path") as typeof import("path");
+  return {
+    CLAUDE_SESSIONS_DIR: normalize("/sessions/claude"),
+    CODEX_SESSIONS_DIR: normalize("/sessions/codex"),
+  };
+});
 
 vi.mock("../src/lib/session.js", () => ({
   parseJsonlHead: vi.fn(async () => []),
   extractClaudeSessionMeta: vi.fn((_entries, filePath: string, modifiedAt: string) => ({
-    session_id: filePath.split("/").pop()?.replace(".jsonl", "") ?? filePath,
+    session_id: filePath.split(/[\\/]/).pop()?.replace(".jsonl", "") ?? filePath,
     provider: "claude",
     model: "",
     project_path: "",
@@ -48,7 +52,7 @@ vi.mock("../src/lib/session.js", () => ({
     modified_at: modifiedAt,
   })),
   extractCodexSessionMeta: vi.fn((_entries, filePath: string, modifiedAt: string) => ({
-    session_id: filePath.split("/").pop()?.replace(".jsonl", "") ?? filePath,
+    session_id: filePath.split(/[\\/]/).pop()?.replace(".jsonl", "") ?? filePath,
     provider: "codex",
     model: "",
     project_path: "",
@@ -90,7 +94,7 @@ describe("findSessions", () => {
   });
 
   it("findSessionCandidates returns all matching sessions", async () => {
-    const claudeTop = children.get("/sessions/claude");
+    const claudeTop = children.get(normalize("/sessions/claude"));
     if (!claudeTop) throw new Error("missing mocked dir");
     claudeTop.push("match-proj");
 

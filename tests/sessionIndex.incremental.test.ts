@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { normalize } from "path";
 
 const files = new Map<string, string>();
 const stats = new Map<string, { mtimeMs: number; directory: boolean }>();
@@ -8,30 +9,38 @@ const statCalls: string[] = [];
 let writtenJson: unknown = null;
 let writeError: Error | null = null;
 
+function key(path: string): string {
+  return normalize(path);
+}
+
+/** Normalize a POSIX-style test path so it matches what `path.join` produces on the current platform. */
+const p = (path: string): string => normalize(path);
+
 function addDir(path: string, names: string[]): void {
-  stats.set(path, { mtimeMs: 1, directory: true });
-  children.set(path, names);
+  const k = key(path);
+  stats.set(k, { mtimeMs: 1, directory: true });
+  children.set(k, names);
 }
 
 function addFile(path: string, mtimeMs: number): void {
-  stats.set(path, { mtimeMs, directory: false });
+  stats.set(key(path), { mtimeMs, directory: false });
 }
 
 vi.mock("fs", () => ({
-  existsSync: vi.fn((path: string) => files.has(path) || stats.has(path)),
+  existsSync: vi.fn((path: string) => files.has(key(path)) || stats.has(key(path))),
   readFileSync: vi.fn((path: string) => {
-    const content = files.get(path);
+    const content = files.get(key(path));
     if (content === undefined) throw new Error(`missing file: ${path}`);
     return content;
   }),
   readdirSync: vi.fn((path: string) => {
-    const names = children.get(path);
+    const names = children.get(key(path));
     if (!names) throw new Error(`missing directory: ${path}`);
     return names;
   }),
   statSync: vi.fn((path: string) => {
     statCalls.push(path);
-    const st = stats.get(path);
+    const st = stats.get(key(path));
     if (!st) throw new Error(`missing stat: ${path}`);
     return {
       mtimeMs: st.mtimeMs,
@@ -41,11 +50,14 @@ vi.mock("fs", () => ({
   unlinkSync: vi.fn(),
 }));
 
-vi.mock("../src/constants.js", () => ({
-  CLAUDE_SESSIONS_DIR: "/sessions/claude",
-  CODEX_SESSIONS_DIR: "/sessions/codex",
-  DEFAULT_STARLING_HOME: "/starling",
-}));
+vi.mock("../src/constants.js", () => {
+  const { normalize } = require("path") as typeof import("path");
+  return {
+    CLAUDE_SESSIONS_DIR: normalize("/sessions/claude"),
+    CODEX_SESSIONS_DIR: normalize("/sessions/codex"),
+    DEFAULT_STARLING_HOME: normalize("/starling"),
+  };
+});
 
 vi.mock("../src/utils/fs.js", () => ({
   atomicWriteJSON: vi.fn((_path: string, value: unknown) => {
@@ -64,7 +76,7 @@ vi.mock("../src/lib/session.js", () => ({
     return [];
   }),
   extractClaudeSessionMeta: vi.fn((_entries, filePath: string, modifiedAt: string) => ({
-    session_id: filePath.split("/").pop()?.replace(".jsonl", "") ?? filePath,
+    session_id: filePath.split(/[\\/]/).pop()?.replace(".jsonl", "") ?? filePath,
     provider: "claude",
     model: "claude-test",
     project_path: "/work/new",
@@ -74,7 +86,7 @@ vi.mock("../src/lib/session.js", () => ({
     modified_at: modifiedAt,
   })),
   extractCodexSessionMeta: vi.fn((_entries, filePath: string, modifiedAt: string) => ({
-    session_id: filePath.split("/").pop()?.replace(".jsonl", "") ?? filePath,
+    session_id: filePath.split(/[\\/]/).pop()?.replace(".jsonl", "") ?? filePath,
     provider: "codex",
     model: "codex-test",
     project_path: "/work/new",
@@ -96,7 +108,7 @@ describe("loadSessionIndexWithNewFiles", () => {
     writeError = null;
 
     files.set(
-      "/starling/session-index.json",
+      p("/starling/session-index.json"),
       JSON.stringify({
         version: 1,
         built_at: "2026-01-01T00:00:00.000Z",
@@ -109,19 +121,19 @@ describe("loadSessionIndexWithNewFiles", () => {
             model: "claude-old",
             project_path: "/work/old",
             first_prompt: "",
-            file_path: "/sessions/claude/project/existing.jsonl",
+            file_path: p("/sessions/claude/project/existing.jsonl"),
             created_at: "2026-01-01T00:00:00.000Z",
             modified_at: "2026-01-01T00:00:00.000Z",
           },
         ],
       })
     );
-    addFile("/starling/session-index.json", 100);
-    addDir("/sessions/claude", ["project"]);
-    addDir("/sessions/claude/project", ["existing.jsonl", "new.jsonl"]);
-    addFile("/sessions/claude/project/existing.jsonl", 200);
-    addFile("/sessions/claude/project/new.jsonl", 300);
-    addDir("/sessions/codex", []);
+    addFile(p("/starling/session-index.json"), 100);
+    addDir(p("/sessions/claude"), ["project"]);
+    addDir(p("/sessions/claude/project"), ["existing.jsonl", "new.jsonl"]);
+    addFile(p("/sessions/claude/project/existing.jsonl"), 200);
+    addFile(p("/sessions/claude/project/new.jsonl"), 300);
+    addDir(p("/sessions/codex"), []);
   });
 
   it("parses only new session files and persists the updated index", async () => {
@@ -129,7 +141,7 @@ describe("loadSessionIndexWithNewFiles", () => {
 
     const index = await loadSessionIndexWithNewFiles();
 
-    expect(parsedFiles).toEqual(["head:/sessions/claude/project/new.jsonl"]);
+    expect(parsedFiles).toEqual([`head:${p("/sessions/claude/project/new.jsonl")}`]);
     expect(index.session_count).toBe(2);
     expect(index.project_count).toBe(2);
     expect(index.sessions.map((session) => session.session_id).sort()).toEqual(["existing", "new"]);
@@ -147,7 +159,7 @@ describe("loadSessionIndexWithNewFiles", () => {
 
     const index = await loadSessionIndexWithNewFiles();
 
-    expect(parsedFiles).toEqual(["head:/sessions/claude/project/new.jsonl"]);
+    expect(parsedFiles).toEqual([`head:${p("/sessions/claude/project/new.jsonl")}`]);
     expect(index.session_count).toBe(2);
     expect(index.project_count).toBe(2);
     expect(index.sessions.map((session) => session.session_id).sort()).toEqual(["existing", "new"]);
@@ -157,13 +169,13 @@ describe("loadSessionIndexWithNewFiles", () => {
   });
 
   it("refreshes indexed sessions by id when their files changed", async () => {
-    addDir("/sessions/claude/project", ["existing.jsonl"]);
-    addFile("/sessions/claude/project/existing.jsonl", Date.parse("2026-01-02T00:00:00.000Z"));
+    addDir(p("/sessions/claude/project"), ["existing.jsonl"]);
+    addFile(p("/sessions/claude/project/existing.jsonl"), Date.parse("2026-01-02T00:00:00.000Z"));
     const { refreshIndexedSessionsById } = await import("../src/lib/sessionIndex.js");
 
     const index = await refreshIndexedSessionsById(["existing"]);
 
-    expect(parsedFiles).toEqual(["head:/sessions/claude/project/existing.jsonl"]);
+    expect(parsedFiles).toEqual([`head:${p("/sessions/claude/project/existing.jsonl")}`]);
     expect(index.session_count).toBe(1);
     expect(index.sessions[0].modified_at).toBe("2026-01-02T00:00:00.000Z");
     expect(writtenJson).toMatchObject({
@@ -175,7 +187,7 @@ describe("loadSessionIndexWithNewFiles", () => {
 
   it("skips ordinary files in unchanged indexed directories", async () => {
     files.set(
-      "/starling/session-index.json",
+      p("/starling/session-index.json"),
       JSON.stringify({
         version: 1,
         built_at: "2026-01-01T00:00:00.000Z",
@@ -188,7 +200,7 @@ describe("loadSessionIndexWithNewFiles", () => {
             model: "claude-old",
             project_path: "/work/old",
             first_prompt: "",
-            file_path: "/sessions/claude/project/existing.jsonl",
+            file_path: p("/sessions/claude/project/existing.jsonl"),
             created_at: "2026-01-01T00:00:00.000Z",
             modified_at: "2026-01-01T00:00:00.000Z",
           },
@@ -197,31 +209,31 @@ describe("loadSessionIndexWithNewFiles", () => {
           {
             session_id: "existing",
             provider: "claude",
-            path: "/sessions/claude/project/existing.jsonl",
+            path: p("/sessions/claude/project/existing.jsonl"),
             mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
           },
         ],
         directories: [
-          { provider: "claude", path: "/sessions/claude", mtimeMs: 1 },
-          { provider: "claude", path: "/sessions/claude/project", mtimeMs: 1 },
-          { provider: "codex", path: "/sessions/codex", mtimeMs: 1 },
+          { provider: "claude", path: p("/sessions/claude"), mtimeMs: 1 },
+          { provider: "claude", path: p("/sessions/claude/project"), mtimeMs: 1 },
+          { provider: "codex", path: p("/sessions/codex"), mtimeMs: 1 },
         ],
       })
     );
-    addFile("/sessions/claude/project/existing.jsonl", Date.parse("2026-01-02T00:00:00.000Z"));
+    addFile(p("/sessions/claude/project/existing.jsonl"), Date.parse("2026-01-02T00:00:00.000Z"));
     const { loadSessionIndexWithNewFiles } = await import("../src/lib/sessionIndex.js");
 
     const index = await loadSessionIndexWithNewFiles();
 
     expect(index.session_count).toBe(1);
     expect(parsedFiles).toEqual([]);
-    expect(statCalls).not.toContain("/sessions/claude/project/existing.jsonl");
+    expect(statCalls).not.toContain(p("/sessions/claude/project/existing.jsonl"));
     expect(writtenJson).toBeNull();
   });
 
   it("fully parses matched sessions when refreshing exact session candidates", async () => {
     files.set(
-      "/starling/session-index.json",
+      p("/starling/session-index.json"),
       JSON.stringify({
         version: 1,
         built_at: "2026-01-01T00:00:00.000Z",
@@ -234,7 +246,7 @@ describe("loadSessionIndexWithNewFiles", () => {
             model: "claude-old",
             project_path: "/work/old",
             first_prompt: "",
-            file_path: "/sessions/claude/project/existing.jsonl",
+            file_path: p("/sessions/claude/project/existing.jsonl"),
             created_at: "2026-01-01T00:00:00.000Z",
             modified_at: "2026-01-01T00:00:00.000Z",
           },
@@ -243,23 +255,23 @@ describe("loadSessionIndexWithNewFiles", () => {
           {
             session_id: "existing",
             provider: "claude",
-            path: "/sessions/claude/project/existing.jsonl",
+            path: p("/sessions/claude/project/existing.jsonl"),
             mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
           },
         ],
         directories: [
-          { provider: "claude", path: "/sessions/claude", mtimeMs: 1 },
-          { provider: "claude", path: "/sessions/claude/project", mtimeMs: 1 },
+          { provider: "claude", path: p("/sessions/claude"), mtimeMs: 1 },
+          { provider: "claude", path: p("/sessions/claude/project"), mtimeMs: 1 },
         ],
       })
     );
-    addDir("/sessions/claude/project", ["existing.jsonl"]);
-    addFile("/sessions/claude/project/existing.jsonl", Date.parse("2026-01-01T00:00:00.000Z"));
+    addDir(p("/sessions/claude/project"), ["existing.jsonl"]);
+    addFile(p("/sessions/claude/project/existing.jsonl"), Date.parse("2026-01-01T00:00:00.000Z"));
     const { findIndexedSessionById } = await import("../src/lib/sessionIndex.js");
 
     const session = await findIndexedSessionById("existing");
 
     expect(session?.session_id).toBe("existing");
-    expect(parsedFiles).toEqual(["full:/sessions/claude/project/existing.jsonl"]);
+    expect(parsedFiles).toEqual([`full:${p("/sessions/claude/project/existing.jsonl")}`]);
   });
 });

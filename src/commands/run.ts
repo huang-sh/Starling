@@ -380,7 +380,7 @@ function createClaudeRunHookSettings(configPath: string | null): ClaudeRunHook |
     hooks: [
       {
         type: "command",
-        command: `bash -c 'cat >> "$1"; printf "\\n" >> "$1"' _ ${shellQuote(eventsPath)}`,
+        command: hookAppendCommand(eventsPath),
       },
     ],
   });
@@ -486,7 +486,7 @@ function codexSessionStartHookToml(eventsPath: string): string {
     "",
     "[[hooks.SessionStart.hooks]]",
     'type = "command"',
-    `command = ${JSON.stringify(`bash -c 'cat >> "$1"; printf "\\n" >> "$1"' _ ${shellQuote(eventsPath)}`)}`,
+    `command = ${JSON.stringify(hookAppendCommand(eventsPath))}`,
     "timeout = 5",
   ].join("\n") + "\n";
 }
@@ -696,6 +696,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function hookAppendCommand(eventsPath: string): string {
+  const script = "const fs=require('fs');const d=[];process.stdin.on('data',c=>d.push(c));process.stdin.on('end',()=>{fs.appendFileSync(process.argv[1],Buffer.concat(d).toString()+'\\n')})";
+  return `node -e ${JSON.stringify(script)} ${eventsPath}`;
 }
 
 function resolveConfigFilePath(provider: AgentProvider, configFile?: string): string | null {

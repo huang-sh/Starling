@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { readdirSync, statSync } from "fs";
+import { normalize } from "path";
 
 const files = new Map<string, string>();
 const stats = new Map<string, { mtimeMs: number; directory: boolean }>();
@@ -8,18 +9,24 @@ const parsedFiles: string[] = [];
 const statCalls: string[] = [];
 let writtenJson: unknown = null;
 
+function key(path: string): string {
+  return normalize(path);
+}
+
 function addDir(path: string, names: string[], mtimeMs = 1): void {
-  stats.set(path, { mtimeMs, directory: true });
-  children.set(path, names);
+  const k = key(path);
+  stats.set(k, { mtimeMs, directory: true });
+  children.set(k, names);
 }
 
 function addFile(path: string, mtimeMs: number): void {
-  stats.set(path, { mtimeMs, directory: false });
+  stats.set(key(path), { mtimeMs, directory: false });
 }
 
 function setIndex(builtAt: string, sessions: unknown[], directories: unknown[] = [], filesList: unknown[] = []): void {
+  const indexPath = key("/starling/session-index.json");
   files.set(
-    "/starling/session-index.json",
+    indexPath,
     JSON.stringify({
       version: 1,
       built_at: builtAt,
@@ -30,35 +37,38 @@ function setIndex(builtAt: string, sessions: unknown[], directories: unknown[] =
       directories,
     })
   );
-  addFile("/starling/session-index.json", Date.parse(builtAt) || 1);
+  addFile(indexPath, Date.parse(builtAt) || 1);
 }
 
 vi.mock("fs", () => ({
-  existsSync: vi.fn((path: string) => files.has(path) || stats.has(path)),
+  existsSync: vi.fn((path: string) => files.has(key(path)) || stats.has(key(path))),
   readFileSync: vi.fn((path: string) => {
-    const content = files.get(path);
+    const content = files.get(key(path));
     if (content === undefined) throw new Error(`missing file: ${path}`);
     return content;
   }),
   readdirSync: vi.fn((path: string) => {
-    const names = children.get(path);
+    const names = children.get(key(path));
     if (!names) throw new Error(`missing directory: ${path}`);
     return names;
   }),
   statSync: vi.fn((path: string) => {
     statCalls.push(path);
-    const st = stats.get(path);
+    const st = stats.get(key(path));
     if (!st) throw new Error(`missing stat: ${path}`);
     return { mtimeMs: st.mtimeMs, isDirectory: () => st.directory };
   }),
   unlinkSync: vi.fn(),
 }));
 
-vi.mock("../src/constants.js", () => ({
-  CLAUDE_SESSIONS_DIR: "/sessions/claude",
-  CODEX_SESSIONS_DIR: "/sessions/codex",
-  DEFAULT_STARLING_HOME: "/starling",
-}));
+vi.mock("../src/constants.js", () => {
+  const { normalize } = require("path") as typeof import("path");
+  return {
+    CLAUDE_SESSIONS_DIR: normalize("/sessions/claude"),
+    CODEX_SESSIONS_DIR: normalize("/sessions/codex"),
+    DEFAULT_STARLING_HOME: normalize("/starling"),
+  };
+});
 
 vi.mock("../src/utils/fs.js", () => ({
   atomicWriteJSON: vi.fn((_path: string, value: unknown) => {
@@ -76,7 +86,7 @@ vi.mock("../src/lib/session.js", () => ({
     return [];
   }),
   extractClaudeSessionMeta: vi.fn((_entries, filePath: string, modifiedAt: string) => ({
-    session_id: filePath.split("/").pop()?.replace(".jsonl", "") ?? filePath,
+    session_id: filePath.split(/[\\/]/).pop()?.replace(".jsonl", "") ?? filePath,
     provider: "claude",
     model: "claude-test",
     project_path: "/work/new",
@@ -86,7 +96,7 @@ vi.mock("../src/lib/session.js", () => ({
     modified_at: modifiedAt,
   })),
   extractCodexSessionMeta: vi.fn((_entries, filePath: string, modifiedAt: string) => ({
-    session_id: filePath.split("/").pop()?.replace(".jsonl", "") ?? filePath,
+    session_id: filePath.split(/[\\/]/).pop()?.replace(".jsonl", "") ?? filePath,
     provider: "codex",
     model: "codex-test",
     project_path: "/work/new",
@@ -103,7 +113,7 @@ const claudeSession = (id: string) => ({
   model: "claude-old",
   project_path: "/work/old",
   first_prompt: "",
-  file_path: `/sessions/claude/project/${id}.jsonl`,
+  file_path: normalize(`/sessions/claude/project/${id}.jsonl`),
   created_at: "2026-01-01T00:00:00.000Z",
   modified_at: "2026-01-01T00:00:00.000Z",
 });
@@ -114,7 +124,7 @@ const codexSession = (id: string) => ({
   model: "codex-old",
   project_path: "/work/old",
   first_prompt: "",
-  file_path: `/sessions/codex/${id}.jsonl`,
+  file_path: normalize(`/sessions/codex/${id}.jsonl`),
   created_at: "2026-01-01T00:00:00.000Z",
   modified_at: "2026-01-01T00:00:00.000Z",
 });
@@ -136,8 +146,8 @@ describe("isSessionIndexFresh", () => {
     const fresh = isSessionIndexFresh();
 
     expect(fresh).toBe(true);
-    expect(statCalls).not.toContain("/sessions/claude");
-    expect(statCalls).not.toContain("/sessions/codex");
+    expect(statCalls).not.toContain(normalize("/sessions/claude"));
+    expect(statCalls).not.toContain(normalize("/sessions/codex"));
   });
 
   it("returns true when TTL elapsed but root mtime is not newer than built_at", async () => {
@@ -150,8 +160,8 @@ describe("isSessionIndexFresh", () => {
     const fresh = isSessionIndexFresh(undefined, Date.parse("2026-03-01T00:00:00.000Z"));
 
     expect(fresh).toBe(true);
-    expect(statCalls).toContain("/sessions/claude");
-    expect(statCalls).toContain("/sessions/codex");
+    expect(statCalls).toContain(normalize("/sessions/claude"));
+    expect(statCalls).toContain(normalize("/sessions/codex"));
   });
 
   it("returns false when a session root is newer than built_at", async () => {
@@ -183,8 +193,8 @@ describe("isSessionIndexFresh", () => {
     const fresh = isSessionIndexFresh("claude", Date.parse("2026-03-01T00:00:00.000Z"));
 
     expect(fresh).toBe(true);
-    expect(statCalls).toContain("/sessions/claude");
-    expect(statCalls).not.toContain("/sessions/codex");
+    expect(statCalls).toContain(normalize("/sessions/claude"));
+    expect(statCalls).not.toContain(normalize("/sessions/codex"));
   });
 });
 
@@ -274,7 +284,7 @@ describe("lookupIndexedSessions slow path", () => {
     // touches the directory tree, the new file gets parsed, and the index is
     // rewritten at most once.
     expect(vi.mocked(readdirSync)).toHaveBeenCalled();
-    expect(parsedFiles).toEqual(["head:/sessions/claude/project/fresh.jsonl"]);
+    expect(parsedFiles).toEqual([`head:${normalize("/sessions/claude/project/fresh.jsonl")}`]);
     expect(writtenJson).toMatchObject({ version: 1 });
     // Existing session is still resolvable after refresh.
     expect(result.get("existing")).toBeTruthy();

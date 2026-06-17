@@ -30,7 +30,7 @@ describe("constants", () => {
     const module = await import("../src/constants.js");
 
     expect(module.DEFAULT_STARLING_HOME).toBe("/data/starling-home");
-    expect(module.DEFAULT_STORE_PATH).toBe("/data/starling-home/store.json");
+    expect(module.DEFAULT_STORE_PATH).toBe(join("/data/starling-home", "store.json"));
   });
 
   it("uses the persisted CLI home setting when STARLING_HOME is not set", async () => {
@@ -39,7 +39,7 @@ describe("constants", () => {
 
     expect(module.STARLING_HOME_SOURCE).toBe("config");
     expect(module.DEFAULT_STARLING_HOME).toBe("/data/starling-config-home");
-    expect(module.DEFAULT_STORE_PATH).toBe("/data/starling-config-home/store.json");
+    expect(module.DEFAULT_STORE_PATH).toBe(join("/data/starling-config-home", "store.json"));
   });
 
   it("expands tilde in STARLING_HOME", async () => {

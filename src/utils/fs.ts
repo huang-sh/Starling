@@ -15,7 +15,7 @@ export function atomicWriteJSON(filePath: string, data: unknown): void {
   const tmpDir = join(dir, ".starling-tmp");
   if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
   const prefix = join(tmpDir, "starling-");
-  const tmpPath = mkdtempSync(prefix) + "/tmp.json";
+  const tmpPath = join(mkdtempSync(prefix), "tmp.json");
   try {
     writeFileSync(tmpPath, JSON.stringify(data, null, 2), "utf-8");
     chmodSync(tmpPath, 0o600);

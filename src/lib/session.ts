@@ -1,4 +1,5 @@
 import { createReadStream } from "fs";
+import { basename } from "path";
 import { createInterface } from "readline";
 import type { SessionMeta } from "../types.js";
 
@@ -269,8 +270,7 @@ export function extractClaudeSessionMeta(
   }
 
   if (!sessionId) {
-    const parts = filePath.split("/");
-    const filename = parts[parts.length - 1].replace(".jsonl", "");
+    const filename = basename(filePath).replace(".jsonl", "");
     sessionId = filename;
   }
 
@@ -334,8 +334,7 @@ export function extractCodexSessionMeta(
   }
 
   if (!sessionId) {
-    const parts = filePath.split("/");
-    const filename = parts[parts.length - 1].replace(".jsonl", "");
+    const filename = basename(filePath).replace(".jsonl", "");
     sessionId = filename;
   }
 

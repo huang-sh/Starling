@@ -11,7 +11,7 @@ import { existsSync as existsSync4, unlinkSync as unlinkSync3 } from "fs";
 
 // src/lib/discovery.ts
 import { readdirSync, statSync } from "fs";
-import { join as join2 } from "path";
+import { join as join2, basename as basename2 } from "path";
 
 // src/constants.ts
 import { existsSync, readFileSync } from "fs";
@@ -52,6 +52,7 @@ var ENV_CONFIG_KEY = "STARLING_CONFIG";
 
 // src/lib/session.ts
 import { createReadStream } from "fs";
+import { basename } from "path";
 import { createInterface } from "readline";
 function isRecord(value) {
   return typeof value === "object" && value !== null;
@@ -241,8 +242,7 @@ function extractClaudeSessionMeta(entries, filePath, modifiedAt) {
     }
   }
   if (!sessionId) {
-    const parts = filePath.split("/");
-    const filename = parts[parts.length - 1].replace(".jsonl", "");
+    const filename = basename(filePath).replace(".jsonl", "");
     sessionId = filename;
   }
   return {
@@ -289,8 +289,7 @@ function extractCodexSessionMeta(entries, filePath, modifiedAt) {
     }
   }
   if (!sessionId) {
-    const parts = filePath.split("/");
-    const filename = parts[parts.length - 1].replace(".jsonl", "");
+    const filename = basename(filePath).replace(".jsonl", "");
     sessionId = filename;
   }
   return {
@@ -418,7 +417,7 @@ async function collectSessionCandidatesByFilename(sessionId) {
   }
   for (const filePath of matchedFiles) {
     try {
-      const fileName = filePath.split("/").pop() ?? "";
+      const fileName = basename2(filePath);
       let provider = "claude";
       if (filePath.includes(CODEX_SESSIONS_DIR)) {
         provider = "codex";
@@ -572,7 +571,7 @@ function atomicWriteJSON(filePath, data) {
   const tmpDir = join3(dir, ".starling-tmp");
   if (!existsSync2(tmpDir)) mkdirSync(tmpDir, { recursive: true });
   const prefix = join3(tmpDir, "starling-");
-  const tmpPath = mkdtempSync(prefix) + "/tmp.json";
+  const tmpPath = join3(mkdtempSync(prefix), "tmp.json");
   try {
     writeFileSync(tmpPath, JSON.stringify(data, null, 2), "utf-8");
     chmodSync(tmpPath, 384);
@@ -1219,7 +1218,7 @@ function registerSessionCommand(program2) {
       }
       const header = `${"SESSION".padEnd(15)}  ${"AGENT".padEnd(7)}  ${"MODEL".padEnd(18)}  ${"PROJECT".padEnd(42)}  MODIFIED  ${"INPUT".padEnd(10)} ${"OUTPUT".padEnd(10)} ${"TOTAL".padEnd(10)} ${"CACHE".padEnd(10)}
 ${"\u2500".repeat(145)}`;
-      const usePager = process.stdout.isTTY;
+      const usePager = process.stdout.isTTY && process.platform !== "win32";
       const pager = usePager ? spawn("less", ["-RFX"], { stdio: ["pipe", "inherit", "inherit"] }) : null;
       let pipeBroken = false;
       if (pager) {
@@ -2345,11 +2344,11 @@ import { randomUUID as randomUUID3 } from "crypto";
 import { chmodSync as chmodSync5, existsSync as existsSync7, readFileSync as readFileSync7, readdirSync as readdirSync4, statSync as statSync4, unlinkSync as unlinkSync7, writeFileSync as writeFileSync5 } from "fs";
 import { createInterface as createInterface3 } from "readline/promises";
 import { spawn as spawn2 } from "child_process";
-import { basename as basename2, extname as extname4, isAbsolute as isAbsolute2, join as join8, resolve as resolve2 } from "path";
+import { basename as basename4, extname as extname4, isAbsolute as isAbsolute2, join as join8, resolve as resolve2 } from "path";
 
 // src/lib/codexProvider.ts
 import { existsSync as existsSync5, readFileSync as readFileSync4, readdirSync as readdirSync3, writeFileSync as writeFileSync2, chmodSync as chmodSync2, unlinkSync as unlinkSync4, renameSync as renameSync2 } from "fs";
-import { basename, extname as extname2, isAbsolute, join as join5, resolve } from "path";
+import { basename as basename3, extname as extname2, isAbsolute, join as join5, resolve } from "path";
 
 // src/lib/configPaths.ts
 import { extname } from "path";
@@ -2366,7 +2365,7 @@ function getCodexProviderProfile(profileName) {
   const sourcePath = resolveCodexConfigPath(profileName);
   if (!sourcePath) return null;
   const extension = extname2(sourcePath).toLowerCase();
-  const name = basename(sourcePath, extension);
+  const name = basename3(sourcePath, extension);
   const parsed = inspectCodexProfile(sourcePath);
   return {
     name,
@@ -2399,7 +2398,7 @@ function resolveCodexConfigPath(nameOrPath) {
     }
     return resolve(nameOrPath);
   }
-  const base = join5(DEFAULT_CODEX_SETTINGS_DIR, basename(nameOrPath));
+  const base = join5(DEFAULT_CODEX_SETTINGS_DIR, basename3(nameOrPath));
   if (hasKnownConfigExtension(base, CODEX_PROVIDER_EXTENSIONS) && existsSync5(base)) return base;
   if (hasKnownConfigExtension(base, CODEX_PROVIDER_EXTENSIONS)) return null;
   for (const ext of CODEX_PROVIDER_EXTENSIONS) {
@@ -2612,7 +2611,7 @@ function deepMerge(target, patch) {
   }
 }
 function normalizeProfileName(profileName) {
-  const name = basename(profileName).replace(/\.(jsonc?|toml)$/i, "").trim();
+  const name = basename3(profileName).replace(/\.(jsonc?|toml)$/i, "").trim();
   if (!name || name === "." || name === "..") {
     throw new Error(`Invalid codex provider name: ${profileName}`);
   }
@@ -4733,7 +4732,7 @@ function createClaudeRunHookSettings(configPath) {
     hooks: [
       {
         type: "command",
-        command: `bash -c 'cat >> "$1"; printf "\\n" >> "$1"' _ ${shellQuote(eventsPath)}`
+        command: hookAppendCommand(eventsPath)
       }
     ]
   });
@@ -4824,7 +4823,7 @@ function codexSessionStartHookToml(eventsPath) {
     "",
     "[[hooks.SessionStart.hooks]]",
     'type = "command"',
-    `command = ${JSON.stringify(`bash -c 'cat >> "$1"; printf "\\n" >> "$1"' _ ${shellQuote(eventsPath)}`)}`,
+    `command = ${JSON.stringify(hookAppendCommand(eventsPath))}`,
     "timeout = 5"
   ].join("\n") + "\n";
 }
@@ -5001,8 +5000,9 @@ function cloneJsonValue(value) {
 function isRecord6(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function shellQuote(value) {
-  return `'${value.replace(/'/g, "'\\''")}'`;
+function hookAppendCommand(eventsPath) {
+  const script = "const fs=require('fs');const d=[];process.stdin.on('data',c=>d.push(c));process.stdin.on('end',()=>{fs.appendFileSync(process.argv[1],Buffer.concat(d).toString()+'\\n')})";
+  return `node -e ${JSON.stringify(script)} ${eventsPath}`;
 }
 function resolveConfigFilePath(provider, configFile) {
   if (!configFile) return null;
@@ -5014,7 +5014,7 @@ function resolveConfigFilePath(provider, configFile) {
     return configFile;
   }
   const baseDir = provider === "claude" ? DEFAULT_CLAUDE_SETTINGS_DIR : DEFAULT_CODEX_SETTINGS_DIR;
-  const fileName = basename2(configFile);
+  const fileName = basename4(configFile);
   const candidate = join8(baseDir, fileName);
   if (existsSync7(candidate)) return candidate;
   const candidatesTried = [candidate];
@@ -5383,7 +5383,7 @@ async function collectRunSessionCandidates(provider, startedAtMs, beforeRun, cwd
         parsed = null;
       }
       matches.push({
-        session_id: parsed?.session_id || basename2(filePath, ".jsonl"),
+        session_id: parsed?.session_id || basename4(filePath, ".jsonl"),
         provider: "claude",
         model: parsed?.model || "",
         project_path: parsed?.project_path || normalizedCwd,
@@ -5532,7 +5532,7 @@ async function detectSessionInCurrentClaudeProject(startedTime, beforeRun, norma
     } catch {
       parsed = null;
     }
-    const sessionId = parsed?.session_id || basename2(filePath, ".jsonl");
+    const sessionId = parsed?.session_id || basename4(filePath, ".jsonl");
     const candidate = {
       session_id: sessionId,
       provider: "claude",
@@ -5554,7 +5554,7 @@ async function detectSessionInCurrentClaudeProject(startedTime, beforeRun, norma
       const after = currentProjectFiles.get(filePath);
       if (after === void 0) continue;
       if (!Number.isFinite(after) || after < startedTime || after <= beforeModifiedAt) continue;
-      const sessionId = basename2(filePath, ".jsonl");
+      const sessionId = basename4(filePath, ".jsonl");
       directCandidates.push({
         session_id: sessionId,
         provider: "claude",
@@ -5662,7 +5662,7 @@ import { Command as Command6 } from "commander";
 import chalk8 from "chalk";
 import Table4 from "cli-table3";
 import { existsSync as existsSync8, readFileSync as readFileSync8, readdirSync as readdirSync5, unlinkSync as unlinkSync8 } from "fs";
-import { basename as basename3, extname as extname5, join as join9 } from "path";
+import { basename as basename5, extname as extname5, join as join9 } from "path";
 import { homedir as homedir2 } from "os";
 var SUPPORTED_EXTENSIONS = /* @__PURE__ */ new Set([".json", ".jsonc", ".toml"]);
 function registerModelCommand(program2) {
@@ -5805,7 +5805,7 @@ function buildClaudeProfile(opts, model) {
   };
 }
 function normalizeProfileName2(name) {
-  const normalized = basename3(name).replace(/\.(jsonc?|toml)$/i, "").trim();
+  const normalized = basename5(name).replace(/\.(jsonc?|toml)$/i, "").trim();
   if (!normalized || normalized === "." || normalized === "..") {
     console.error(chalk8.red(`Invalid model profile name: ${name}`));
     process.exit(1);
@@ -5838,7 +5838,7 @@ function collectClaudeConfigs() {
   return [
     summarizeClaudeJson(currentPath, "current", "current"),
     ...listProfileFiles(DEFAULT_CLAUDE_SETTINGS_DIR).map(
-      (filePath) => summarizeClaudeProfile(filePath, basename3(filePath, extname5(filePath)))
+      (filePath) => summarizeClaudeProfile(filePath, basename5(filePath, extname5(filePath)))
     )
   ];
 }
@@ -5848,7 +5848,7 @@ function collectCodexConfigs() {
   return [
     summarizeCodexToml(currentPath, "current", "current", readCodexAuthState()),
     ...listProfileFiles(DEFAULT_CODEX_SETTINGS_DIR).map(
-      (filePath) => summarizeCodexProfile(filePath, basename3(filePath, extname5(filePath)))
+      (filePath) => summarizeCodexProfile(filePath, basename5(filePath, extname5(filePath)))
     )
   ];
 }
@@ -6323,7 +6323,7 @@ function listTaskIds() {
 // src/diagnose/agentRunner.ts
 import { spawn as spawn3 } from "child_process";
 import { existsSync as existsSync10 } from "fs";
-import { basename as basename4, isAbsolute as isAbsolute3, join as join11 } from "path";
+import { basename as basename6, isAbsolute as isAbsolute3, join as join11 } from "path";
 var CAPTURE_STDOUT_MAX_BYTES = 2 * 1024 * 1024;
 var CAPTURE_STDERR_MAX_BYTES = 64 * 1024;
 var CAPTURE_SIGKILL_GRACE_MS = 5e3;
@@ -6350,7 +6350,7 @@ function resolveClaudeConfigPath(profile) {
   if (isAbsolute3(profile) || existsSync10(profile)) {
     return existsSync10(profile) ? profile : null;
   }
-  const base = join11(DEFAULT_CLAUDE_SETTINGS_DIR, basename4(profile));
+  const base = join11(DEFAULT_CLAUDE_SETTINGS_DIR, basename6(profile));
   if (existsSync10(base)) return base;
   if (!base.endsWith(".json") && !base.endsWith(".jsonc")) {
     for (const ext of [".json", ".jsonc"]) {
