@@ -1,6 +1,6 @@
 import { readdirSync, statSync } from "fs";
 import { join, basename } from "path";
-import { CLAUDE_SESSIONS_DIR, CODEX_SESSIONS_DIR } from "../constants.js";
+import { claudeSessionRoots, codexSessionRoots } from "../constants.js";
 import { parseJsonlHead, extractClaudeSessionMeta, extractCodexSessionMeta } from "./session.js";
 import type { SessionMeta } from "../types.js";
 
@@ -59,10 +59,16 @@ function collectJsonlFilesSorted(dir: string, limit: number): FileEntry[] {
 
 type Provider = "claude" | "codex";
 
-const PROVIDER_DIRS: [Provider, string][] = [
-  ["claude", CLAUDE_SESSIONS_DIR],
-  ["codex", CODEX_SESSIONS_DIR],
-];
+function providerRoots(providerFilter?: Provider): { provider: Provider; root: string }[] {
+  const out: { provider: Provider; root: string }[] = [];
+  if (!providerFilter || providerFilter === "claude") {
+    for (const root of claudeSessionRoots()) out.push({ provider: "claude", root });
+  }
+  if (!providerFilter || providerFilter === "codex") {
+    for (const root of codexSessionRoots()) out.push({ provider: "codex", root });
+  }
+  return out;
+}
 
 export async function findSessions(limit = 50, providerFilter?: Provider): Promise<SessionMeta[]> {
   const results: SessionMeta[] = [];
@@ -79,9 +85,8 @@ export async function* streamSessions(
 ): AsyncGenerator<SessionMeta> {
   const allFiles: (FileEntry & { provider: Provider })[] = [];
 
-  for (const [provider, dir] of PROVIDER_DIRS) {
-    if (providerFilter && provider !== providerFilter) continue;
-    const files = collectJsonlFilesSorted(dir, collectLimit);
+  for (const { provider, root } of providerRoots(providerFilter)) {
+    const files = collectJsonlFilesSorted(root, collectLimit);
     for (const f of files) allFiles.push({ ...f, provider });
   }
   allFiles.sort((a, b) => b.mtime - a.mtime);
@@ -121,7 +126,12 @@ export function looksLikeSessionIdQuery(input: string): boolean {
   return /^[0-9a-f]+$/.test(compact);
 }
 
-function collectSessionFilesForId(dir: string, sessionId: string, accumulator: string[]): void {
+function collectSessionFilesForId(
+  dir: string,
+  sessionId: string,
+  accumulator: { path: string; provider: Provider }[],
+  provider: Provider
+): void {
   if (accumulator.length > 5000) return;
   let entries: string[];
   try {
@@ -141,13 +151,13 @@ function collectSessionFilesForId(dir: string, sessionId: string, accumulator: s
     }
 
     if (st.isDirectory()) {
-      collectSessionFilesForId(full, sessionId, accumulator);
+      collectSessionFilesForId(full, sessionId, accumulator, provider);
       continue;
     }
 
     if (!entry.endsWith(".jsonl")) continue;
     if (!entry.toLowerCase().includes(sessionId.toLowerCase())) continue;
-    accumulator.push(full);
+    accumulator.push({ path: full, provider });
     if (accumulator.length > 5000) return;
   }
 }
@@ -155,19 +165,14 @@ function collectSessionFilesForId(dir: string, sessionId: string, accumulator: s
 async function collectSessionCandidatesByFilename(sessionId: string): Promise<SessionMeta[]> {
   const matches = new Map<string, SessionMeta>();
   const normalizedId = sessionId.toLowerCase();
-  const matchedFiles: string[] = [];
+  const matchedFiles: { path: string; provider: Provider }[] = [];
 
-  for (const [, dir] of PROVIDER_DIRS) {
-    collectSessionFilesForId(dir, normalizedId, matchedFiles);
+  for (const { provider, root } of providerRoots()) {
+    collectSessionFilesForId(root, normalizedId, matchedFiles, provider);
   }
 
-  for (const filePath of matchedFiles) {
+  for (const { path: filePath, provider } of matchedFiles) {
     try {
-      const fileName = basename(filePath);
-      let provider: Provider = "claude";
-      if (filePath.includes(CODEX_SESSIONS_DIR)) {
-        provider = "codex";
-      }
       const st = statSync(filePath);
       const modifiedAt = new Date(st.mtimeMs).toISOString();
       const entries = await parseJsonlHead(filePath);

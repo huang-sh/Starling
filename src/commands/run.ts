@@ -4,6 +4,7 @@ import { randomUUID } from "crypto";
 import { chmodSync, existsSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { createInterface } from "node:readline/promises";
 import { spawn } from "child_process";
+import type { ChildProcess } from "child_process";
 import { basename, extname, isAbsolute, join, resolve } from "path";
 import {
   addBookmark,
@@ -32,6 +33,7 @@ import {
   restoreCodexDefaultConfig,
 } from "../lib/codexDefaultGuard.js";
 import { upsertSessionInIndex } from "../lib/sessionIndex.js";
+import { createRun, finalizeRun } from "../lib/runs.js";
 import { shortSessionId } from "../lib/sessionDisplay.js";
 import { catalogPath, resolveCatalogReference } from "../lib/catalogResolver.js";
 import { hasKnownConfigExtension } from "../lib/configPaths.js";
@@ -54,6 +56,7 @@ interface RunResult {
 interface RunAgentOptions {
   preserveSignals?: boolean;
   env?: NodeJS.ProcessEnv;
+  onSpawn?: (child: ChildProcess) => void;
 }
 
 const RUN_SESSION_SCAN_LIMIT = 500;
@@ -119,11 +122,23 @@ export function registerRunCommand(program: Command): void {
       const beforeRun = hookRun ? new Map<string, number>() : await snapshotSessions(provider);
       const beforeRunProjectFiles =
         provider === "claude" && !hookRun ? snapshotProjectSessions(normalizedCwd) : new Map<string, number>();
-      const cleanupRunState = async () => {
+      let currentRunId: string | undefined;
+      const cleanupRunState = async (finalize?: { exitCode: number; sessionId?: string }) => {
         syncClaudeProfileSettingsFromRunSettings(resolvedConfig, hookRun?.settingsPath ?? null);
         cleanupClaudeRunHookSettings(hookRun);
         await cleanupCodexRunConfig(codexConfig);
         restoreCodexDefaultConfig(codexDefaultSnapshot);
+        if (currentRunId && finalize) {
+          try {
+            finalizeRun(currentRunId, {
+              status: finalize.exitCode === 0 ? "completed" : "errored",
+              exit_code: finalize.exitCode,
+              session_id: finalize.sessionId,
+            });
+          } catch {
+            // Run-status persistence must never affect the run result.
+          }
+        }
       };
 
       let catalogPinned = false;
@@ -204,13 +219,31 @@ export function registerRunCommand(program: Command): void {
       }
 
       let runResult: RunResult;
+      const handleSpawn = (child: ChildProcess) => {
+        currentRunId = randomUUID();
+        try {
+          createRun({
+            run_id: currentRunId,
+            provider,
+            project_path: normalizedCwd,
+            catalog_id: catalog?.id,
+            pid: child.pid,
+            status: "running",
+            started_at: startedAt,
+            source: "starling-run",
+          });
+        } catch {
+          // Run-status persistence must never affect the run result.
+        }
+      };
       try {
         runResult = await runAgent(binary, args, cwd, {
           preserveSignals: true,
           env: buildAgentEnv(provider, codexConfig?.env),
+          onSpawn: handleSpawn,
         });
       } catch (error) {
-        await cleanupRunState();
+        await cleanupRunState({ exitCode: 1 });
         throw error;
       }
       agentClosed = true;
@@ -222,11 +255,11 @@ export function registerRunCommand(program: Command): void {
       const knownSessionId =
         hintedSessionId ?? readRunHookSessionId(hookRun?.eventsPath ?? codexConfig?.eventsPath) ?? undefined;
       if (exitCode !== 0 && Date.now() - runStartedAtMs < RUN_FAST_FAILURE_SKIP_SCAN_MS && !knownSessionId) {
-        await cleanupRunState();
+        await cleanupRunState({ exitCode, sessionId: knownSessionId });
         process.exit(exitCode);
       }
       if (hookRun && !knownSessionId) {
-        await cleanupRunState();
+        await cleanupRunState({ exitCode, sessionId: knownSessionId });
         if (exitCode !== 0) {
           process.exit(exitCode);
         }
@@ -247,11 +280,11 @@ export function registerRunCommand(program: Command): void {
 
       if (!newSessionMeta) {
         if (exitCode !== 0) {
-          await cleanupRunState();
+          await cleanupRunState({ exitCode, sessionId: knownSessionId });
           process.exit(exitCode);
         }
         console.log(chalk.yellow("No new session found, or session metadata is not ready yet."));
-        await cleanupRunState();
+        await cleanupRunState({ exitCode, sessionId: knownSessionId });
         return;
       }
 
@@ -305,11 +338,11 @@ export function registerRunCommand(program: Command): void {
       }
 
       if (exitCode !== 0) {
-        await cleanupRunState();
+        await cleanupRunState({ exitCode, sessionId: newSessionMeta.session_id });
         process.exit(exitCode);
       }
 
-      await cleanupRunState();
+      await cleanupRunState({ exitCode, sessionId: newSessionMeta.session_id });
     });
 
   program.addCommand(run);
@@ -872,6 +905,13 @@ async function runAgent(
       cwd,
       env: childEnv,
     });
+    if (options?.onSpawn) {
+      try {
+        options.onSpawn(child);
+      } catch {
+        // Never let the spawn callback break the run.
+      }
+    }
 
     let terminalInterrupted = false;
     let settled = false;

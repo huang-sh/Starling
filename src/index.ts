@@ -7,6 +7,8 @@ import { registerRunCommand } from "./commands/run.js";
 import { registerModelCommand } from "./commands/model.js";
 import { registerConfigCommand } from "./commands/config.js";
 import { registerDiagnoseCommand } from "./commands/diagnose.js";
+import { registerStatusCommand } from "./commands/status.js";
+import { registerMonitorCommand } from "./commands/monitor.js";
 import packageJson from "../package.json" with { type: "json" };
 
 const program = new Command();
@@ -25,6 +27,8 @@ registerRunCommand(program);
 registerModelCommand(program);
 registerConfigCommand(program);
 registerDiagnoseCommand(program);
+registerStatusCommand(program);
+registerMonitorCommand(program);
 
 // Top-level: starling resume <session-id>
 program

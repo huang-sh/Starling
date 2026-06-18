@@ -8,6 +8,7 @@ import { addBookmark, listBookmarks, listSpaces, removeBookmark, updateBookmark 
 import { generateBookmarkId, generateNoteId } from "../lib/id.js";
 import { shortSessionId } from "../lib/sessionDisplay.js";
 import { catalogPath, resolveCatalogReference } from "../lib/catalogResolver.js";
+import { getRunStatusForSession, reconcileStaleRuns, statusBadge } from "../lib/runs.js";
 import {
   clearSessionIndex,
   findIndexedSessionCandidates,
@@ -18,9 +19,9 @@ import {
   rebuildSessionIndex,
   SESSION_INDEX_PATH,
 } from "../lib/sessionIndex.js";
-import type { Bookmark, SessionMeta } from "../types.js";
+import type { Bookmark, RunStatus, SessionMeta } from "../types.js";
 
-function formatSessionLine(s: SessionMeta): string {
+function formatSessionLine(s: SessionMeta, status?: RunStatus): string {
   const agent = s.provider === "codex" ? "codex" : "claude";
   const shortId = shortSessionId(s.session_id);
   const shortProject = s.project_path
@@ -33,7 +34,8 @@ function formatSessionLine(s: SessionMeta): string {
   const outputTokens = s.token_usage?.output_tokens ?? "-";
   const totalTokens = s.token_usage?.total_tokens ?? "-";
   const cacheTokens = s.token_usage?.cache_tokens ?? "-";
-  return `${chalk.cyan(shortId.padEnd(15))}  ${chalk.gray(agent.padEnd(7))}  ${(s.model || "-").padEnd(18)}  ${shortProject.padEnd(42)}  ${chalk.gray(date)}  ${chalk.yellow(String(inputTokens)).padEnd(10)} ${chalk.yellow(String(outputTokens)).padEnd(10)} ${chalk.yellow(String(totalTokens)).padEnd(10)} ${chalk.yellow(String(cacheTokens)).padEnd(10)}`;
+  const prefix = status !== undefined ? `${statusBadge(status)} ` : "";
+  return `${prefix}${chalk.cyan(shortId.padEnd(15))}  ${chalk.gray(agent.padEnd(7))}  ${(s.model || "-").padEnd(18)}  ${shortProject.padEnd(42)}  ${chalk.gray(date)}  ${chalk.yellow(String(inputTokens)).padEnd(10)} ${chalk.yellow(String(outputTokens)).padEnd(10)} ${chalk.yellow(String(totalTokens)).padEnd(10)} ${chalk.yellow(String(cacheTokens)).padEnd(10)}`;
 }
 
 export function registerSessionCommand(program: Command): void {
@@ -53,6 +55,12 @@ export function registerSessionCommand(program: Command): void {
     .action(async (opts: { limit: string; agent?: string; cataloged?: boolean; catalog?: string; all?: boolean; json?: boolean }) => {
       const provider = opts.agent as "claude" | "codex" | undefined;
       const hasCatalogFilter = Boolean(opts.cataloged || opts.catalog);
+      reconcileStaleRuns();
+      const buildStatusMap = (list: SessionMeta[]): Map<string, RunStatus> => {
+        const map = new Map<string, RunStatus>();
+        for (const s of list) map.set(s.session_id, getRunStatusForSession(s.session_id));
+        return map;
+      };
 
       // All mode: stream + pager
       if (opts.all) {
@@ -64,7 +72,8 @@ export function registerSessionCommand(program: Command): void {
           return;
         }
 
-        const header = `${"SESSION".padEnd(15)}  ${"AGENT".padEnd(7)}  ${"MODEL".padEnd(18)}  ${"PROJECT".padEnd(42)}  MODIFIED  ${"INPUT".padEnd(10)} ${"OUTPUT".padEnd(10)} ${"TOTAL".padEnd(10)} ${"CACHE".padEnd(10)}\n${"─".repeat(145)}`;
+        const statusMap = buildStatusMap(filteredSessions);
+        const header = `${"ST".padEnd(2)} ${"SESSION".padEnd(15)}  ${"AGENT".padEnd(7)}  ${"MODEL".padEnd(18)}  ${"PROJECT".padEnd(42)}  MODIFIED  ${"INPUT".padEnd(10)} ${"OUTPUT".padEnd(10)} ${"TOTAL".padEnd(10)} ${"CACHE".padEnd(10)}\n${"─".repeat(148)}`;
         const usePager = process.stdout.isTTY && process.platform !== "win32";
         const pager = usePager ? spawn("less", ["-RFX"], { stdio: ["pipe", "inherit", "inherit"] }) : null;
         let pipeBroken = false;
@@ -86,7 +95,7 @@ export function registerSessionCommand(program: Command): void {
         let count = 0;
         for (const meta of filteredSessions) {
           if (pipeBroken) break;
-          out(formatSessionLine(meta));
+          out(formatSessionLine(meta, statusMap.get(meta.session_id)));
           count++;
         }
 
@@ -118,7 +127,7 @@ export function registerSessionCommand(program: Command): void {
         if (truncatedHint) process.stderr.write(chalk.gray(truncatedHint + "\n"));
         return;
       }
-      console.log(formatSessionTable(sessions));
+      console.log(formatSessionTable(sessions, buildStatusMap(sessions)));
       if (truncatedHint) console.log(chalk.gray(truncatedHint));
     });
 

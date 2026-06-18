@@ -16,6 +16,7 @@ import { formatSpaceTree } from "../lib/format.js";
 import { findSessionCandidates } from "../lib/discovery.js";
 import { shortSessionId } from "../lib/sessionDisplay.js";
 import { catalogPath, resolveCatalogReference } from "../lib/catalogResolver.js";
+import { reconcileStaleRuns, summarizeRunStatus } from "../lib/runs.js";
 import type { Bookmark, SessionMeta, Space } from "../types.js";
 
 export function registerSpaceCommand(program: Command): void {
@@ -63,6 +64,7 @@ export function registerSpaceCommand(program: Command): void {
       }
 
       const allBookmarks = listBookmarks();
+      reconcileStaleRuns();
       const rows = spaces.map((s) => {
         const pins = allBookmarks.filter((b) => b.space_ids.includes(s.id));
         const sessionCount = new Set(pins.map((b) => b.session_id)).size;
@@ -74,6 +76,7 @@ export function registerSpaceCommand(program: Command): void {
           name: s.name,
           sessions: sessionCount,
           pins: pins.length,
+          status: summarizeRunStatus(pins),
           parent,
           description: s.description || "-",
         };
@@ -81,11 +84,17 @@ export function registerSpaceCommand(program: Command): void {
 
       if (opts.json) {
         const output = rows.map((row) => {
+          const pins = allBookmarks.filter((b) => b.space_ids.includes(row.id));
+          const base = {
+            ...row.space,
+            session_count: row.sessions,
+            pin_count: row.pins,
+            run_status: summarizeRunStatus(pins, { color: false }),
+          };
           if (opts.pins) {
-            const pins = allBookmarks.filter((b) => b.space_ids.includes(row.id));
-            return { ...row.space, session_count: row.sessions, pin_count: row.pins, pins };
+            return { ...base, pins };
           }
-          return { ...row.space, session_count: row.sessions, pin_count: row.pins };
+          return base;
         });
         console.log(JSON.stringify(output, null, 2));
         return;
@@ -97,10 +106,11 @@ export function registerSpaceCommand(program: Command): void {
           chalk.green("Name"),
           chalk.green("Sessions"),
           chalk.green("Pins"),
+          chalk.green("Run Status"),
           chalk.green("Parent"),
           chalk.green("Description"),
         ],
-        colWidths: [12, 20, 10, 10, 20, 34],
+        colWidths: [12, 20, 10, 10, 18, 20, 30],
         style: { head: [] },
       });
 
@@ -112,8 +122,9 @@ export function registerSpaceCommand(program: Command): void {
           chalk.bold(row.name),
           String(row.sessions),
           String(row.pins),
+          row.status,
           row.parent,
-          truncate(row.description, 34),
+          truncate(row.description, 30),
         ]);
       }
 

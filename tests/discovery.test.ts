@@ -36,6 +36,8 @@ vi.mock("../src/constants.js", () => {
   return {
     CLAUDE_SESSIONS_DIR: normalize("/sessions/claude"),
     CODEX_SESSIONS_DIR: normalize("/sessions/codex"),
+    claudeSessionRoots: () => [normalize("/sessions/claude")],
+    codexSessionRoots: () => [normalize("/sessions/codex")],
   };
 });
 

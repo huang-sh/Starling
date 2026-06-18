@@ -53,3 +53,25 @@ export interface SessionMeta {
     cache_tokens?: number;
   };
 }
+
+export type RunStatus = "running" | "completed" | "errored" | "crashed" | "stale" | "unknown";
+export type RunSource = "starling-run" | "detected";
+
+export interface RunRecord {
+  run_id: string;
+  session_id?: string;
+  provider: "claude" | "codex";
+  project_path?: string;
+  catalog_id?: string;
+  pid?: number;
+  status: RunStatus;
+  exit_code?: number;
+  started_at: string;
+  ended_at?: string;
+  source: RunSource;
+}
+
+export interface RunsFile {
+  version: number;
+  runs: RunRecord[];
+}

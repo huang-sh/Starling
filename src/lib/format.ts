@@ -1,35 +1,46 @@
 import chalk from "chalk";
 import Table from "cli-table3";
-import type { Bookmark, Space, SessionMeta } from "../types.js";
+import type { Bookmark, RunStatus, SessionMeta, Space } from "../types.js";
 import { shortSessionId } from "./sessionDisplay.js";
+import { statusBadge } from "./runs.js";
 
-export function formatSessionTable(sessions: SessionMeta[]): string {
+export function formatSessionTable(
+  sessions: SessionMeta[],
+  statusMap?: Map<string, RunStatus>
+): string {
   const formatToken = (value: number | undefined): string => {
     return value === undefined ? "-" : String(value);
   };
+  const hasStatus = statusMap !== undefined;
 
-  const table = new Table({
-    head: [
-      chalk.cyan("Session ID"),
-      chalk.cyan("Agent"),
-      chalk.cyan("Model"),
-      chalk.cyan("Project"),
-      chalk.cyan("Modified"),
-      chalk.cyan("Input"),
-      chalk.cyan("Output"),
-      chalk.cyan("Total"),
-      chalk.cyan("Cache"),
-    ],
-    colWidths: [15, 8, 16, 30, 20, 10, 10, 10, 10],
-    style: { head: [] },
-  });
+  const head = [
+    chalk.cyan("Session ID"),
+    ...(hasStatus ? [chalk.cyan("Status")] : []),
+    chalk.cyan("Agent"),
+    chalk.cyan("Model"),
+    chalk.cyan("Project"),
+    chalk.cyan("Modified"),
+    chalk.cyan("Input"),
+    chalk.cyan("Output"),
+    chalk.cyan("Total"),
+    chalk.cyan("Cache"),
+  ];
+  const colWidths = [
+    15,
+    ...(hasStatus ? [9] : []),
+    8, 16, 30, 20, 10, 10, 10, 10,
+  ];
+
+  const table = new Table({ head, colWidths, style: { head: [] } });
   for (const s of sessions) {
     const shortId = shortSessionId(s.session_id);
     const agent = s.provider === "codex" ? "codex" : "claude";
     const shortProject = s.project_path ? (s.project_path.length > 36 ? "…" + s.project_path.slice(-35) : s.project_path) : "-";
     const shortDate = s.modified_at.slice(0, 19).replace("T", " ");
+    const badge = hasStatus ? statusBadge(statusMap!.get(s.session_id) ?? "unknown") : null;
     table.push([
       shortId,
+      ...(badge !== null ? [badge] : []),
       agent,
       s.model || "-",
       shortProject,

@@ -30,14 +30,45 @@ const STARLING_HOME_VALUE = STARLING_HOME_ENV || STARLING_HOME_CONFIG;
 export const STARLING_HOME_SOURCE = STARLING_HOME_ENV ? "env" : STARLING_HOME_CONFIG ? "config" : "default";
 export const DEFAULT_STARLING_HOME = STARLING_HOME_VALUE ? expandHomePath(STARLING_HOME_VALUE) : join(homedir(), ".starling");
 export const DEFAULT_STORE_PATH = STARLING_HOME_VALUE ? join(DEFAULT_STARLING_HOME, "store.json") : join(DEFAULT_CONFIG_DIR, "store.json");
+export const DEFAULT_RUNS_PATH = STARLING_HOME_VALUE ? join(DEFAULT_STARLING_HOME, "runs.json") : join(DEFAULT_CONFIG_DIR, "runs.json");
 export const STORE_VERSION = 1;
+export const RUNS_VERSION = 1;
 
 export const DEFAULT_STARLING_SETTINGS_DIR = join(DEFAULT_STARLING_HOME, "settings");
 export const DEFAULT_CLAUDE_SETTINGS_DIR = join(DEFAULT_STARLING_SETTINGS_DIR, "claude");
 export const DEFAULT_CODEX_SETTINGS_DIR = join(DEFAULT_STARLING_SETTINGS_DIR, "codex");
 export const DEFAULT_CODEX_HOME = join(homedir(), ".codex");
 
-export const CLAUDE_SESSIONS_DIR = join(homedir(), ".claude", "projects");
-export const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
+/**
+ * Claude / Codex session-file roots honor CLAUDE_CONFIG_DIR / CODEX_HOME (the
+ * native agent-home env vars), so sessions written under isolated homes (e.g.
+ * benchmark-harness `.claude_iso_*` dirs) are discoverable. When the env vars
+ * are unset, behavior is unchanged: ~/.claude/projects and ~/.codex/sessions.
+ *
+ * Live process detection (lib/processMap.ts) additionally reads each TARGET
+ * process's own environ, so a Starling process running in the default home can
+ * still observe sessions belonging to agents launched under a different
+ * CLAUDE_CONFIG_DIR.
+ */
+function resolveClaudeConfigDir(): string {
+  const env = process.env.CLAUDE_CONFIG_DIR?.trim();
+  return env ? expandHomePath(env) : join(homedir(), ".claude");
+}
+function resolveCodexHome(): string {
+  const env = process.env.CODEX_HOME?.trim();
+  return env ? expandHomePath(env) : join(homedir(), ".codex");
+}
+
+export function claudeSessionRoots(): string[] {
+  return [join(resolveClaudeConfigDir(), "projects")];
+}
+export function codexSessionRoots(): string[] {
+  return [join(resolveCodexHome(), "sessions")];
+}
+
+/** Env-aware single-root alias. Prefer claudeSessionRoots() for new code. */
+export const CLAUDE_SESSIONS_DIR = claudeSessionRoots()[0]!;
+/** Env-aware single-root alias. Prefer codexSessionRoots() for new code. */
+export const CODEX_SESSIONS_DIR = codexSessionRoots()[0]!;
 
 export const ENV_CONFIG_KEY = "STARLING_CONFIG";

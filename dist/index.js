@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 
 // src/index.ts
-import { Command as Command9 } from "commander";
+import { Command as Command11 } from "commander";
 
 // src/commands/session.ts
 import { Command } from "commander";
-import chalk2 from "chalk";
+import chalk3 from "chalk";
 import { spawn, spawnSync } from "child_process";
 import { existsSync as existsSync4, unlinkSync as unlinkSync3 } from "fs";
 
 // src/lib/discovery.ts
 import { readdirSync, statSync } from "fs";
-import { join as join2, basename as basename2 } from "path";
+import { join as join2 } from "path";
 
 // src/constants.ts
 import { existsSync, readFileSync } from "fs";
@@ -41,13 +41,29 @@ var STARLING_HOME_VALUE = STARLING_HOME_ENV || STARLING_HOME_CONFIG;
 var STARLING_HOME_SOURCE = STARLING_HOME_ENV ? "env" : STARLING_HOME_CONFIG ? "config" : "default";
 var DEFAULT_STARLING_HOME = STARLING_HOME_VALUE ? expandHomePath(STARLING_HOME_VALUE) : join(homedir(), ".starling");
 var DEFAULT_STORE_PATH = STARLING_HOME_VALUE ? join(DEFAULT_STARLING_HOME, "store.json") : join(DEFAULT_CONFIG_DIR, "store.json");
+var DEFAULT_RUNS_PATH = STARLING_HOME_VALUE ? join(DEFAULT_STARLING_HOME, "runs.json") : join(DEFAULT_CONFIG_DIR, "runs.json");
 var STORE_VERSION = 1;
+var RUNS_VERSION = 1;
 var DEFAULT_STARLING_SETTINGS_DIR = join(DEFAULT_STARLING_HOME, "settings");
 var DEFAULT_CLAUDE_SETTINGS_DIR = join(DEFAULT_STARLING_SETTINGS_DIR, "claude");
 var DEFAULT_CODEX_SETTINGS_DIR = join(DEFAULT_STARLING_SETTINGS_DIR, "codex");
 var DEFAULT_CODEX_HOME = join(homedir(), ".codex");
-var CLAUDE_SESSIONS_DIR = join(homedir(), ".claude", "projects");
-var CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
+function resolveClaudeConfigDir() {
+  const env = process.env.CLAUDE_CONFIG_DIR?.trim();
+  return env ? expandHomePath(env) : join(homedir(), ".claude");
+}
+function resolveCodexHome() {
+  const env = process.env.CODEX_HOME?.trim();
+  return env ? expandHomePath(env) : join(homedir(), ".codex");
+}
+function claudeSessionRoots() {
+  return [join(resolveClaudeConfigDir(), "projects")];
+}
+function codexSessionRoots() {
+  return [join(resolveCodexHome(), "sessions")];
+}
+var CLAUDE_SESSIONS_DIR = claudeSessionRoots()[0];
+var CODEX_SESSIONS_DIR = codexSessionRoots()[0];
 var ENV_CONFIG_KEY = "STARLING_CONFIG";
 
 // src/lib/session.ts
@@ -139,12 +155,12 @@ function extractTokenUsageFromValue(value, depth = 0) {
   const input = asNumber(value.input_tokens) ?? asNumber(value.inputTokens) ?? asNumber(value.prompt_tokens) ?? asNumber(value.promptTokens);
   const output = asNumber(value.output_tokens) ?? asNumber(value.outputTokens) ?? asNumber(value.completion_tokens) ?? asNumber(value.completionTokens);
   const total = asNumber(value.total_tokens) ?? asNumber(value.totalTokens) ?? (typeof input === "number" && typeof output === "number" ? input + output : void 0);
-  const cache = normalizeCacheTokens(value);
+  const cache2 = normalizeCacheTokens(value);
   const usage = {};
   if (typeof input === "number") usage.input_tokens = input;
   if (typeof output === "number") usage.output_tokens = output;
   if (typeof total === "number") usage.total_tokens = total;
-  if (typeof cache === "number") usage.cache_tokens = cache;
+  if (typeof cache2 === "number") usage.cache_tokens = cache2;
   const nestedValues = Object.values(value);
   for (const candidate of nestedValues) {
     const nestedUsage = extractTokenUsageFromValue(candidate);
@@ -336,10 +352,16 @@ function collectJsonlFilesSorted(dir, limit) {
   }
   return results.slice(0, limit * 3);
 }
-var PROVIDER_DIRS = [
-  ["claude", CLAUDE_SESSIONS_DIR],
-  ["codex", CODEX_SESSIONS_DIR]
-];
+function providerRoots(providerFilter) {
+  const out = [];
+  if (!providerFilter || providerFilter === "claude") {
+    for (const root of claudeSessionRoots()) out.push({ provider: "claude", root });
+  }
+  if (!providerFilter || providerFilter === "codex") {
+    for (const root of codexSessionRoots()) out.push({ provider: "codex", root });
+  }
+  return out;
+}
 async function findSessions(limit = 50, providerFilter) {
   const results = [];
   for await (const meta of streamSessions(providerFilter, limit)) {
@@ -350,9 +372,8 @@ async function findSessions(limit = 50, providerFilter) {
 }
 async function* streamSessions(providerFilter, collectLimit = Infinity) {
   const allFiles = [];
-  for (const [provider, dir] of PROVIDER_DIRS) {
-    if (providerFilter && provider !== providerFilter) continue;
-    const files = collectJsonlFilesSorted(dir, collectLimit);
+  for (const { provider, root } of providerRoots(providerFilter)) {
+    const files = collectJsonlFilesSorted(root, collectLimit);
     for (const f of files) allFiles.push({ ...f, provider });
   }
   allFiles.sort((a, b) => b.mtime - a.mtime);
@@ -377,11 +398,11 @@ function looksLikeSessionIdQuery(input) {
   const normalized = input.trim().toLowerCase();
   if (normalized.length < 8) return false;
   if (!/^[0-9a-f-]+$/.test(normalized)) return false;
-  const compact = normalized.replace(/-/g, "");
-  if (compact.length < 8 || compact.length > 32) return false;
-  return /^[0-9a-f]+$/.test(compact);
+  const compact2 = normalized.replace(/-/g, "");
+  if (compact2.length < 8 || compact2.length > 32) return false;
+  return /^[0-9a-f]+$/.test(compact2);
 }
-function collectSessionFilesForId(dir, sessionId, accumulator) {
+function collectSessionFilesForId(dir, sessionId, accumulator, provider) {
   if (accumulator.length > 5e3) return;
   let entries;
   try {
@@ -399,12 +420,12 @@ function collectSessionFilesForId(dir, sessionId, accumulator) {
       continue;
     }
     if (st.isDirectory()) {
-      collectSessionFilesForId(full, sessionId, accumulator);
+      collectSessionFilesForId(full, sessionId, accumulator, provider);
       continue;
     }
     if (!entry.endsWith(".jsonl")) continue;
     if (!entry.toLowerCase().includes(sessionId.toLowerCase())) continue;
-    accumulator.push(full);
+    accumulator.push({ path: full, provider });
     if (accumulator.length > 5e3) return;
   }
 }
@@ -412,16 +433,11 @@ async function collectSessionCandidatesByFilename(sessionId) {
   const matches = /* @__PURE__ */ new Map();
   const normalizedId = sessionId.toLowerCase();
   const matchedFiles = [];
-  for (const [, dir] of PROVIDER_DIRS) {
-    collectSessionFilesForId(dir, normalizedId, matchedFiles);
+  for (const { provider, root } of providerRoots()) {
+    collectSessionFilesForId(root, normalizedId, matchedFiles, provider);
   }
-  for (const filePath of matchedFiles) {
+  for (const { path: filePath, provider } of matchedFiles) {
     try {
-      const fileName = basename2(filePath);
-      let provider = "claude";
-      if (filePath.includes(CODEX_SESSIONS_DIR)) {
-        provider = "codex";
-      }
       const st = statSync(filePath);
       const modifiedAt = new Date(st.mtimeMs).toISOString();
       const entries = await parseJsonlHead(filePath);
@@ -467,7 +483,7 @@ async function findSessionById(sessionId) {
 }
 
 // src/lib/format.ts
-import chalk from "chalk";
+import chalk2 from "chalk";
 import Table from "cli-table3";
 
 // src/lib/sessionDisplay.ts
@@ -476,85 +492,8 @@ function shortSessionId(sessionId) {
   return sessionId.slice(0, SHORT_SESSION_ID_LENGTH);
 }
 
-// src/lib/format.ts
-function formatSessionTable(sessions) {
-  const formatToken = (value) => {
-    return value === void 0 ? "-" : String(value);
-  };
-  const table = new Table({
-    head: [
-      chalk.cyan("Session ID"),
-      chalk.cyan("Agent"),
-      chalk.cyan("Model"),
-      chalk.cyan("Project"),
-      chalk.cyan("Modified"),
-      chalk.cyan("Input"),
-      chalk.cyan("Output"),
-      chalk.cyan("Total"),
-      chalk.cyan("Cache")
-    ],
-    colWidths: [15, 8, 16, 30, 20, 10, 10, 10, 10],
-    style: { head: [] }
-  });
-  for (const s of sessions) {
-    const shortId = shortSessionId(s.session_id);
-    const agent = s.provider === "codex" ? "codex" : "claude";
-    const shortProject = s.project_path ? s.project_path.length > 36 ? "\u2026" + s.project_path.slice(-35) : s.project_path : "-";
-    const shortDate = s.modified_at.slice(0, 19).replace("T", " ");
-    table.push([
-      shortId,
-      agent,
-      s.model || "-",
-      shortProject,
-      shortDate,
-      formatToken(s.token_usage?.input_tokens),
-      formatToken(s.token_usage?.output_tokens),
-      formatToken(s.token_usage?.total_tokens),
-      formatToken(s.token_usage?.cache_tokens)
-    ]);
-  }
-  return table.toString();
-}
-function formatSpaceTree(spaces, bookmarks) {
-  if (spaces.length === 0) return chalk.yellow("No catalogs created yet.");
-  const childrenMap = /* @__PURE__ */ new Map();
-  for (const s of spaces) {
-    const parent = s.parent_id ?? null;
-    if (!childrenMap.has(parent)) childrenMap.set(parent, []);
-    childrenMap.get(parent).push(s);
-  }
-  const bookmarkBySpace = /* @__PURE__ */ new Map();
-  for (const b of bookmarks) {
-    for (const sid of b.space_ids) {
-      if (!bookmarkBySpace.has(sid)) bookmarkBySpace.set(sid, []);
-      bookmarkBySpace.get(sid).push(b);
-    }
-  }
-  function renderNode(space, prefix, isLast) {
-    const connector = isLast ? "\u2514\u2500\u2500 " : "\u251C\u2500\u2500 ";
-    const lines2 = [];
-    const tagStr = space.tags.length > 0 ? chalk.gray(` [${space.tags.join(", ")}]`) : "";
-    lines2.push(`${prefix}${connector}${chalk.bold(space.name)}${tagStr}`);
-    const childPrefix = prefix + (isLast ? "    " : "\u2502   ");
-    const bk = bookmarkBySpace.get(space.id) || [];
-    for (let i = 0; i < bk.length; i++) {
-      const bIsLast = i === bk.length - 1 && !childrenMap.has(space.id);
-      const bConn = bIsLast ? "\u2514\u2500\u2500 " : "\u251C\u2500\u2500 ";
-      lines2.push(`${childPrefix}${bConn}${chalk.cyan(bk[i].title)} ${chalk.gray(`[${bk[i].session_id}]`)}`);
-    }
-    const children = childrenMap.get(space.id) || [];
-    for (let i = 0; i < children.length; i++) {
-      lines2.push(...renderNode(children[i], childPrefix, i === children.length - 1 && bk.length === 0));
-    }
-    return lines2;
-  }
-  const roots = childrenMap.get(null) || [];
-  const lines = [chalk.bold("starling")];
-  for (let i = 0; i < roots.length; i++) {
-    lines.push(...renderNode(roots[i], "", i === roots.length - 1));
-  }
-  return lines.join("\n");
-}
+// src/lib/runs.ts
+import chalk from "chalk";
 
 // src/utils/fs.ts
 import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, writeFileSync, renameSync, unlinkSync, rmdirSync, mkdtempSync, chmodSync } from "fs";
@@ -591,6 +530,611 @@ function readJSON(filePath) {
   if (!existsSync2(filePath)) return null;
   const raw = readFileSync2(filePath, "utf-8");
   return JSON.parse(raw);
+}
+
+// src/lib/processMap.ts
+import { readdirSync as readdirSync2, readFileSync as readFileSync3, readlinkSync, statSync as statSync2 } from "fs";
+import { basename as basename3, join as join4 } from "path";
+import { homedir as homedir2 } from "os";
+var UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+var RESUME_RE = /\bresume\s+([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\b/i;
+var SESSION_FILE_RE = /^(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|rollout-.+)\.jsonl$/i;
+function isSessionFilePath(filePath) {
+  return SESSION_FILE_RE.test(basename3(filePath));
+}
+function parseProcEnviron(raw) {
+  const out = {};
+  for (const chunk of raw.split("\0")) {
+    if (!chunk) continue;
+    const eq = chunk.indexOf("=");
+    if (eq <= 0) continue;
+    out[chunk.slice(0, eq)] = chunk.slice(eq + 1);
+  }
+  return out;
+}
+function parseProcStat(raw) {
+  const open = raw.indexOf("(");
+  const close = raw.lastIndexOf(")");
+  if (open < 0 || close <= open) return null;
+  const pid = Number(raw.slice(0, open).trim());
+  const comm = raw.slice(open + 1, close);
+  const rest = raw.slice(close + 1).trim().split(/\s+/);
+  const num = (i) => Number(rest[i]) || 0;
+  return {
+    pid,
+    comm,
+    state: rest[0] ?? "",
+    ppid: num(1),
+    utime: num(11),
+    stime: num(12),
+    starttime: num(19)
+  };
+}
+function providerFromCmdline(args) {
+  for (const arg of args.slice(0, 4)) {
+    const base = basename3(arg);
+    if (base === "claude" || base === "claude-code") return "claude";
+    if (base === "codex") return "codex";
+  }
+  for (const arg of args) {
+    const lower = arg.toLowerCase();
+    if (lower.endsWith("/claude") || lower.includes("/claude.js") || lower.endsWith("/claude-code")) return "claude";
+    if (lower.endsWith("/codex") || lower.includes("/codex.js")) return "codex";
+  }
+  return null;
+}
+function extractResumeUuid(args) {
+  const joined = args.join(" ");
+  const m = joined.match(RESUME_RE);
+  if (m) return m[1].toLowerCase();
+  return null;
+}
+function resolveAgentHome(provider, environ) {
+  if (provider === "claude") {
+    const env2 = environ.CLAUDE_CONFIG_DIR?.trim();
+    return env2 ? expandHome(env2) : join4(homedir2(), ".claude");
+  }
+  const env = environ.CODEX_HOME?.trim();
+  return env ? expandHome(env) : join4(homedir2(), ".codex");
+}
+function expandHome(value) {
+  if (value === "~") return homedir2();
+  if (value.startsWith("~/")) return join4(homedir2(), value.slice(2));
+  return value;
+}
+function sessionRootForHome(provider, home) {
+  return provider === "claude" ? join4(home, "projects") : join4(home, "sessions");
+}
+function encodeClaudeCwd(cwd) {
+  return "-" + cwd.split("/").filter(Boolean).join("-");
+}
+function extractSessionIdFromPath(filePath) {
+  const name = basename3(filePath);
+  const stripped = name.replace(/\.jsonl$/i, "");
+  const m = stripped.match(UUID_RE);
+  return m ? m[0].toLowerCase() : stripped.toLowerCase();
+}
+function findSessionFileById(root, sessionId) {
+  const target = sessionId.toLowerCase();
+  let dirs;
+  try {
+    dirs = readdirSync2(root);
+  } catch {
+    return null;
+  }
+  for (const d of dirs) {
+    if (d === "subagents") continue;
+    const candidate = join4(root, d, `${sessionId}.jsonl`);
+    try {
+      if (statSync2(candidate).isFile()) return candidate;
+    } catch {
+    }
+  }
+  const direct = join4(root, `${sessionId}.jsonl`);
+  try {
+    if (statSync2(direct).isFile()) return direct;
+  } catch {
+  }
+  return findFileRecursive(root, target, 0);
+}
+function findFileRecursive(dir, target, depth) {
+  if (depth > 3) return null;
+  let entries;
+  try {
+    entries = readdirSync2(dir);
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    if (entry === "subagents") continue;
+    const full = join4(dir, entry);
+    let isDir;
+    try {
+      isDir = statSync2(full).isDirectory();
+    } catch {
+      continue;
+    }
+    if (isDir) {
+      const nested = findFileRecursive(full, target, depth + 1);
+      if (nested) return nested;
+    } else if (entry.toLowerCase() === `${target}.jsonl`) {
+      return full;
+    }
+  }
+  return null;
+}
+function readCmdline(pid) {
+  try {
+    const raw = readFileSync3(`/proc/${pid}/cmdline`, "utf-8");
+    return raw.split("\0").filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+function readEnviron(pid) {
+  try {
+    return parseProcEnviron(readFileSync3(`/proc/${pid}/environ`, "utf-8"));
+  } catch {
+    return {};
+  }
+}
+function readCwd(pid) {
+  try {
+    return readlinkSync(`/proc/${pid}/cwd`);
+  } catch {
+    return null;
+  }
+}
+function readOpenJsonlFiles(pid) {
+  let fds;
+  try {
+    fds = readdirSync2(`/proc/${pid}/fd`);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const fd of fds) {
+    try {
+      const link = readlinkSync(`/proc/${pid}/fd/${fd}`);
+      if (link.endsWith(".jsonl")) out.push(link);
+    } catch {
+    }
+  }
+  return out;
+}
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+function listAgentProcesses() {
+  if (process.platform !== "linux") return [];
+  let pids;
+  try {
+    pids = readdirSync2("/proc").filter((name) => /^\d+$/.test(name));
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const pidStr of pids) {
+    const pid = Number(pidStr);
+    const args = readCmdline(pid);
+    if (!args || args.length === 0) continue;
+    const provider = providerFromCmdline(args);
+    if (!provider) continue;
+    out.push({ pid, provider, args });
+  }
+  return out;
+}
+function buildChildMap() {
+  const children = /* @__PURE__ */ new Map();
+  if (process.platform !== "linux") return children;
+  let pids;
+  try {
+    pids = readdirSync2("/proc").filter((name) => /^\d+$/.test(name));
+  } catch {
+    return children;
+  }
+  for (const pidStr of pids) {
+    let stat = null;
+    try {
+      stat = parseProcStat(readFileSync3(`/proc/${pidStr}/stat`, "utf-8"));
+    } catch {
+      continue;
+    }
+    if (!stat) continue;
+    const arr = children.get(stat.ppid);
+    if (arr) arr.push(stat.pid);
+    else children.set(stat.ppid, [stat.pid]);
+  }
+  return children;
+}
+function resolveFromResume(ctx, uuid) {
+  const file = findSessionFileById(ctx.root, uuid);
+  if (!file) return null;
+  return {
+    pid: 0,
+    // filled by caller
+    provider: "claude",
+    // filled by caller
+    session_id: uuid.toLowerCase(),
+    file_path: file,
+    home: ctx.home,
+    project_path: ctx.cwd ?? void 0
+  };
+}
+function resolveFromOpenFiles(ctx, provider, pid) {
+  const files = readOpenJsonlFiles(pid).filter(isSessionFilePath);
+  const inRoot = files.find((f) => f.startsWith(ctx.root));
+  const chosen = inRoot ?? files[0];
+  if (!chosen) return null;
+  const sid = extractSessionIdFromPath(chosen);
+  if (!sid) return null;
+  return {
+    pid,
+    provider,
+    session_id: sid,
+    file_path: chosen,
+    home: ctx.home,
+    project_path: ctx.cwd ?? void 0
+  };
+}
+function resolveFromCwdMtime(ctx, provider, pid) {
+  if (!ctx.cwd) return null;
+  const encoded = encodeClaudeCwd(ctx.cwd);
+  const dir = join4(ctx.root, encoded);
+  const best = mostRecentJsonl(dir) ?? mostRecentJsonlRecursive(ctx.root, 0);
+  if (!best) return null;
+  const sid = extractSessionIdFromPath(best.path);
+  if (!sid) return null;
+  return {
+    pid,
+    provider,
+    session_id: sid,
+    file_path: best.path,
+    home: ctx.home,
+    project_path: ctx.cwd
+  };
+}
+function mostRecentJsonl(dir) {
+  let entries;
+  try {
+    entries = readdirSync2(dir);
+  } catch {
+    return null;
+  }
+  let best = null;
+  for (const entry of entries) {
+    if (!entry.endsWith(".jsonl")) continue;
+    const full = join4(dir, entry);
+    try {
+      const mtime = statSync2(full).mtimeMs;
+      if (!best || mtime > best.mtime) best = { path: full, mtime };
+    } catch {
+    }
+  }
+  return best;
+}
+function mostRecentJsonlRecursive(dir, depth) {
+  if (depth > 2) return null;
+  let entries;
+  try {
+    entries = readdirSync2(dir);
+  } catch {
+    return null;
+  }
+  let best = null;
+  for (const entry of entries) {
+    if (entry === "subagents") continue;
+    const full = join4(dir, entry);
+    let st;
+    try {
+      st = statSync2(full);
+    } catch {
+      continue;
+    }
+    if (st.isDirectory()) {
+      const nested = mostRecentJsonlRecursive(full, depth + 1);
+      if (nested && (!best || nested.mtime > best.mtime)) best = nested;
+    } else if (entry.endsWith(".jsonl")) {
+      if (!best || st.mtimeMs > best.mtime) best = { path: full, mtime: st.mtimeMs };
+    }
+  }
+  return best;
+}
+async function mapProcessesToSessions() {
+  const result = /* @__PURE__ */ new Map();
+  if (process.platform !== "linux") return result;
+  const procs = listAgentProcesses();
+  if (procs.length === 0) return result;
+  const childMap = buildChildMap();
+  for (const proc of procs) {
+    if (!isPidAlive(proc.pid)) continue;
+    const mapped = resolveProcess(proc, childMap, /* @__PURE__ */ new Set());
+    if (mapped?.session_id && !result.has(mapped.session_id)) {
+      result.set(mapped.session_id, mapped);
+    }
+  }
+  return result;
+}
+function resolveProcess(proc, childMap, visited) {
+  if (visited.has(proc.pid)) return null;
+  visited.add(proc.pid);
+  const environ = readEnviron(proc.pid);
+  const home = resolveAgentHome(proc.provider, environ);
+  const root = sessionRootForHome(proc.provider, home);
+  const cwd = readCwd(proc.pid);
+  const ctx = { environ, home, root, cwd };
+  const uuid = extractResumeUuid(proc.args);
+  if (uuid) {
+    const hit = resolveFromResume(ctx, uuid);
+    if (hit) return { ...hit, pid: proc.pid, provider: proc.provider };
+  }
+  const fromFd = resolveFromOpenFiles(ctx, proc.provider, proc.pid);
+  if (fromFd) return fromFd;
+  const children = childMap.get(proc.pid) ?? [];
+  for (const childPid of children) {
+    if (visited.has(childPid)) continue;
+    const childArgs = readCmdline(childPid);
+    if (!childArgs) continue;
+    const childProc = { pid: childPid, provider: proc.provider, args: childArgs };
+    const childHit = resolveProcess(childProc, childMap, visited);
+    if (childHit) return childHit;
+  }
+  return resolveFromCwdMtime(ctx, proc.provider, proc.pid);
+}
+
+// src/lib/runs.ts
+var MAX_RUN_RECORDS = 500;
+function runsPath() {
+  const env = process.env.STARLING_RUNS;
+  return env ?? DEFAULT_RUNS_PATH;
+}
+function emptyRuns() {
+  return { version: RUNS_VERSION, runs: [] };
+}
+function loadRuns() {
+  let data;
+  try {
+    data = readJSON(runsPath());
+  } catch {
+    return emptyRuns();
+  }
+  if (!data || typeof data !== "object" || !Array.isArray(data.runs)) {
+    return emptyRuns();
+  }
+  return { version: RUNS_VERSION, runs: data.runs };
+}
+function saveRuns(data) {
+  if (data.runs.length > MAX_RUN_RECORDS) {
+    const running = data.runs.filter((r) => r.status === "running");
+    const terminal = data.runs.filter((r) => r.status !== "running").sort((a, b) => (b.ended_at ?? b.started_at).localeCompare(a.ended_at ?? a.started_at));
+    data = { version: RUNS_VERSION, runs: [...running, ...terminal].slice(0, MAX_RUN_RECORDS) };
+  }
+  atomicWriteJSON(runsPath(), data);
+}
+function createRun(record) {
+  const data = loadRuns();
+  data.runs.push(record);
+  saveRuns(data);
+}
+function finalizeRun(runId, patch) {
+  const data = loadRuns();
+  const idx = data.runs.findIndex((r) => r.run_id === runId);
+  if (idx === -1) return;
+  const existing = data.runs[idx];
+  data.runs[idx] = {
+    ...existing,
+    status: patch.status,
+    exit_code: patch.exit_code ?? existing.exit_code,
+    ended_at: patch.ended_at ?? (/* @__PURE__ */ new Date()).toISOString(),
+    session_id: patch.session_id ?? existing.session_id
+  };
+  saveRuns(data);
+}
+function removeRun(runId) {
+  const data = loadRuns();
+  const before = data.runs.length;
+  data.runs = data.runs.filter((r) => r.run_id !== runId);
+  if (data.runs.length === before) return false;
+  saveRuns(data);
+  return true;
+}
+function clearRuns(filter) {
+  const data = loadRuns();
+  const before = data.runs.length;
+  data.runs = data.runs.filter((r) => {
+    if (filter?.session_id && r.session_id !== filter.session_id) return true;
+    if (filter?.status && r.status !== filter.status) return true;
+    return false;
+  });
+  const removed = before - data.runs.length;
+  if (removed > 0) saveRuns(data);
+  return removed;
+}
+function findRun(runId) {
+  return loadRuns().runs.find((r) => r.run_id === runId);
+}
+function findRunsBySession(sessionId) {
+  return loadRuns().runs.filter((r) => r.session_id === sessionId).sort((a, b) => b.started_at.localeCompare(a.started_at));
+}
+function getLatestRunForSession(sessionId) {
+  return findRunsBySession(sessionId)[0];
+}
+function getRunStatusForSession(sessionId) {
+  const latest = getLatestRunForSession(sessionId);
+  return latest ? latest.status : "unknown";
+}
+var STATUS_GLYPH = {
+  running: "\u25CF",
+  completed: "\u2713",
+  errored: "\u2717",
+  crashed: "\u26A1",
+  stale: "~",
+  unknown: "\xB7"
+};
+var STATUS_COLOR = {
+  running: chalk.green,
+  completed: chalk.gray,
+  errored: chalk.red,
+  crashed: chalk.magenta,
+  stale: chalk.yellow,
+  unknown: chalk.gray
+};
+function statusBadge(status) {
+  const color = STATUS_COLOR[status] ?? chalk.gray;
+  return color(STATUS_GLYPH[status] ?? "\xB7");
+}
+function summarizeRunStatus(bookmarks, options) {
+  const color = options?.color ?? true;
+  const counts = /* @__PURE__ */ new Map();
+  for (const b of bookmarks) {
+    const status = getRunStatusForSession(b.session_id);
+    counts.set(status, (counts.get(status) ?? 0) + 1);
+  }
+  const order = ["running", "errored", "crashed", "completed", "unknown"];
+  const render = (status) => color ? statusBadge(status) : STATUS_GLYPH[status] ?? "\xB7";
+  const parts = [];
+  for (const status of order) {
+    const n = counts.get(status);
+    if (!n) continue;
+    parts.push(`${render(status)}${n}`);
+  }
+  return parts.length > 0 ? parts.join(" ") : render("unknown");
+}
+function isPidAlive2(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = error.code;
+    return code === "EPERM";
+  }
+}
+function reconcileStaleRuns() {
+  const data = loadRuns();
+  let changed = 0;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  for (const run of data.runs) {
+    if (run.status !== "running") continue;
+    if (run.pid !== void 0 && !isPidAlive2(run.pid)) {
+      run.status = "crashed";
+      run.ended_at = now;
+      changed++;
+    }
+  }
+  if (changed > 0) saveRuns(data);
+  return changed;
+}
+async function detectRunningSessions() {
+  const mapped = await mapProcessesToSessions();
+  const detected = /* @__PURE__ */ new Map();
+  for (const [sessionId, info] of mapped) {
+    detected.set(sessionId, {
+      pid: info.pid,
+      provider: info.provider,
+      project_path: info.project_path,
+      file_path: info.file_path,
+      home: info.home
+    });
+  }
+  return detected;
+}
+
+// src/lib/format.ts
+function formatSessionTable(sessions, statusMap) {
+  const formatToken = (value) => {
+    return value === void 0 ? "-" : String(value);
+  };
+  const hasStatus = statusMap !== void 0;
+  const head = [
+    chalk2.cyan("Session ID"),
+    ...hasStatus ? [chalk2.cyan("Status")] : [],
+    chalk2.cyan("Agent"),
+    chalk2.cyan("Model"),
+    chalk2.cyan("Project"),
+    chalk2.cyan("Modified"),
+    chalk2.cyan("Input"),
+    chalk2.cyan("Output"),
+    chalk2.cyan("Total"),
+    chalk2.cyan("Cache")
+  ];
+  const colWidths = [
+    15,
+    ...hasStatus ? [9] : [],
+    8,
+    16,
+    30,
+    20,
+    10,
+    10,
+    10,
+    10
+  ];
+  const table = new Table({ head, colWidths, style: { head: [] } });
+  for (const s of sessions) {
+    const shortId = shortSessionId(s.session_id);
+    const agent = s.provider === "codex" ? "codex" : "claude";
+    const shortProject = s.project_path ? s.project_path.length > 36 ? "\u2026" + s.project_path.slice(-35) : s.project_path : "-";
+    const shortDate = s.modified_at.slice(0, 19).replace("T", " ");
+    const badge = hasStatus ? statusBadge(statusMap.get(s.session_id) ?? "unknown") : null;
+    table.push([
+      shortId,
+      ...badge !== null ? [badge] : [],
+      agent,
+      s.model || "-",
+      shortProject,
+      shortDate,
+      formatToken(s.token_usage?.input_tokens),
+      formatToken(s.token_usage?.output_tokens),
+      formatToken(s.token_usage?.total_tokens),
+      formatToken(s.token_usage?.cache_tokens)
+    ]);
+  }
+  return table.toString();
+}
+function formatSpaceTree(spaces, bookmarks) {
+  if (spaces.length === 0) return chalk2.yellow("No catalogs created yet.");
+  const childrenMap = /* @__PURE__ */ new Map();
+  for (const s of spaces) {
+    const parent = s.parent_id ?? null;
+    if (!childrenMap.has(parent)) childrenMap.set(parent, []);
+    childrenMap.get(parent).push(s);
+  }
+  const bookmarkBySpace = /* @__PURE__ */ new Map();
+  for (const b of bookmarks) {
+    for (const sid of b.space_ids) {
+      if (!bookmarkBySpace.has(sid)) bookmarkBySpace.set(sid, []);
+      bookmarkBySpace.get(sid).push(b);
+    }
+  }
+  function renderNode(space, prefix, isLast) {
+    const connector = isLast ? "\u2514\u2500\u2500 " : "\u251C\u2500\u2500 ";
+    const lines2 = [];
+    const tagStr = space.tags.length > 0 ? chalk2.gray(` [${space.tags.join(", ")}]`) : "";
+    lines2.push(`${prefix}${connector}${chalk2.bold(space.name)}${tagStr}`);
+    const childPrefix = prefix + (isLast ? "    " : "\u2502   ");
+    const bk = bookmarkBySpace.get(space.id) || [];
+    for (let i = 0; i < bk.length; i++) {
+      const bIsLast = i === bk.length - 1 && !childrenMap.has(space.id);
+      const bConn = bIsLast ? "\u2514\u2500\u2500 " : "\u251C\u2500\u2500 ";
+      lines2.push(`${childPrefix}${bConn}${chalk2.cyan(bk[i].title)} ${chalk2.gray(`[${bk[i].session_id}]`)}`);
+    }
+    const children = childrenMap.get(space.id) || [];
+    for (let i = 0; i < children.length; i++) {
+      lines2.push(...renderNode(children[i], childPrefix, i === children.length - 1 && bk.length === 0));
+    }
+    return lines2;
+  }
+  const roots = childrenMap.get(null) || [];
+  const lines = [chalk2.bold("starling")];
+  for (let i = 0; i < roots.length; i++) {
+    lines.push(...renderNode(roots[i], "", i === roots.length - 1));
+  }
+  return lines.join("\n");
 }
 
 // src/lib/id.ts
@@ -818,9 +1362,9 @@ function catalogPath(space, spaces = listSpaces()) {
 }
 
 // src/lib/sessionIndex.ts
-import { existsSync as existsSync3, readFileSync as readFileSync3, readdirSync as readdirSync2, statSync as statSync2, unlinkSync as unlinkSync2 } from "fs";
-import { dirname as dirname2, join as join4 } from "path";
-var SESSION_INDEX_PATH = join4(DEFAULT_STARLING_HOME, "session-index.json");
+import { existsSync as existsSync3, readFileSync as readFileSync4, readdirSync as readdirSync3, statSync as statSync3, unlinkSync as unlinkSync2 } from "fs";
+import { dirname as dirname2, join as join5 } from "path";
+var SESSION_INDEX_PATH = join5(DEFAULT_STARLING_HOME, "session-index.json");
 async function rebuildSessionIndex(provider) {
   const sessions = [];
   for await (const session of streamSessions(provider, Infinity)) {
@@ -831,7 +1375,7 @@ async function rebuildSessionIndex(provider) {
 function loadSessionIndex() {
   if (!existsSync3(SESSION_INDEX_PATH)) return null;
   try {
-    const parsed = JSON.parse(readFileSync3(SESSION_INDEX_PATH, "utf-8"));
+    const parsed = JSON.parse(readFileSync4(SESSION_INDEX_PATH, "utf-8"));
     if (!isRecord2(parsed)) return null;
     if (parsed.version !== 1 || !Array.isArray(parsed.sessions)) return null;
     if (typeof parsed.built_at !== "string") return null;
@@ -869,7 +1413,7 @@ async function refreshIndexedSessionsById(sessionIds, provider, options = {}) {
     if (!matchesSessionId(wantedIds, session.session_id)) continue;
     if (!session.file_path) continue;
     try {
-      const stat = statSync2(session.file_path);
+      const stat = statSync3(session.file_path);
       const indexedMtime = indexedFileMtime(index, session) ?? Date.parse(session.modified_at);
       const sessionHasFileIndex = Boolean(session.file_path && index.files?.some((file) => file.path === session.file_path));
       if (!options.refreshMatchedFiles && sessionHasFileIndex && Number.isFinite(indexedMtime) && stat.mtimeMs <= indexedMtime) continue;
@@ -957,7 +1501,7 @@ function isSessionIndexFresh(provider, now = Date.now()) {
   if (!provider || provider === "codex") roots.push(CODEX_SESSIONS_DIR);
   for (const root of roots) {
     try {
-      const stat = statSync2(root);
+      const stat = statSync3(root);
       if (stat.mtimeMs > builtAt) return false;
     } catch {
       return false;
@@ -1055,7 +1599,7 @@ async function refreshIndexedSessionFiles(index, provider) {
       continue;
     }
     try {
-      const stat = statSync2(session.file_path);
+      const stat = statSync3(session.file_path);
       const indexedMtime = indexedFileMtime(index, session) ?? Date.parse(session.modified_at);
       if (Number.isFinite(indexedMtime) && stat.mtimeMs <= indexedMtime) {
         sessions.push(session);
@@ -1108,7 +1652,7 @@ function collectSessionDirectoryEntries(provider) {
 function collectSessionDirectoryEntriesInDir(provider, dir, directories) {
   let stat;
   try {
-    stat = statSync2(dir);
+    stat = statSync3(dir);
   } catch {
     return;
   }
@@ -1116,15 +1660,15 @@ function collectSessionDirectoryEntriesInDir(provider, dir, directories) {
   directories.push({ provider, path: dir, mtimeMs: stat.mtimeMs });
   let entries;
   try {
-    entries = readdirSync2(dir);
+    entries = readdirSync3(dir);
   } catch {
     return;
   }
   for (const entry of entries) {
     if (entry === "subagents") continue;
-    const full = join4(dir, entry);
+    const full = join5(dir, entry);
     try {
-      const childStat = statSync2(full);
+      const childStat = statSync3(full);
       if (childStat.isDirectory()) {
         collectSessionDirectoryEntriesInDir(provider, full, directories);
       }
@@ -1163,7 +1707,7 @@ function mergeDirectoryEntries(existing, refreshed, provider) {
 function collectNewSessionFileEntriesInDir(provider, dir, previousDirMtimes, previousChildDirs, indexedPaths, files, directories) {
   let dirStat;
   try {
-    dirStat = statSync2(dir);
+    dirStat = statSync3(dir);
   } catch {
     return;
   }
@@ -1179,15 +1723,15 @@ function collectNewSessionFileEntriesInDir(provider, dir, previousDirMtimes, pre
   }
   let entries;
   try {
-    entries = readdirSync2(dir);
+    entries = readdirSync3(dir);
   } catch {
     return;
   }
   for (const entry of entries) {
     if (entry === "subagents") continue;
-    const full = join4(dir, entry);
+    const full = join5(dir, entry);
     try {
-      const stat = statSync2(full);
+      const stat = statSync3(full);
       if (stat.isDirectory()) {
         collectNewSessionFileEntriesInDir(provider, full, previousDirMtimes, previousChildDirs, indexedPaths, files, directories);
       } else if (directoryChanged && entry.endsWith(".jsonl") && !indexedPaths.has(full)) {
@@ -1199,7 +1743,7 @@ function collectNewSessionFileEntriesInDir(provider, dir, previousDirMtimes, pre
 }
 
 // src/commands/session.ts
-function formatSessionLine(s) {
+function formatSessionLine(s, status) {
   const agent = s.provider === "codex" ? "codex" : "claude";
   const shortId = shortSessionId(s.session_id);
   const shortProject = s.project_path ? s.project_path.length > 40 ? "\u2026" + s.project_path.slice(-39) : s.project_path : "-";
@@ -1208,21 +1752,29 @@ function formatSessionLine(s) {
   const outputTokens = s.token_usage?.output_tokens ?? "-";
   const totalTokens = s.token_usage?.total_tokens ?? "-";
   const cacheTokens = s.token_usage?.cache_tokens ?? "-";
-  return `${chalk2.cyan(shortId.padEnd(15))}  ${chalk2.gray(agent.padEnd(7))}  ${(s.model || "-").padEnd(18)}  ${shortProject.padEnd(42)}  ${chalk2.gray(date)}  ${chalk2.yellow(String(inputTokens)).padEnd(10)} ${chalk2.yellow(String(outputTokens)).padEnd(10)} ${chalk2.yellow(String(totalTokens)).padEnd(10)} ${chalk2.yellow(String(cacheTokens)).padEnd(10)}`;
+  const prefix = status !== void 0 ? `${statusBadge(status)} ` : "";
+  return `${prefix}${chalk3.cyan(shortId.padEnd(15))}  ${chalk3.gray(agent.padEnd(7))}  ${(s.model || "-").padEnd(18)}  ${shortProject.padEnd(42)}  ${chalk3.gray(date)}  ${chalk3.yellow(String(inputTokens)).padEnd(10)} ${chalk3.yellow(String(outputTokens)).padEnd(10)} ${chalk3.yellow(String(totalTokens)).padEnd(10)} ${chalk3.yellow(String(cacheTokens)).padEnd(10)}`;
 }
 function registerSessionCommand(program2) {
   const session = new Command("session").description("Discover and manage agent sessions");
   session.command("list").alias("ls").description("List recent agent sessions").option("-n, --limit <number>", "max sessions to show", "20").option("-a, --agent <agent>", "filter by agent: claude | codex").option("--cataloged", "only show sessions assigned to any catalog").option("-c, --catalog <catalog>", "only show sessions assigned to a catalog").option("--all", "list all sessions (streaming with pager)").option("--json", "output as JSON").action(async (opts) => {
     const provider = opts.agent;
     const hasCatalogFilter = Boolean(opts.cataloged || opts.catalog);
+    reconcileStaleRuns();
+    const buildStatusMap = (list) => {
+      const map = /* @__PURE__ */ new Map();
+      for (const s of list) map.set(s.session_id, getRunStatusForSession(s.session_id));
+      return map;
+    };
     if (opts.all) {
       const filteredSessions = hasCatalogFilter ? await findCatalogSessions(opts.cataloged, opts.catalog, provider) : await collectStreamedSessions(provider);
       if (opts.json) {
         console.log(JSON.stringify(filteredSessions, null, 2));
         return;
       }
-      const header = `${"SESSION".padEnd(15)}  ${"AGENT".padEnd(7)}  ${"MODEL".padEnd(18)}  ${"PROJECT".padEnd(42)}  MODIFIED  ${"INPUT".padEnd(10)} ${"OUTPUT".padEnd(10)} ${"TOTAL".padEnd(10)} ${"CACHE".padEnd(10)}
-${"\u2500".repeat(145)}`;
+      const statusMap = buildStatusMap(filteredSessions);
+      const header = `${"ST".padEnd(2)} ${"SESSION".padEnd(15)}  ${"AGENT".padEnd(7)}  ${"MODEL".padEnd(18)}  ${"PROJECT".padEnd(42)}  MODIFIED  ${"INPUT".padEnd(10)} ${"OUTPUT".padEnd(10)} ${"TOTAL".padEnd(10)} ${"CACHE".padEnd(10)}
+${"\u2500".repeat(148)}`;
       const usePager = process.stdout.isTTY && process.platform !== "win32";
       const pager = usePager ? spawn("less", ["-RFX"], { stdio: ["pipe", "inherit", "inherit"] }) : null;
       let pipeBroken = false;
@@ -1246,10 +1798,10 @@ ${"\u2500".repeat(145)}`;
       let count = 0;
       for (const meta of filteredSessions) {
         if (pipeBroken) break;
-        out(formatSessionLine(meta));
+        out(formatSessionLine(meta, statusMap.get(meta.session_id)));
         count++;
       }
-      if (!pipeBroken) out(chalk2.gray(`
+      if (!pipeBroken) out(chalk3.gray(`
 Total: ${count} sessions`));
       if (pager && !pipeBroken) {
         pager.stdin.end();
@@ -1261,18 +1813,18 @@ Total: ${count} sessions`));
     const catalogSessions = hasCatalogFilter ? await findCatalogSessions(opts.cataloged, opts.catalog, provider) : null;
     const sessions = catalogSessions ? catalogSessions.slice(0, limit) : await findSessions(limit, provider);
     if (sessions.length === 0) {
-      console.log(chalk2.yellow("No sessions found."));
+      console.log(chalk3.yellow("No sessions found."));
       return;
     }
     const total = catalogSessions ? catalogSessions.length : indexedSessionTotal(provider);
     const truncatedHint = formatTruncationHint(sessions.length, total, limit);
     if (opts.json) {
       console.log(JSON.stringify(sessions, null, 2));
-      if (truncatedHint) process.stderr.write(chalk2.gray(truncatedHint + "\n"));
+      if (truncatedHint) process.stderr.write(chalk3.gray(truncatedHint + "\n"));
       return;
     }
-    console.log(formatSessionTable(sessions));
-    if (truncatedHint) console.log(chalk2.gray(truncatedHint));
+    console.log(formatSessionTable(sessions, buildStatusMap(sessions)));
+    if (truncatedHint) console.log(chalk3.gray(truncatedHint));
   });
   const index = new Command("index").description("Manage the local session index");
   index.command("status").description("Show session index status").option("--json", "output as JSON").action((opts) => {
@@ -1292,11 +1844,11 @@ Total: ${count} sessions`));
       return;
     }
     if (!current) {
-      console.log(chalk2.yellow("No session index found."));
-      console.log(chalk2.gray(`  Path: ${SESSION_INDEX_PATH}`));
+      console.log(chalk3.yellow("No session index found."));
+      console.log(chalk3.gray(`  Path: ${SESSION_INDEX_PATH}`));
       return;
     }
-    console.log(chalk2.green("Session index"));
+    console.log(chalk3.green("Session index"));
     console.log(`  Path:     ${SESSION_INDEX_PATH}`);
     console.log(`  Built:    ${current.built_at}`);
     console.log(`  Sessions: ${current.session_count}`);
@@ -1309,20 +1861,20 @@ Total: ${count} sessions`));
       console.log(JSON.stringify({ path: SESSION_INDEX_PATH, ...rebuilt }, null, 2));
       return;
     }
-    console.log(chalk2.green("Rebuilt session index"));
+    console.log(chalk3.green("Rebuilt session index"));
     console.log(`  Path:     ${SESSION_INDEX_PATH}`);
     console.log(`  Sessions: ${rebuilt.session_count}`);
     console.log(`  Projects: ${rebuilt.project_count}`);
   });
   index.command("clear").description("Remove ~/.starling/session-index.json").action(() => {
     const removed = clearSessionIndex();
-    console.log(removed ? chalk2.green("Session index removed.") : chalk2.yellow("No session index found."));
+    console.log(removed ? chalk3.green("Session index removed.") : chalk3.yellow("No session index found."));
   });
   session.addCommand(index);
   session.command("show <session-id>").description("Show session details").option("--json", "output as JSON").action(async (sessionId, opts) => {
     const meta = await resolveSessionById(sessionId);
     if (!meta) {
-      console.error(chalk2.red(`Session not found: ${sessionId}`));
+      console.error(chalk3.red(`Session not found: ${sessionId}`));
       process.exit(1);
     }
     const catalogs = findSessionCatalogs(meta.session_id);
@@ -1331,7 +1883,7 @@ Total: ${count} sessions`));
       console.log(JSON.stringify({ ...meta, catalogs, metadata: metadata ?? null }, null, 2));
       return;
     }
-    console.log(chalk2.bold.cyan(`Session: ${meta.session_id}`));
+    console.log(chalk3.bold.cyan(`Session: ${meta.session_id}`));
     console.log(`  Provider:    ${meta.provider}`);
     console.log(`  Model:       ${meta.model || "-"}`);
     console.log(`  Project:     ${meta.project_path || "-"}`);
@@ -1370,18 +1922,18 @@ Total: ${count} sessions`));
     if (opts.json) {
       console.log(JSON.stringify(sessions, null, 2));
       if (resolved < requested) {
-        process.stderr.write(chalk2.gray(`Resolved ${resolved}/${requested} sessions.
+        process.stderr.write(chalk3.gray(`Resolved ${resolved}/${requested} sessions.
 `));
       }
       return;
     }
     if (sessions.length === 0) {
-      console.log(chalk2.yellow(`No sessions found for ${requested} id(s).`));
+      console.log(chalk3.yellow(`No sessions found for ${requested} id(s).`));
       return;
     }
     console.log(formatSessionTable(sessions));
     if (resolved < requested) {
-      console.log(chalk2.gray(`Resolved ${resolved}/${requested} sessions.`));
+      console.log(chalk3.gray(`Resolved ${resolved}/${requested} sessions.`));
     }
   });
   session.command("resume <session-id>").description("Resume an agent session").action(async (sessionId) => {
@@ -1397,16 +1949,16 @@ Total: ${count} sessions`));
       patch.tags = [.../* @__PURE__ */ new Set([...bookmark.tags, ...parseTags(opts.addTags)])];
     }
     if (Object.keys(patch).length === 0) {
-      console.log(chalk2.yellow(`No metadata changes provided for ${bookmark.id}.`));
+      console.log(chalk3.yellow(`No metadata changes provided for ${bookmark.id}.`));
       return;
     }
     const updated = updateBookmark(bookmark.id, patch);
-    console.log(chalk2.green(`Updated session metadata: ${updated?.id ?? bookmark.id}`));
+    console.log(chalk3.green(`Updated session metadata: ${updated?.id ?? bookmark.id}`));
   });
   session.command("note <session-id> <content...>").description("Add a note to a session").action(async (sessionId, contentParts) => {
     const content = contentParts.join(" ").trim();
     if (!content) {
-      console.error(chalk2.red("Note content is required."));
+      console.error(chalk3.red("Note content is required."));
       process.exit(1);
     }
     const meta = await resolveSessionMeta(sessionId);
@@ -1414,29 +1966,29 @@ Total: ${count} sessions`));
     const note = { id: generateNoteId(), content, created_at: (/* @__PURE__ */ new Date()).toISOString() };
     const notes = [...bookmark.notes, note];
     updateBookmark(bookmark.id, { notes });
-    console.log(chalk2.green(`Note added to ${bookmark.id}: ${note.id}`));
+    console.log(chalk3.green(`Note added to ${bookmark.id}: ${note.id}`));
   });
   session.command("unpin <session-id>").description("Remove Starling metadata for a session without deleting the session file").action((sessionId) => {
     const bookmark = findSessionBookmark(sessionId);
     if (!bookmark) {
-      console.log(chalk2.yellow(`Session metadata not found: ${sessionId}`));
+      console.log(chalk3.yellow(`Session metadata not found: ${sessionId}`));
       return;
     }
     removeBookmark(bookmark.id);
-    console.log(chalk2.green(`Removed pin metadata for ${shortSessionId(bookmark.session_id)}`));
+    console.log(chalk3.green(`Removed pin metadata for ${shortSessionId(bookmark.session_id)}`));
   });
   session.command("delete <session-id>").description("Delete a session file and remove Starling metadata").option("-y, --yes", "confirm deletion").action(async (sessionId, opts) => {
     if (!opts.yes) {
-      console.error(chalk2.red("Deleting a session file requires --yes."));
+      console.error(chalk3.red("Deleting a session file requires --yes."));
       process.exit(1);
     }
     const meta = await resolveSessionMeta(sessionId);
     if (!meta.file_path) {
-      console.error(chalk2.red(`Session file path is unknown: ${meta.session_id}`));
+      console.error(chalk3.red(`Session file path is unknown: ${meta.session_id}`));
       process.exit(1);
     }
     if (!existsSync4(meta.file_path)) {
-      console.error(chalk2.red(`Session file not found: ${meta.file_path}`));
+      console.error(chalk3.red(`Session file not found: ${meta.file_path}`));
       process.exit(1);
     }
     unlinkSync3(meta.file_path);
@@ -1445,10 +1997,10 @@ Total: ${count} sessions`));
       removeBookmark(bookmark.id);
     }
     removeSessionFromIndex(meta.session_id);
-    console.log(chalk2.green(`Deleted session ${shortSessionId(meta.session_id)}`));
-    console.log(chalk2.gray(`  File: ${meta.file_path}`));
+    console.log(chalk3.green(`Deleted session ${shortSessionId(meta.session_id)}`));
+    console.log(chalk3.gray(`  File: ${meta.file_path}`));
     if (bookmark) {
-      console.log(chalk2.gray(`  Removed pin: ${bookmark.id}`));
+      console.log(chalk3.gray(`  Removed pin: ${bookmark.id}`));
     }
   });
   const catalog = new Command("catalog").description("Manage session catalog assignments");
@@ -1460,36 +2012,36 @@ Total: ${count} sessions`));
       tags: opts.tags ? parseTags(opts.tags) : void 0
     });
     if (bookmark.space_ids.includes(catalogEntry.id)) {
-      console.log(chalk2.yellow(`Session already in catalog "${catalogEntry.name}".`));
+      console.log(chalk3.yellow(`Session already in catalog "${catalogEntry.name}".`));
       return;
     }
     updateBookmark(bookmark.id, { space_ids: [...bookmark.space_ids, catalogEntry.id] });
-    console.log(chalk2.green(`Added session ${shortSessionId(bookmark.session_id)} to catalog "${catalogEntry.name}"`));
+    console.log(chalk3.green(`Added session ${shortSessionId(bookmark.session_id)} to catalog "${catalogEntry.name}"`));
   });
   catalog.command("remove <session-id> <catalog>").alias("rm").description("Remove a session from a catalog").action((sessionId, catalog2) => {
     const catalogEntry = resolveCatalog(catalog2);
     const bookmark = findSessionBookmark(sessionId);
     if (!bookmark) {
-      console.error(chalk2.red(`Session metadata not found: ${sessionId}`));
+      console.error(chalk3.red(`Session metadata not found: ${sessionId}`));
       process.exit(1);
     }
     if (!bookmark.space_ids.includes(catalogEntry.id)) {
-      console.log(chalk2.yellow(`Session is not in catalog "${catalogEntry.name}".`));
+      console.log(chalk3.yellow(`Session is not in catalog "${catalogEntry.name}".`));
       return;
     }
     updateBookmark(bookmark.id, {
       space_ids: bookmark.space_ids.filter((catalogId) => catalogId !== catalogEntry.id)
     });
-    console.log(chalk2.green(`Removed session ${shortSessionId(bookmark.session_id)} from catalog "${catalogEntry.name}"`));
+    console.log(chalk3.green(`Removed session ${shortSessionId(bookmark.session_id)} from catalog "${catalogEntry.name}"`));
   });
   catalog.command("clear <session-id>").description("Remove a session from all catalogs").action((sessionId) => {
     const bookmark = findSessionBookmark(sessionId);
     if (!bookmark) {
-      console.error(chalk2.red(`Session metadata not found: ${sessionId}`));
+      console.error(chalk3.red(`Session metadata not found: ${sessionId}`));
       process.exit(1);
     }
     updateBookmark(bookmark.id, { space_ids: [] });
-    console.log(chalk2.green(`Removed session ${shortSessionId(bookmark.session_id)} from all catalogs`));
+    console.log(chalk3.green(`Removed session ${shortSessionId(bookmark.session_id)} from all catalogs`));
   });
   session.addCommand(catalog);
   program2.addCommand(session);
@@ -1573,13 +2125,13 @@ function resolveCatalog(catalogRef) {
     return { id: resolution.space.id, name: resolution.space.name };
   }
   if (resolution.kind === "not_found") {
-    console.error(chalk2.red(`Catalog not found: ${catalogRef}`));
+    console.error(chalk3.red(`Catalog not found: ${catalogRef}`));
     process.exit(1);
   }
-  console.error(chalk2.red(`Ambiguous catalog reference: ${catalogRef}`));
-  console.error(chalk2.red("Use a catalog path like parent/child or the catalog id."));
+  console.error(chalk3.red(`Ambiguous catalog reference: ${catalogRef}`));
+  console.error(chalk3.red("Use a catalog path like parent/child or the catalog id."));
   for (const match of resolution.matches) {
-    console.error(chalk2.gray(`  ${catalogPath(match, listSpaces())} (${match.id})`));
+    console.error(chalk3.gray(`  ${catalogPath(match, listSpaces())} (${match.id})`));
   }
   process.exit(1);
 }
@@ -1591,12 +2143,12 @@ async function resolveSessionMeta(input) {
   if (inputLooksLikeSessionId) {
     const indexedCandidates = await findIndexedSessionCandidates(input);
     if (indexedCandidates.length > 0) return pickSessionCandidate(input, indexedCandidates);
-    console.error(chalk2.red(`No session matches: ${input}`));
+    console.error(chalk3.red(`No session matches: ${input}`));
     process.exit(1);
   }
   const candidates = await findSessionCandidates(input);
   if (candidates.length === 0) {
-    console.error(chalk2.red(`No session matches: ${input}`));
+    console.error(chalk3.red(`No session matches: ${input}`));
     process.exit(1);
   }
   return pickSessionCandidate(input, candidates);
@@ -1611,8 +2163,8 @@ function pickSessionCandidate(input, candidates) {
   if (candidates.length === 1) return candidates[0];
   const exact = candidates.find((candidate) => candidate.session_id === input);
   if (exact) return exact;
-  console.error(chalk2.red(`Ambiguous session id: ${input}`));
-  console.error(chalk2.red("Please rerun with full session id."));
+  console.error(chalk3.red(`Ambiguous session id: ${input}`));
+  console.error(chalk3.red("Please rerun with full session id."));
   process.exit(1);
 }
 function ensureSessionBookmark(meta, defaults = {}) {
@@ -1637,33 +2189,33 @@ function ensureSessionBookmark(meta, defaults = {}) {
 async function resumeSession(sessionId) {
   const meta = await resolveSessionById(sessionId);
   if (!meta) {
-    console.error(chalk2.red(`Session not found: ${sessionId}`));
+    console.error(chalk3.red(`Session not found: ${sessionId}`));
     process.exit(1);
   }
   const cwd = meta.project_path || void 0;
   if (meta.provider === "claude") {
-    console.log(chalk2.green(`Resuming claude session: ${shortSessionId(meta.session_id)}\u2026`));
-    if (cwd) console.log(chalk2.gray(`  Project: ${cwd}`));
+    console.log(chalk3.green(`Resuming claude session: ${shortSessionId(meta.session_id)}\u2026`));
+    if (cwd) console.log(chalk3.gray(`  Project: ${cwd}`));
     const result = spawnSync("claude", ["--resume", meta.session_id], { stdio: "inherit", cwd });
     if (result.status !== 0) {
       process.exit(1);
     }
   } else if (meta.provider === "codex") {
-    console.log(chalk2.green(`Resuming codex session: ${shortSessionId(meta.session_id)}\u2026`));
-    if (cwd) console.log(chalk2.gray(`  Project: ${cwd}`));
+    console.log(chalk3.green(`Resuming codex session: ${shortSessionId(meta.session_id)}\u2026`));
+    if (cwd) console.log(chalk3.gray(`  Project: ${cwd}`));
     const result = spawnSync("codex", ["resume", meta.session_id], { stdio: "inherit", cwd });
     if (result.status !== 0) {
       process.exit(1);
     }
   } else {
-    console.error(chalk2.red(`Unknown provider: ${meta.provider}`));
+    console.error(chalk3.red(`Unknown provider: ${meta.provider}`));
     process.exit(1);
   }
 }
 
 // src/commands/pin.ts
 import { Command as Command2 } from "commander";
-import chalk3 from "chalk";
+import chalk4 from "chalk";
 import { createInterface as createInterface2 } from "readline/promises";
 import { stdin, stdout } from "process";
 function registerPinCommand(program2) {
@@ -1676,13 +2228,13 @@ function registerPinCommand(program2) {
     if (opts.current && !targetSessionId) {
       const sessions = await findSessions(1);
       if (sessions.length === 0) {
-        console.error(chalk3.red("No sessions found."));
+        console.error(chalk4.red("No sessions found."));
         process.exit(1);
       }
       targetSessionId = sessions[0].session_id;
     }
     if (!targetSessionId) {
-      console.error(chalk3.red("Please provide a session-id or use --current"));
+      console.error(chalk4.red("Please provide a session-id or use --current"));
       process.exit(1);
     }
     const { sessionId: resolvedSessionId, meta: existingMeta } = await resolveSessionOrSelect(targetSessionId);
@@ -1695,13 +2247,13 @@ function registerPinCommand(program2) {
         if (!existing.space_ids.includes(space.id)) {
           existing.space_ids.push(space.id);
           updateBookmark(existing.id, { space_ids: existing.space_ids });
-          console.log(chalk3.green(`Added ${existing.id} to catalog "${space.name}" (${space.id})`));
+          console.log(chalk4.green(`Added ${existing.id} to catalog "${space.name}" (${space.id})`));
         } else {
-          console.log(chalk3.yellow(`Already in catalog "${space.name}".`));
+          console.log(chalk4.yellow(`Already in catalog "${space.name}".`));
         }
         return;
       }
-      console.log(chalk3.yellow(`Already pinned as: ${existing.id}`));
+      console.log(chalk4.yellow(`Already pinned as: ${existing.id}`));
       return;
     }
     const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -1726,7 +2278,7 @@ function registerPinCommand(program2) {
       updated_at: now
     };
     addBookmark(bookmark);
-    console.log(chalk3.green(`Pinned: ${bookmark.id}`));
+    console.log(chalk4.green(`Pinned: ${bookmark.id}`));
     console.log(`  Title:    ${bookmark.title}`);
     console.log(`  Tags:     ${bookmark.tags.join(", ") || "(none)"}`);
     if (spaceIds.length > 0) {
@@ -1741,31 +2293,31 @@ function resolveCatalogRef(ref) {
   const resolution = resolveCatalogReference(ref);
   if (resolution.kind === "found") return resolution.space;
   if (resolution.kind === "not_found") {
-    console.error(chalk3.red(`Catalog not found: ${ref}`));
+    console.error(chalk4.red(`Catalog not found: ${ref}`));
     process.exit(1);
   }
-  console.error(chalk3.red(`Ambiguous catalog reference: ${ref}`));
-  console.error(chalk3.red("Use a catalog path like parent/child or the catalog id."));
+  console.error(chalk4.red(`Ambiguous catalog reference: ${ref}`));
+  console.error(chalk4.red("Use a catalog path like parent/child or the catalog id."));
   for (const match of resolution.matches) {
-    console.error(chalk3.gray(`  ${catalogPath(match, listSpaces())} (${match.id})`));
+    console.error(chalk4.gray(`  ${catalogPath(match, listSpaces())} (${match.id})`));
   }
   process.exit(1);
 }
 async function resolveSessionOrSelect(input) {
   const candidates = await findSessionCandidates(input);
   if (candidates.length === 0) {
-    console.error(chalk3.red(`No session matches: ${input}`));
+    console.error(chalk4.red(`No session matches: ${input}`));
     process.exit(1);
   }
   if (candidates.length === 1) {
     return { sessionId: candidates[0].session_id, meta: candidates[0] };
   }
   if (!stdin.isTTY) {
-    console.error(chalk3.red(`Ambiguous session id: ${input}`));
-    console.error(chalk3.red("Please rerun with full session id."));
+    console.error(chalk4.red(`Ambiguous session id: ${input}`));
+    console.error(chalk4.red("Please rerun with full session id."));
     process.exit(1);
   }
-  console.log(chalk3.yellow(`
+  console.log(chalk4.yellow(`
 Found ${candidates.length} sessions for "${input}":`));
   candidates.forEach((candidate, index) => {
     const shortId = shortSessionId(candidate.session_id);
@@ -1774,7 +2326,7 @@ Found ${candidates.length} sessions for "${input}":`));
     const model = candidate.model || "-";
     const provider = candidate.provider === "codex" ? "codex" : "claude";
     console.log(
-      `  ${index + 1}. ${chalk3.cyan(shortId.padEnd(15))}  ${chalk3.gray(provider.padEnd(7))}  ${model.padEnd(18)}  ${chalk3.gray(project.padEnd(38))}  ${chalk3.gray(date)}`
+      `  ${index + 1}. ${chalk4.cyan(shortId.padEnd(15))}  ${chalk4.gray(provider.padEnd(7))}  ${model.padEnd(18)}  ${chalk4.gray(project.padEnd(38))}  ${chalk4.gray(date)}`
     );
   });
   const rl = createInterface2({ input: stdin, output: stdout });
@@ -1782,7 +2334,7 @@ Found ${candidates.length} sessions for "${input}":`));
   rl.close();
   const choice = Number(answer.trim());
   if (!Number.isInteger(choice) || choice < 1 || choice > candidates.length) {
-    console.error(chalk3.red(`Invalid selection: ${answer.trim() || "(empty)"}`));
+    console.error(chalk4.red(`Invalid selection: ${answer.trim() || "(empty)"}`));
     process.exit(1);
   }
   return { sessionId: candidates[choice - 1].session_id, meta: candidates[choice - 1] };
@@ -1790,7 +2342,7 @@ Found ${candidates.length} sessions for "${input}":`));
 
 // src/commands/space.ts
 import { Command as Command3 } from "commander";
-import chalk4 from "chalk";
+import chalk5 from "chalk";
 import Table2 from "cli-table3";
 function registerSpaceCommand(program2) {
   const space = new Command3("catalog").alias("cat").description("Organize sessions into catalogs with hierarchical nesting");
@@ -1806,16 +2358,17 @@ function registerSpaceCommand(program2) {
       tags: opts.tags ? opts.tags.split(",").map((t) => t.trim()).filter(Boolean) : [],
       allowExistingLeaf: isPathCreate
     });
-    console.log(chalk4.green(`Created catalog: ${created.id} "${catalogPath(created)}"`));
-    console.log(chalk4.gray(`  Parent: ${created.parent_id ?? "-"}`));
+    console.log(chalk5.green(`Created catalog: ${created.id} "${catalogPath(created)}"`));
+    console.log(chalk5.gray(`  Parent: ${created.parent_id ?? "-"}`));
   });
   space.command("list").alias("ls").description("List all catalogs (flat)").option("--pins", "show pins in each catalog").option("--json", "output as JSON").action((opts) => {
     const spaces = listSpaces();
     if (spaces.length === 0) {
-      console.log(chalk4.yellow("No catalogs created yet."));
+      console.log(chalk5.yellow("No catalogs created yet."));
       return;
     }
     const allBookmarks = listBookmarks();
+    reconcileStaleRuns();
     const rows = spaces.map((s) => {
       const pins = allBookmarks.filter((b) => b.space_ids.includes(s.id));
       const sessionCount = new Set(pins.map((b) => b.session_id)).size;
@@ -1827,42 +2380,51 @@ function registerSpaceCommand(program2) {
         name: s.name,
         sessions: sessionCount,
         pins: pins.length,
+        status: summarizeRunStatus(pins),
         parent,
         description: s.description || "-"
       };
     });
     if (opts.json) {
       const output = rows.map((row) => {
+        const pins = allBookmarks.filter((b) => b.space_ids.includes(row.id));
+        const base = {
+          ...row.space,
+          session_count: row.sessions,
+          pin_count: row.pins,
+          run_status: summarizeRunStatus(pins, { color: false })
+        };
         if (opts.pins) {
-          const pins = allBookmarks.filter((b) => b.space_ids.includes(row.id));
-          return { ...row.space, session_count: row.sessions, pin_count: row.pins, pins };
+          return { ...base, pins };
         }
-        return { ...row.space, session_count: row.sessions, pin_count: row.pins };
+        return base;
       });
       console.log(JSON.stringify(output, null, 2));
       return;
     }
     const table = new Table2({
       head: [
-        chalk4.green("Catalog ID"),
-        chalk4.green("Name"),
-        chalk4.green("Sessions"),
-        chalk4.green("Pins"),
-        chalk4.green("Parent"),
-        chalk4.green("Description")
+        chalk5.green("Catalog ID"),
+        chalk5.green("Name"),
+        chalk5.green("Sessions"),
+        chalk5.green("Pins"),
+        chalk5.green("Run Status"),
+        chalk5.green("Parent"),
+        chalk5.green("Description")
       ],
-      colWidths: [12, 20, 10, 10, 20, 34],
+      colWidths: [12, 20, 10, 10, 18, 20, 30],
       style: { head: [] }
     });
     const truncate2 = (value, max) => value.length > max ? value.slice(0, max - 1) + "\u2026" : value;
     for (const row of rows) {
       table.push([
         row.id,
-        chalk4.bold(row.name),
+        chalk5.bold(row.name),
         String(row.sessions),
         String(row.pins),
+        row.status,
         row.parent,
-        truncate2(row.description, 34)
+        truncate2(row.description, 30)
       ]);
     }
     console.log(table.toString());
@@ -1871,10 +2433,10 @@ function registerSpaceCommand(program2) {
         const pins = allBookmarks.filter((b) => b.space_ids.includes(row.id));
         if (pins.length === 0) continue;
         console.log(`
-${chalk4.yellow(`Pins in ${row.name} (${row.id})`)}`);
+${chalk5.yellow(`Pins in ${row.name} (${row.id})`)}`);
         for (const p of pins) {
           const shortId = p.session_id.length > 13 ? shortSessionId(p.session_id) + "\u2026" : p.session_id;
-          console.log(`  ${chalk4.cyan(p.id)}  ${p.title}  ${chalk4.gray(shortId)}  ${chalk4.gray(p.provider)}`);
+          console.log(`  ${chalk5.cyan(p.id)}  ${p.title}  ${chalk5.gray(shortId)}  ${chalk5.gray(p.provider)}`);
         }
       }
     }
@@ -1889,11 +2451,11 @@ ${chalk4.yellow(`Pins in ${row.name} (${row.id})`)}`);
     const existing = findBookmarkBySessionRef(sessionId);
     if (existing) {
       if (existing.space_ids.includes(s.id)) {
-        console.log(chalk4.yellow(`Already in catalog "${s.name}".`));
+        console.log(chalk5.yellow(`Already in catalog "${s.name}".`));
         return;
       }
       updateBookmark(existing.id, { space_ids: [...existing.space_ids, s.id] });
-      console.log(chalk4.green(`Added ${existing.id} to catalog "${s.name}" (${s.id})`));
+      console.log(chalk5.green(`Added ${existing.id} to catalog "${s.name}" (${s.id})`));
       return;
     }
     const meta = await resolveSessionMeta2(sessionId);
@@ -1913,14 +2475,14 @@ ${chalk4.yellow(`Pins in ${row.name} (${row.id})`)}`);
       updated_at: now
     };
     addBookmark(bookmark);
-    console.log(chalk4.green(`Added ${bookmark.id} to catalog "${s.name}" (${s.id})`));
+    console.log(chalk5.green(`Added ${bookmark.id} to catalog "${s.name}" (${s.id})`));
   });
   space.command("show <name>").description("Show catalog details and contents").action((name) => {
     const s = resolveCatalogRef2(name);
     const pins = listBookmarks().filter((b) => b.space_ids.includes(s.id));
     const sessions = new Set(pins.map((b) => b.session_id)).size;
     const updated = s.updated_at.slice(0, 10);
-    console.log(chalk4.bold(`Catalog: ${s.name}`));
+    console.log(chalk5.bold(`Catalog: ${s.name}`));
     console.log(`Description: ${s.description || "(none)"}`);
     console.log(`Pins: ${pins.length}`);
     console.log(`Sessions: ${sessions}`);
@@ -1930,7 +2492,7 @@ ${chalk4.yellow(`Pins in ${row.name} (${row.id})`)}`);
       console.log("");
       for (const p of pins) {
         const shortId = p.session_id.length > 36 ? shortSessionId(p.session_id) + "\u2026" : p.session_id;
-        console.log(`  ${chalk4.cyan(p.id)}  ${p.title}  ${chalk4.gray(shortId)}  ${chalk4.gray(p.provider)}`);
+        console.log(`  ${chalk5.cyan(p.id)}  ${p.title}  ${chalk5.gray(shortId)}  ${chalk5.gray(p.provider)}`);
       }
     }
   });
@@ -1938,16 +2500,16 @@ ${chalk4.yellow(`Pins in ${row.name} (${row.id})`)}`);
     const s = resolveCatalogRef2(catalog);
     const bookmark = findBookmarkBySessionRef(sessionId);
     if (!bookmark) {
-      console.error(chalk4.red(`Session pin not found: ${sessionId}`));
+      console.error(chalk5.red(`Session pin not found: ${sessionId}`));
       process.exit(1);
     }
     if (!bookmark.space_ids.includes(s.id)) {
-      console.log(chalk4.yellow(`Session is not in catalog "${s.name}".`));
+      console.log(chalk5.yellow(`Session is not in catalog "${s.name}".`));
       return;
     }
     const spaceIds = bookmark.space_ids.filter((sid) => sid !== s.id);
     updateBookmark(bookmark.id, { space_ids: spaceIds });
-    console.log(chalk4.green(`Removed "${bookmark.title}" from catalog "${s.name}"`));
+    console.log(chalk5.green(`Removed "${bookmark.title}" from catalog "${s.name}"`));
   });
   space.command("clear <catalog>").description("Remove all sessions from a catalog").action((catalog) => {
     const s = resolveCatalogRef2(catalog);
@@ -1957,27 +2519,27 @@ ${chalk4.yellow(`Pins in ${row.name} (${row.id})`)}`);
         space_ids: bookmark.space_ids.filter((sid) => sid !== s.id)
       });
     }
-    console.log(chalk4.green(`Cleared catalog: "${s.name}" (${s.id})`));
+    console.log(chalk5.green(`Cleared catalog: "${s.name}" (${s.id})`));
   });
   space.command("delete <catalog>").alias("del").description("Remove a catalog").action((catalog) => {
     const s = resolveCatalogRef2(catalog);
     removeSpace(s.id);
-    console.log(chalk4.green(`Removed catalog: "${s.name}" (${s.id})`));
+    console.log(chalk5.green(`Removed catalog: "${s.name}" (${s.id})`));
   });
   space.command("tag <name> <tags...>").description("Add tags to a catalog").action((name, newTags) => {
     const s = resolveCatalogRef2(name);
     const merged = [.../* @__PURE__ */ new Set([...s.tags, ...newTags])];
     updateSpace(s.id, { tags: merged });
-    console.log(chalk4.green(`Tagged "${s.name}": ${merged.join(", ")}`));
+    console.log(chalk5.green(`Tagged "${s.name}": ${merged.join(", ")}`));
   });
   space.command("rename <catalog> <new-name>").description("Rename a catalog").action((catalog, newName) => {
     const updated = renameCatalog(catalog, newName);
-    console.log(chalk4.green(`Renamed catalog: "${updated.name}" (${updated.id})`));
+    console.log(chalk5.green(`Renamed catalog: "${updated.name}" (${updated.id})`));
   });
   space.command("move <catalog>").description("Move a catalog under another parent catalog").option("-p, --parent <parent>", "new parent catalog name, path, or id").option("--root", "move catalog to the root level").action((catalog, opts) => {
     const updated = moveCatalog(catalog, opts);
-    console.log(chalk4.green(`Moved catalog: "${updated.name}" (${updated.id})`));
-    console.log(chalk4.gray(`  Path: ${catalogPath(updated)}`));
+    console.log(chalk5.green(`Moved catalog: "${updated.name}" (${updated.id})`));
+    console.log(chalk5.gray(`  Path: ${catalogPath(updated)}`));
   });
   space.command("edit <name>").description("Edit catalog metadata").option("-d, --description <desc>", "new description").option("--rename <new-name>", "rename the catalog").option("--parent <parent>", "set parent catalog").option("--root", "move catalog to the root level").action((name, opts) => {
     const s = resolveCatalogRef2(name);
@@ -1988,7 +2550,7 @@ ${chalk4.yellow(`Pins in ${row.name} (${row.id})`)}`);
       patch.name = nextName2;
     }
     if (opts.parent && opts.root) {
-      console.error(chalk4.red("Use either --parent or --root, not both."));
+      console.error(chalk5.red("Use either --parent or --root, not both."));
       process.exit(1);
     }
     if (opts.parent || opts.root) {
@@ -1997,12 +2559,12 @@ ${chalk4.yellow(`Pins in ${row.name} (${row.id})`)}`);
     const nextName = patch.name ?? s.name;
     const nextParentId = Object.prototype.hasOwnProperty.call(patch, "parent_id") ? patch.parent_id ?? null : s.parent_id;
     if (hasSiblingSpaceName(nextName, nextParentId, s.id)) {
-      console.error(chalk4.red(`Catalog already exists under this parent: ${nextName}`));
+      console.error(chalk5.red(`Catalog already exists under this parent: ${nextName}`));
       process.exit(1);
     }
     const updated = updateSpace(s.id, patch);
     if (updated) {
-      console.log(chalk4.green(`Updated catalog: "${updated.name}" (${updated.id})`));
+      console.log(chalk5.green(`Updated catalog: "${updated.name}" (${updated.id})`));
     }
   });
   program2.addCommand(space);
@@ -2011,12 +2573,12 @@ function renameCatalog(catalog, newName) {
   const s = resolveCatalogRef2(catalog);
   const trimmedName = validateCatalogName(newName);
   if (hasSiblingSpaceName(trimmedName, s.parent_id, s.id)) {
-    console.error(chalk4.red(`Catalog already exists under this parent: ${trimmedName}`));
+    console.error(chalk5.red(`Catalog already exists under this parent: ${trimmedName}`));
     process.exit(1);
   }
   const updated = updateSpace(s.id, { name: trimmedName });
   if (!updated) {
-    console.error(chalk4.red(`Catalog not found: ${catalog}`));
+    console.error(chalk5.red(`Catalog not found: ${catalog}`));
     process.exit(1);
   }
   return updated;
@@ -2025,23 +2587,23 @@ function moveCatalog(catalog, opts) {
   const s = resolveCatalogRef2(catalog);
   const parentId = resolveMoveParentId(s, opts);
   if (hasSiblingSpaceName(s.name, parentId, s.id)) {
-    console.error(chalk4.red(`Catalog already exists under this parent: ${s.name}`));
+    console.error(chalk5.red(`Catalog already exists under this parent: ${s.name}`));
     process.exit(1);
   }
   const updated = updateSpace(s.id, { parent_id: parentId });
   if (!updated) {
-    console.error(chalk4.red(`Catalog not found: ${catalog}`));
+    console.error(chalk5.red(`Catalog not found: ${catalog}`));
     process.exit(1);
   }
   return updated;
 }
 function resolveMoveParentId(catalog, opts) {
   if (opts.parent && opts.root) {
-    console.error(chalk4.red("Use either --parent or --root, not both."));
+    console.error(chalk5.red("Use either --parent or --root, not both."));
     process.exit(1);
   }
   if (!opts.parent && !opts.root) {
-    console.error(chalk4.red("Specify --parent <catalog> or --root."));
+    console.error(chalk5.red("Specify --parent <catalog> or --root."));
     process.exit(1);
   }
   if (opts.root) {
@@ -2049,11 +2611,11 @@ function resolveMoveParentId(catalog, opts) {
   }
   const parent = resolveCatalogRef2(opts.parent);
   if (parent.id === catalog.id) {
-    console.error(chalk4.red("A catalog cannot be its own parent."));
+    console.error(chalk5.red("A catalog cannot be its own parent."));
     process.exit(1);
   }
   if (isDescendantCatalog(parent, catalog, listSpaces())) {
-    console.error(chalk4.red("A catalog cannot use its descendant as parent."));
+    console.error(chalk5.red("A catalog cannot use its descendant as parent."));
     process.exit(1);
   }
   return parent.id;
@@ -2061,11 +2623,11 @@ function resolveMoveParentId(catalog, opts) {
 function validateCatalogName(newName) {
   const trimmedName = newName.trim();
   if (!trimmedName) {
-    console.error(chalk4.red("Catalog name cannot be empty."));
+    console.error(chalk5.red("Catalog name cannot be empty."));
     process.exit(1);
   }
   if (trimmedName.includes("/")) {
-    console.error(chalk4.red("Catalog rename expects a single catalog name, not a path."));
+    console.error(chalk5.red("Catalog rename expects a single catalog name, not a path."));
     process.exit(1);
   }
   return trimmedName;
@@ -2084,7 +2646,7 @@ function isDescendantCatalog(candidate, root, spaces) {
 function createCatalogPath(pathRef, parentId, opts) {
   const parts = pathRef.split("/").map((part) => part.trim()).filter(Boolean);
   if (parts.length === 0) {
-    console.error(chalk4.red("Catalog name cannot be empty."));
+    console.error(chalk5.red("Catalog name cannot be empty."));
     process.exit(1);
   }
   let currentParentId = parentId;
@@ -2095,7 +2657,7 @@ function createCatalogPath(pathRef, parentId, opts) {
     const isLeaf = index === parts.length - 1;
     if (existing) {
       if (isLeaf && !opts.allowExistingLeaf) {
-        console.error(chalk4.red(`Catalog already exists under this parent: ${part}`));
+        console.error(chalk5.red(`Catalog already exists under this parent: ${part}`));
         process.exit(1);
       }
       currentSpace = existing;
@@ -2126,13 +2688,13 @@ function resolveCatalogRef2(ref) {
     return resolution.space;
   }
   if (resolution.kind === "not_found") {
-    console.error(chalk4.red(`Catalog not found: ${ref}`));
+    console.error(chalk5.red(`Catalog not found: ${ref}`));
     process.exit(1);
   }
-  console.error(chalk4.red(`Ambiguous catalog reference: ${ref}`));
-  console.error(chalk4.red("Use a catalog path like parent/child or the catalog id."));
+  console.error(chalk5.red(`Ambiguous catalog reference: ${ref}`));
+  console.error(chalk5.red("Use a catalog path like parent/child or the catalog id."));
   for (const match of resolution.matches) {
-    console.error(chalk4.gray(`  ${catalogPath(match, listSpaces())} (${match.id})`));
+    console.error(chalk5.gray(`  ${catalogPath(match, listSpaces())} (${match.id})`));
   }
   process.exit(1);
 }
@@ -2142,14 +2704,14 @@ function findBookmarkBySessionRef(ref) {
 async function resolveSessionMeta2(input) {
   const candidates = await findSessionCandidates(input);
   if (candidates.length === 0) {
-    console.error(chalk4.red(`No session matches: ${input}`));
+    console.error(chalk5.red(`No session matches: ${input}`));
     process.exit(1);
   }
   if (candidates.length > 1) {
     const exact = candidates.find((candidate) => candidate.session_id === input);
     if (exact) return exact;
-    console.error(chalk4.red(`Ambiguous session id: ${input}`));
-    console.error(chalk4.red("Please rerun with full session id."));
+    console.error(chalk5.red(`Ambiguous session id: ${input}`));
+    console.error(chalk5.red("Please rerun with full session id."));
     process.exit(1);
   }
   return candidates[0];
@@ -2157,7 +2719,7 @@ async function resolveSessionMeta2(input) {
 
 // src/commands/project.ts
 import { Command as Command4 } from "commander";
-import chalk5 from "chalk";
+import chalk6 from "chalk";
 import Table3 from "cli-table3";
 async function aggregateByProject(providerFilter, limit, useIndex = true, refreshIndex = false) {
   if (useIndex) {
@@ -2258,7 +2820,7 @@ function registerProjectCommand(program2) {
           console.log("[]");
           return;
         }
-        console.log(chalk5.yellow("No projects found."));
+        console.log(chalk6.yellow("No projects found."));
         return;
       }
       if (opts.json) {
@@ -2273,11 +2835,11 @@ function registerProjectCommand(program2) {
       }
       const table = new Table3({
         head: [
-          chalk5.gray("PROJECT"),
-          chalk5.gray("SESSIONS"),
-          chalk5.gray("AGENTS"),
-          chalk5.gray("TOP MODEL"),
-          chalk5.gray("LAST ACTIVE")
+          chalk6.gray("PROJECT"),
+          chalk6.gray("SESSIONS"),
+          chalk6.gray("AGENTS"),
+          chalk6.gray("TOP MODEL"),
+          chalk6.gray("LAST ACTIVE")
         ],
         colWidths: [42, 10, 18, 22, 20],
         style: { head: [], border: ["gray"] },
@@ -2305,14 +2867,14 @@ function registerProjectCommand(program2) {
       const provider = opts.agent;
       const p = await findProjectStats(path, provider, opts.index !== false, Boolean(opts.refreshIndex));
       if (!p) {
-        console.error(chalk5.red(`Project not found: ${path}`));
+        console.error(chalk6.red(`Project not found: ${path}`));
         process.exit(1);
       }
       if (opts.json) {
         console.log(JSON.stringify(p, null, 2));
         return;
       }
-      console.log(chalk5.bold(`Project: ${p.project_path}`));
+      console.log(chalk6.bold(`Project: ${p.project_path}`));
       console.log(`  Sessions: ${p.session_count}`);
       console.log(`  Agents:   ${formatAgentModelSummary(p.agents)}`);
       console.log(`  Models:   ${formatAgentModelSummary(p.models)}`);
@@ -2323,7 +2885,7 @@ function registerProjectCommand(program2) {
         `  Last active:   ${p.last_active.slice(0, 16).replace("T", " ")}`
       );
       console.log("");
-      console.log(chalk5.bold("Recent sessions:"));
+      console.log(chalk6.bold("Recent sessions:"));
       const sorted = [...p.sessions].sort(
         (a, b) => b.modified_at.localeCompare(a.modified_at)
       );
@@ -2334,7 +2896,7 @@ function registerProjectCommand(program2) {
         const label = s.custom_title || s.first_prompt || "";
         const prompt = label ? label.length > 40 ? label.slice(0, 37) + "\u2026" : label : "";
         console.log(
-          `  ${chalk5.cyan(short)}  ${chalk5.gray(agent.padEnd(7))}  ${(s.model || "-").padEnd(22)}  ${chalk5.gray(date)}  ${chalk5.gray(prompt)}`
+          `  ${chalk6.cyan(short)}  ${chalk6.gray(agent.padEnd(7))}  ${(s.model || "-").padEnd(22)}  ${chalk6.gray(date)}  ${chalk6.gray(prompt)}`
         );
       }
     }
@@ -2344,16 +2906,16 @@ function registerProjectCommand(program2) {
 
 // src/commands/run.ts
 import { Command as Command5 } from "commander";
-import chalk7 from "chalk";
+import chalk8 from "chalk";
 import { randomUUID as randomUUID3 } from "crypto";
-import { chmodSync as chmodSync5, existsSync as existsSync7, readFileSync as readFileSync7, readdirSync as readdirSync4, statSync as statSync4, unlinkSync as unlinkSync7, writeFileSync as writeFileSync5 } from "fs";
+import { chmodSync as chmodSync5, existsSync as existsSync7, readFileSync as readFileSync8, readdirSync as readdirSync5, statSync as statSync5, unlinkSync as unlinkSync7, writeFileSync as writeFileSync5 } from "fs";
 import { createInterface as createInterface3 } from "readline/promises";
 import { spawn as spawn2 } from "child_process";
-import { basename as basename4, extname as extname4, isAbsolute as isAbsolute2, join as join8, resolve as resolve2 } from "path";
+import { basename as basename5, extname as extname4, isAbsolute as isAbsolute2, join as join9, resolve as resolve2 } from "path";
 
 // src/lib/codexProvider.ts
-import { existsSync as existsSync5, readFileSync as readFileSync4, readdirSync as readdirSync3, writeFileSync as writeFileSync2, chmodSync as chmodSync2, unlinkSync as unlinkSync4, renameSync as renameSync2 } from "fs";
-import { basename as basename3, extname as extname2, isAbsolute, join as join5, resolve } from "path";
+import { existsSync as existsSync5, readFileSync as readFileSync5, readdirSync as readdirSync4, writeFileSync as writeFileSync2, chmodSync as chmodSync2, unlinkSync as unlinkSync4, renameSync as renameSync2 } from "fs";
+import { basename as basename4, extname as extname2, isAbsolute, join as join6, resolve } from "path";
 
 // src/lib/configPaths.ts
 import { extname } from "path";
@@ -2363,14 +2925,14 @@ function hasKnownConfigExtension(fileName, extensions) {
 }
 
 // src/lib/codexProvider.ts
-var CODEX_PROVIDER_HISTORY_PATH = join5(DEFAULT_STARLING_HOME, "codex-provider.json");
+var CODEX_PROVIDER_HISTORY_PATH = join6(DEFAULT_STARLING_HOME, "codex-provider.json");
 var CODEX_PROVIDER_EXTENSIONS = [".toml", ".json", ".jsonc"];
 function getCodexProviderProfile(profileName) {
   migrateCodexJsonProfilesToToml();
   const sourcePath = resolveCodexConfigPath(profileName);
   if (!sourcePath) return null;
   const extension = extname2(sourcePath).toLowerCase();
-  const name = basename3(sourcePath, extension);
+  const name = basename4(sourcePath, extension);
   const parsed = inspectCodexProfile(sourcePath);
   return {
     name,
@@ -2384,7 +2946,7 @@ function saveCodexProviderProfile(profileName, patch) {
   migrateCodexJsonProfilesToToml();
   const safeName = normalizeProfileName(profileName);
   const existingPath = resolveCodexConfigPath(safeName);
-  const targetPath = existingPath ?? join5(DEFAULT_CODEX_SETTINGS_DIR, `${safeName}.toml`);
+  const targetPath = existingPath ?? join6(DEFAULT_CODEX_SETTINGS_DIR, `${safeName}.toml`);
   const existing = existsSync5(targetPath) ? parseCodexProfile(targetPath) : { auth: null, config: null, configObject: null };
   const auth = mergeAuthPatch(existing.auth, patch);
   const config = mergeConfigPatch(existing.configObject, patch);
@@ -2403,7 +2965,7 @@ function resolveCodexConfigPath(nameOrPath) {
     }
     return resolve(nameOrPath);
   }
-  const base = join5(DEFAULT_CODEX_SETTINGS_DIR, basename3(nameOrPath));
+  const base = join6(DEFAULT_CODEX_SETTINGS_DIR, basename4(nameOrPath));
   if (hasKnownConfigExtension(base, CODEX_PROVIDER_EXTENSIONS) && existsSync5(base)) return base;
   if (hasKnownConfigExtension(base, CODEX_PROVIDER_EXTENSIONS)) return null;
   for (const ext of CODEX_PROVIDER_EXTENSIONS) {
@@ -2435,14 +2997,14 @@ function inspectCodexProfile(filePath) {
 function migrateCodexJsonProfilesToToml() {
   if (!existsSync5(DEFAULT_CODEX_SETTINGS_DIR)) return [];
   const migrated = [];
-  const entries = readdirSync3(DEFAULT_CODEX_SETTINGS_DIR, { withFileTypes: true });
+  const entries = readdirSync4(DEFAULT_CODEX_SETTINGS_DIR, { withFileTypes: true });
   for (const entry of entries) {
     if (!entry.isFile()) continue;
-    const sourcePath = join5(DEFAULT_CODEX_SETTINGS_DIR, entry.name);
+    const sourcePath = join6(DEFAULT_CODEX_SETTINGS_DIR, entry.name);
     const extension = extname2(sourcePath).toLowerCase();
     if (extension !== ".json" && extension !== ".jsonc") continue;
     const name = entry.name.slice(0, entry.name.length - extension.length);
-    const targetPath = join5(DEFAULT_CODEX_SETTINGS_DIR, `${name}.toml`);
+    const targetPath = join6(DEFAULT_CODEX_SETTINGS_DIR, `${name}.toml`);
     const backupPath = `${sourcePath}.bak`;
     try {
       if (!existsSync5(targetPath)) {
@@ -2469,7 +3031,7 @@ function parseCodexProfile(filePath) {
   throw new Error(`Unsupported codex profile type: ${filePath}`);
 }
 function parseCodexJsonProfile(filePath, allowComments) {
-  const raw = readFileSync4(filePath, "utf-8");
+  const raw = readFileSync5(filePath, "utf-8");
   let parsed;
   try {
     parsed = JSON.parse(allowComments ? stripJsonComments(raw) : raw);
@@ -2488,7 +3050,7 @@ function parseCodexJsonProfile(filePath, allowComments) {
   return { auth, config, configObject };
 }
 function parseCodexTomlProfile(filePath) {
-  const raw = readFileSync4(filePath, "utf-8");
+  const raw = readFileSync5(filePath, "utf-8");
   const configObject = parseSimpleToml(raw);
   const providerName = stringValue(configObject.model_provider);
   const providers = isRecord3(configObject.model_providers) ? configObject.model_providers : {};
@@ -2616,7 +3178,7 @@ function deepMerge(target, patch) {
   }
 }
 function normalizeProfileName(profileName) {
-  const name = basename3(profileName).replace(/\.(jsonc?|toml)$/i, "").trim();
+  const name = basename4(profileName).replace(/\.(jsonc?|toml)$/i, "").trim();
   if (!name || name === "." || name === "..") {
     throw new Error(`Invalid codex provider name: ${profileName}`);
   }
@@ -2756,10 +3318,10 @@ function isRecord3(value) {
 }
 
 // src/lib/codexRunConfig.ts
-import chalk6 from "chalk";
+import chalk7 from "chalk";
 import { randomUUID as randomUUID2 } from "crypto";
-import { chmodSync as chmodSync3, readFileSync as readFileSync5, unlinkSync as unlinkSync5, writeFileSync as writeFileSync3 } from "fs";
-import { extname as extname3, join as join6 } from "path";
+import { chmodSync as chmodSync3, readFileSync as readFileSync6, unlinkSync as unlinkSync5, writeFileSync as writeFileSync3 } from "fs";
+import { extname as extname3, join as join7 } from "path";
 
 // src/lib/codexChatProxy.ts
 import { createServer } from "http";
@@ -4034,8 +4596,8 @@ async function createCodexRunConfig(configPath) {
     const profile = readCodexJsonProfileForRun(configPath, ext === ".jsonc");
     return createCodexRunConfigFromProfile(profile);
   }
-  console.error(chalk6.red(`Unsupported Codex config file type: ${configPath}`));
-  console.error(chalk6.gray("Use .json, .jsonc, or .toml under ~/.starling/settings/codex."));
+  console.error(chalk7.red(`Unsupported Codex config file type: ${configPath}`));
+  console.error(chalk7.gray("Use .json, .jsonc, or .toml under ~/.starling/settings/codex."));
   process.exit(1);
 }
 async function createCodexRunConfigFromProfile(profile) {
@@ -4051,11 +4613,11 @@ async function createCodexRunConfigFromProfile(profile) {
     });
     cleanupTasks.push(proxy.close);
     configText = codexProxyConfigText(profile.chatProxy.config, proxy.baseUrl);
-    console.error(chalk6.gray(`Starling Codex adapter: routing ${profile.chatProxy.providerName} via ${proxy.baseUrl}`));
+    console.error(chalk7.gray(`Starling Codex adapter: routing ${profile.chatProxy.providerName} via ${proxy.baseUrl}`));
   }
   if (configText) {
     const profileName = `starling-run-${randomUUID2()}`;
-    const profilePath = join6(DEFAULT_CODEX_HOME, `${profileName}.config.toml`);
+    const profilePath = join7(DEFAULT_CODEX_HOME, `${profileName}.config.toml`);
     ensureDir(profilePath);
     writeFileSync3(profilePath, configText, "utf-8");
     chmodSync3(profilePath, 384);
@@ -4086,10 +4648,10 @@ async function cleanupCodexRunConfig(config) {
 }
 function readCodexJsonProfileForRun(configPath, allowComments) {
   try {
-    const raw = readFileSync5(configPath, "utf-8");
+    const raw = readFileSync6(configPath, "utf-8");
     const parsed = JSON.parse(allowComments ? stripJsonComments2(raw) : raw);
     if (!isRecord5(parsed)) {
-      console.error(chalk6.red(`Codex config must be a JSON object: ${configPath}`));
+      console.error(chalk7.red(`Codex config must be a JSON object: ${configPath}`));
       process.exit(1);
     }
     const auth = resolveCodexProfileAuth(parsed);
@@ -4099,14 +4661,14 @@ function readCodexJsonProfileForRun(configPath, allowComments) {
     const inlineConfig = resolveCodexInlineConfig(parsed);
     return { inlineConfig, configText, env, chatProxy };
   } catch (error) {
-    console.error(chalk6.red(`Could not parse Codex config JSON: ${configPath}`));
-    console.error(chalk6.gray(String(error)));
+    console.error(chalk7.red(`Could not parse Codex config JSON: ${configPath}`));
+    console.error(chalk7.gray(String(error)));
     process.exit(1);
   }
 }
 function readCodexTomlProfileForRun(configPath) {
   try {
-    const configText = readFileSync5(configPath, "utf-8");
+    const configText = readFileSync6(configPath, "utf-8");
     const config = parseSimpleToml2(configText);
     const auth = resolveCodexTomlAuth(config);
     const profile = { config };
@@ -4120,8 +4682,8 @@ function readCodexTomlProfileForRun(configPath) {
       chatProxy
     };
   } catch (error) {
-    console.error(chalk6.red(`Could not parse Codex config TOML: ${configPath}`));
-    console.error(chalk6.gray(String(error)));
+    console.error(chalk7.red(`Could not parse Codex config TOML: ${configPath}`));
+    console.error(chalk7.gray(String(error)));
     process.exit(1);
   }
 }
@@ -4212,7 +4774,7 @@ function resolveCodexChatProxySpec(profile, auth) {
   if (!shouldProxy) return null;
   const apiKey = resolveCodexApiKey(auth, profile);
   if (!apiKey) {
-    console.error(chalk6.red("Codex chat adapter requires an API key in auth.OPENAI_API_KEY or OPENAI_API_KEY."));
+    console.error(chalk7.red("Codex chat adapter requires an API key in auth.OPENAI_API_KEY or OPENAI_API_KEY."));
     process.exit(1);
   }
   return {
@@ -4372,7 +4934,7 @@ function toCodexConfigValue(value) {
   if (typeof value === "string") return JSON.stringify(value);
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   if (value === null) {
-    console.error(chalk6.red("Codex config values cannot be null."));
+    console.error(chalk7.red("Codex config values cannot be null."));
     process.exit(1);
   }
   return JSON.stringify(value);
@@ -4393,7 +4955,7 @@ function toTomlValue2(value) {
   if (typeof value === "string") return JSON.stringify(value);
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   if (value === null) {
-    console.error(chalk6.red("Codex config values cannot be null."));
+    console.error(chalk7.red("Codex config values cannot be null."));
     process.exit(1);
   }
   return JSON.stringify(String(value));
@@ -4432,13 +4994,13 @@ function isRecord5(value) {
 }
 
 // src/lib/codexDefaultGuard.ts
-import { existsSync as existsSync6, readFileSync as readFileSync6, statSync as statSync3, unlinkSync as unlinkSync6, writeFileSync as writeFileSync4, chmodSync as chmodSync4 } from "fs";
-import { join as join7 } from "path";
+import { existsSync as existsSync6, readFileSync as readFileSync7, statSync as statSync4, unlinkSync as unlinkSync6, writeFileSync as writeFileSync4, chmodSync as chmodSync4 } from "fs";
+import { join as join8 } from "path";
 function snapshotCodexDefaultConfig() {
   return {
     files: [
-      snapshotFile(join7(DEFAULT_CODEX_HOME, "config.toml")),
-      snapshotFile(join7(DEFAULT_CODEX_HOME, "auth.json"))
+      snapshotFile(join8(DEFAULT_CODEX_HOME, "config.toml")),
+      snapshotFile(join8(DEFAULT_CODEX_HOME, "auth.json"))
     ]
   };
 }
@@ -4452,11 +5014,11 @@ function snapshotFile(path) {
   if (!existsSync6(path)) {
     return { path, existed: false };
   }
-  const st = statSync3(path);
+  const st = statSync4(path);
   return {
     path,
     existed: true,
-    content: readFileSync6(path, "utf-8"),
+    content: readFileSync7(path, "utf-8"),
     mode: st.mode & 511
   };
 }
@@ -4490,17 +5052,17 @@ function registerRunCommand(program2) {
   ).action(async (agentRaw, agentArgs, opts, command) => {
     const provider = normalizeAgent(agentRaw);
     if (!provider) {
-      console.error(chalk7.red(`Unknown agent: ${agentRaw}`));
-      console.error(chalk7.gray("Allowed values: claude, codex, agent"));
+      console.error(chalk8.red(`Unknown agent: ${agentRaw}`));
+      console.error(chalk8.gray("Allowed values: claude, codex, agent"));
       process.exit(1);
     }
     const rawArgs = command.rawArgs;
     const requestedConfig = opts.config;
     const resolvedConfig = provider === "codex" ? resolveCodexConfigPath(requestedConfig) : resolveConfigFilePath(provider, opts.config);
     if (provider === "codex" && requestedConfig && !resolvedConfig) {
-      const expectedPath = join8(DEFAULT_CODEX_SETTINGS_DIR, requestedConfig);
-      console.error(chalk7.red(`Config file not found: ${requestedConfig}`));
-      console.error(chalk7.gray(`Expected path: ${expectedPath}`));
+      const expectedPath = join9(DEFAULT_CODEX_SETTINGS_DIR, requestedConfig);
+      console.error(chalk8.red(`Config file not found: ${requestedConfig}`));
+      console.error(chalk8.gray(`Expected path: ${expectedPath}`));
       process.exit(1);
     }
     const normalizedCwd = opts.cwd ? resolve2(opts.cwd) : process.cwd();
@@ -4519,11 +5081,22 @@ function registerRunCommand(program2) {
     const runStartedAtMs = Date.now();
     const beforeRun = hookRun ? /* @__PURE__ */ new Map() : await snapshotSessions(provider);
     const beforeRunProjectFiles = provider === "claude" && !hookRun ? snapshotProjectSessions(normalizedCwd) : /* @__PURE__ */ new Map();
-    const cleanupRunState = async () => {
+    let currentRunId;
+    const cleanupRunState = async (finalize) => {
       syncClaudeProfileSettingsFromRunSettings(resolvedConfig, hookRun?.settingsPath ?? null);
       cleanupClaudeRunHookSettings(hookRun);
       await cleanupCodexRunConfig(codexConfig);
       restoreCodexDefaultConfig(codexDefaultSnapshot);
+      if (currentRunId && finalize) {
+        try {
+          finalizeRun(currentRunId, {
+            status: finalize.exitCode === 0 ? "completed" : "errored",
+            exit_code: finalize.exitCode,
+            session_id: finalize.sessionId
+          });
+        } catch {
+        }
+      }
     };
     let catalogPinned = false;
     let agentClosed = false;
@@ -4585,7 +5158,7 @@ function registerRunCommand(program2) {
       pinAttempt.catch((error) => {
         if (process.env.NODE_ENV !== "test") {
           const sessionLabel = hintedSessionId ? ` ${hintedSessionId}` : "";
-          console.error(chalk7.yellow(`Failed to auto-pin session${sessionLabel} to catalog ${catalog?.name}: ${String(error)}`));
+          console.error(chalk8.yellow(`Failed to auto-pin session${sessionLabel} to catalog ${catalog?.name}: ${String(error)}`));
         }
       });
     };
@@ -4593,13 +5166,30 @@ function registerRunCommand(program2) {
       void startAutoPinWatcher();
     }
     let runResult;
+    const handleSpawn = (child) => {
+      currentRunId = randomUUID3();
+      try {
+        createRun({
+          run_id: currentRunId,
+          provider,
+          project_path: normalizedCwd,
+          catalog_id: catalog?.id,
+          pid: child.pid,
+          status: "running",
+          started_at: startedAt,
+          source: "starling-run"
+        });
+      } catch {
+      }
+    };
     try {
       runResult = await runAgent(binary, args, cwd, {
         preserveSignals: true,
-        env: buildAgentEnv(provider, codexConfig?.env)
+        env: buildAgentEnv(provider, codexConfig?.env),
+        onSpawn: handleSpawn
       });
     } catch (error) {
-      await cleanupRunState();
+      await cleanupRunState({ exitCode: 1 });
       throw error;
     }
     agentClosed = true;
@@ -4610,15 +5200,15 @@ function registerRunCommand(program2) {
     }
     const knownSessionId = hintedSessionId ?? readRunHookSessionId(hookRun?.eventsPath ?? codexConfig?.eventsPath) ?? void 0;
     if (exitCode !== 0 && Date.now() - runStartedAtMs < RUN_FAST_FAILURE_SKIP_SCAN_MS && !knownSessionId) {
-      await cleanupRunState();
+      await cleanupRunState({ exitCode, sessionId: knownSessionId });
       process.exit(exitCode);
     }
     if (hookRun && !knownSessionId) {
-      await cleanupRunState();
+      await cleanupRunState({ exitCode, sessionId: knownSessionId });
       if (exitCode !== 0) {
         process.exit(exitCode);
       }
-      console.log(chalk7.yellow("No Claude session id was reported by SessionStart hook."));
+      console.log(chalk8.yellow("No Claude session id was reported by SessionStart hook."));
       return;
     }
     const newSessionMeta = hookRun && knownSessionId ? await resolveHookReportedClaudeSession(knownSessionId, normalizedCwd) : await detectSessionStartedAfterRun(
@@ -4631,11 +5221,11 @@ function registerRunCommand(program2) {
     );
     if (!newSessionMeta) {
       if (exitCode !== 0) {
-        await cleanupRunState();
+        await cleanupRunState({ exitCode, sessionId: knownSessionId });
         process.exit(exitCode);
       }
-      console.log(chalk7.yellow("No new session found, or session metadata is not ready yet."));
-      await cleanupRunState();
+      console.log(chalk8.yellow("No new session found, or session metadata is not ready yet."));
+      await cleanupRunState({ exitCode, sessionId: knownSessionId });
       return;
     }
     if (catalog && !catalogPinned) {
@@ -4655,34 +5245,34 @@ function registerRunCommand(program2) {
         );
         const targetCandidates = sameProjectCandidates.length > 0 ? sameProjectCandidates : candidates;
         if (targetCandidates.length === 0) {
-          console.log(chalk7.yellow("Could not find a stable candidate session for catalog assignment."));
+          console.log(chalk8.yellow("Could not find a stable candidate session for catalog assignment."));
         } else if (targetCandidates.length === 1) {
           await pinSessionToCatalog(targetCandidates[0], opts, catalog);
           catalogPinned = true;
         } else {
           const header = `Found ${targetCandidates.length} possible sessions created after run, can't choose automatically.`;
-          console.log(chalk7.yellow(header));
+          console.log(chalk8.yellow(header));
           targetCandidates.slice(0, 5).forEach((session, index) => {
             const shortId = shortSessionId(session.session_id);
             const date = session.modified_at.slice(0, 16).replace("T", " ");
             const project = session.project_path ? session.project_path.length > 36 ? `\u2026${session.project_path.slice(-35)}` : session.project_path : "-";
-            console.log(`  ${index + 1}. ${chalk7.cyan(shortId)}  ${date}  ${project}`);
+            console.log(`  ${index + 1}. ${chalk8.cyan(shortId)}  ${date}  ${project}`);
           });
-          console.log(chalk7.gray(`Use: starling pin <session_id> --to ${catalog.id} to assign manually.`));
+          console.log(chalk8.gray(`Use: starling pin <session_id> --to ${catalog.id} to assign manually.`));
         }
       }
     }
-    console.log(chalk7.green(`Session started: ${newSessionMeta.session_id}`));
+    console.log(chalk8.green(`Session started: ${newSessionMeta.session_id}`));
     updateSessionIndexInBackground(newSessionMeta);
     if (pinAttempt) {
       stopAutoPinWatcher = true;
       await drainPinAttempt(pinAttempt);
     }
     if (exitCode !== 0) {
-      await cleanupRunState();
+      await cleanupRunState({ exitCode, sessionId: newSessionMeta.session_id });
       process.exit(exitCode);
     }
-    await cleanupRunState();
+    await cleanupRunState({ exitCode, sessionId: newSessionMeta.session_id });
   });
   program2.addCommand(run);
 }
@@ -4725,9 +5315,9 @@ function parseSessionIdFromText(text) {
 }
 function createClaudeRunHookSettings(configPath) {
   const runId = randomUUID3();
-  const baseDir = join8(DEFAULT_STARLING_HOME, "run-hooks");
-  const eventsPath = join8(baseDir, `${runId}.jsonl`);
-  const settingsPath = join8(baseDir, `${runId}.settings.json`);
+  const baseDir = join9(DEFAULT_STARLING_HOME, "run-hooks");
+  const eventsPath = join9(baseDir, `${runId}.jsonl`);
+  const settingsPath = join9(baseDir, `${runId}.settings.json`);
   ensureDir(eventsPath);
   const settings = readClaudeSettingsObject(configPath);
   if (!settings) return null;
@@ -4782,19 +5372,19 @@ function syncClaudeProfileSettingsFromRunSettings(sourceConfigPath, runSettingsP
     atomicWriteJSON(sourceConfigPath, sourceSettings);
     return true;
   } catch (error) {
-    console.error(chalk7.yellow(`Could not sync Claude settings to ${sourceConfigPath}: ${String(error)}`));
+    console.error(chalk8.yellow(`Could not sync Claude settings to ${sourceConfigPath}: ${String(error)}`));
     return false;
   }
 }
 function ensureCodexRunHookConfig(config) {
   const runId = randomUUID3();
-  const baseDir = join8(DEFAULT_STARLING_HOME, "run-hooks");
-  const eventsPath = join8(baseDir, `${runId}.codex.jsonl`);
+  const baseDir = join9(DEFAULT_STARLING_HOME, "run-hooks");
+  const eventsPath = join9(baseDir, `${runId}.codex.jsonl`);
   ensureDir(eventsPath);
   const hookText = codexSessionStartHookToml(eventsPath);
   if (config?.cleanupPaths[0] && config.args.includes("--profile")) {
     const profilePath2 = config.cleanupPaths[0];
-    const existing = readFileSync7(profilePath2, "utf-8");
+    const existing = readFileSync8(profilePath2, "utf-8");
     writeFileSync5(profilePath2, `${existing.trimEnd()}
 
 ${hookText}`, "utf-8");
@@ -4806,7 +5396,7 @@ ${hookText}`, "utf-8");
     };
   }
   const profileName = `starling-run-${randomUUID3()}`;
-  const profilePath = join8(DEFAULT_CODEX_HOME, `${profileName}.config.toml`);
+  const profilePath = join9(DEFAULT_CODEX_HOME, `${profileName}.config.toml`);
   ensureDir(profilePath);
   writeFileSync5(profilePath, hookText, "utf-8");
   chmodSync5(profilePath, 384);
@@ -4852,7 +5442,7 @@ function syncCodexProfileProjectTrustFromRunConfig(sourceConfigPath, runConfig) 
     return;
   }
   try {
-    const raw = readFileSync7(sourceConfigPath, "utf-8");
+    const raw = readFileSync8(sourceConfigPath, "utf-8");
     const parsed = JSON.parse(sourceExt === ".jsonc" ? stripJsonComments3(raw) : raw);
     if (!isRecord6(parsed)) return;
     const config = isRecord6(parsed.config) ? parsed.config : {};
@@ -4870,12 +5460,12 @@ function syncCodexProfileProjectTrustFromRunConfig(sourceConfigPath, runConfig) 
     parsed.config = config;
     atomicWriteJSON(sourceConfigPath, parsed);
   } catch (error) {
-    console.error(chalk7.yellow(`Could not sync Codex project trust to ${sourceConfigPath}: ${String(error)}`));
+    console.error(chalk8.yellow(`Could not sync Codex project trust to ${sourceConfigPath}: ${String(error)}`));
   }
 }
 function syncCodexTomlProjectTrust(sourceConfigPath, trustedProjects) {
   try {
-    let raw = readFileSync7(sourceConfigPath, "utf-8");
+    let raw = readFileSync8(sourceConfigPath, "utf-8");
     let changed = false;
     for (const projectPath of trustedProjects) {
       const updated = upsertCodexTomlProjectTrust(raw, projectPath);
@@ -4887,7 +5477,7 @@ function syncCodexTomlProjectTrust(sourceConfigPath, trustedProjects) {
     if (changed) writeFileSync5(sourceConfigPath, raw.endsWith("\n") ? raw : `${raw}
 `, "utf-8");
   } catch (error) {
-    console.error(chalk7.yellow(`Could not sync Codex project trust to ${sourceConfigPath}: ${String(error)}`));
+    console.error(chalk8.yellow(`Could not sync Codex project trust to ${sourceConfigPath}: ${String(error)}`));
   }
 }
 function upsertCodexTomlProjectTrust(raw, projectPath) {
@@ -4925,7 +5515,7 @@ trust_level = "trusted"
   return nextLines.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 function readTrustedProjectsFromCodexToml(filePath) {
-  const raw = readFileSync7(filePath, "utf-8");
+  const raw = readFileSync8(filePath, "utf-8");
   const trusted = [];
   let currentProject = null;
   let currentTrusted = false;
@@ -4954,7 +5544,7 @@ function readRunHookSessionId(eventsPath) {
   if (!eventsPath || !existsSync7(eventsPath)) return null;
   let raw = "";
   try {
-    raw = readFileSync7(eventsPath, "utf-8");
+    raw = readFileSync8(eventsPath, "utf-8");
   } catch {
     return null;
   }
@@ -4987,12 +5577,12 @@ function readClaudeSettingsObject(configPath) {
     const parsed = readSettingsJsonObject(configPath, extname4(configPath).toLowerCase() === ".jsonc");
     if (parsed) return parsed;
   } catch {
-    console.log(chalk7.yellow("Could not add Claude SessionStart hook because settings is not parseable JSON."));
+    console.log(chalk8.yellow("Could not add Claude SessionStart hook because settings is not parseable JSON."));
   }
   return null;
 }
 function readSettingsJsonObject(filePath, allowComments) {
-  const raw = readFileSync7(filePath, "utf-8");
+  const raw = readFileSync8(filePath, "utf-8");
   const parsed = JSON.parse(allowComments ? stripJsonComments3(raw) : raw);
   return isRecord6(parsed) ? parsed : null;
 }
@@ -5013,14 +5603,14 @@ function resolveConfigFilePath(provider, configFile) {
   if (!configFile) return null;
   if (isAbsolute2(configFile) || existsSync7(configFile)) {
     if (!existsSync7(configFile)) {
-      console.error(chalk7.red(`Config file not found: ${configFile}`));
+      console.error(chalk8.red(`Config file not found: ${configFile}`));
       process.exit(1);
     }
     return configFile;
   }
   const baseDir = provider === "claude" ? DEFAULT_CLAUDE_SETTINGS_DIR : DEFAULT_CODEX_SETTINGS_DIR;
-  const fileName = basename4(configFile);
-  const candidate = join8(baseDir, fileName);
+  const fileName = basename5(configFile);
+  const candidate = join9(baseDir, fileName);
   if (existsSync7(candidate)) return candidate;
   const candidatesTried = [candidate];
   if (!hasKnownConfigExtension(fileName, CONFIG_FILE_EXTENSIONS)) {
@@ -5030,10 +5620,10 @@ function resolveConfigFilePath(provider, configFile) {
       if (existsSync7(candidateWithExtension)) return candidateWithExtension;
     }
   }
-  console.error(chalk7.red(`Config file not found: ${configFile}`));
-  console.error(chalk7.gray(`Expected path: ${candidate}`));
+  console.error(chalk8.red(`Config file not found: ${configFile}`));
+  console.error(chalk8.gray(`Expected path: ${candidate}`));
   console.error(
-    chalk7.gray(`Tried: ${candidatesTried.map((path) => path.replace(`${DEFAULT_CLAUDE_SETTINGS_DIR}/`, "").replace(`${DEFAULT_CODEX_SETTINGS_DIR}/`, "")).join(", ")}`)
+    chalk8.gray(`Tried: ${candidatesTried.map((path) => path.replace(`${DEFAULT_CLAUDE_SETTINGS_DIR}/`, "").replace(`${DEFAULT_CODEX_SETTINGS_DIR}/`, "")).join(", ")}`)
   );
   process.exit(1);
 }
@@ -5042,32 +5632,32 @@ async function resolveCatalog2(catalog) {
   const existing = resolveCatalogReference(catalog);
   if (existing.kind === "found") return existing.space;
   if (existing.kind === "ambiguous") {
-    console.error(chalk7.red(`Ambiguous catalog reference: ${catalog}`));
-    console.error(chalk7.red("Use a catalog path like parent/child or the catalog id."));
+    console.error(chalk8.red(`Ambiguous catalog reference: ${catalog}`));
+    console.error(chalk8.red("Use a catalog path like parent/child or the catalog id."));
     for (const match of existing.matches) {
-      console.error(chalk7.gray(`  ${catalogPath(match, listSpaces())} (${match.id})`));
+      console.error(chalk8.gray(`  ${catalogPath(match, listSpaces())} (${match.id})`));
     }
     process.exit(1);
   }
   if (!process.stdin.isTTY) {
-    console.error(chalk7.red(`Catalog not found: ${catalog}`));
-    console.error(chalk7.yellow(`Create it first: starling catalog create ${catalog}`));
+    console.error(chalk8.red(`Catalog not found: ${catalog}`));
+    console.error(chalk8.yellow(`Create it first: starling catalog create ${catalog}`));
     process.exit(1);
   }
   const input = await askCreateCatalog(catalog);
   if (!input) {
-    console.error(chalk7.yellow(`Catalog not found: ${catalog}`));
+    console.error(chalk8.yellow(`Catalog not found: ${catalog}`));
     process.exit(1);
   }
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const created = createCatalogPath2(catalog, now);
-  console.log(chalk7.green(`Created catalog: ${created.id} "${catalogPath(created)}"`));
+  console.log(chalk8.green(`Created catalog: ${created.id} "${catalogPath(created)}"`));
   return created;
 }
 async function askCreateCatalog(catalog) {
   const rl = createInterface3({ input: process.stdin, output: process.stdout });
   try {
-    const answer = await rl.question(`Catalog not found: ${chalk7.yellow(catalog)}. Create it now? (y/N) `);
+    const answer = await rl.question(`Catalog not found: ${chalk8.yellow(catalog)}. Create it now? (y/N) `);
     const normalized = answer.trim().toLowerCase();
     return normalized === "y" || normalized === "yes";
   } catch (error) {
@@ -5087,7 +5677,7 @@ function isReadlineAbort(error) {
 function createCatalogPath2(pathRef, now) {
   const parts = pathRef.split("/").map((part) => part.trim()).filter(Boolean);
   if (parts.length === 0) {
-    console.error(chalk7.red("Catalog name cannot be empty."));
+    console.error(chalk8.red("Catalog name cannot be empty."));
     process.exit(1);
   }
   let parentId = null;
@@ -5138,6 +5728,12 @@ async function runAgent(binary, args, cwd, options) {
       cwd,
       env: childEnv
     });
+    if (options?.onSpawn) {
+      try {
+        options.onSpawn(child);
+      } catch {
+      }
+    }
     let terminalInterrupted = false;
     let settled = false;
     const onSigInt = () => {
@@ -5307,16 +5903,16 @@ function collectSessionFilesByModifiedTime(dir, sinceMs, accumulator, limit = 3e
   if (accumulator.length >= limit) return;
   let entries;
   try {
-    entries = readdirSync4(dir);
+    entries = readdirSync5(dir);
   } catch {
     return;
   }
   for (const entry of entries) {
     if (entry === "subagents") continue;
-    const full = join8(dir, entry);
+    const full = join9(dir, entry);
     let st;
     try {
-      st = statSync4(full);
+      st = statSync5(full);
     } catch {
       continue;
     }
@@ -5336,7 +5932,7 @@ async function collectSessionCandidatesByModifiedTime(baseDir, startedTime, befo
   const matches = [];
   for (const filePath of filePaths) {
     try {
-      const st = statSync4(filePath);
+      const st = statSync5(filePath);
       const modifiedAt = new Date(st.mtimeMs).toISOString();
       const entries = await parseJsonlHead(filePath);
       const extract = provider === "codex" ? extractCodexSessionMeta : extractClaudeSessionMeta;
@@ -5388,7 +5984,7 @@ async function collectRunSessionCandidates(provider, startedAtMs, beforeRun, cwd
         parsed = null;
       }
       matches.push({
-        session_id: parsed?.session_id || basename4(filePath, ".jsonl"),
+        session_id: parsed?.session_id || basename5(filePath, ".jsonl"),
         provider: "claude",
         model: parsed?.model || "",
         project_path: parsed?.project_path || normalizedCwd,
@@ -5415,7 +6011,7 @@ async function resolveHookReportedClaudeSession(sessionId, normalizedCwd) {
     model: "",
     project_path: normalizedCwd,
     first_prompt: "",
-    file_path: join8(encodeClaudeProjectDirectory(normalizedCwd), `${sessionId}.jsonl`),
+    file_path: join9(encodeClaudeProjectDirectory(normalizedCwd), `${sessionId}.jsonl`),
     created_at: now,
     modified_at: now
   };
@@ -5429,10 +6025,10 @@ async function findKnownSessionForRun(sessionId, provider, normalizedCwd, attemp
   return findSessionById(sessionId);
 }
 async function findClaudeSessionInProjectById(sessionId, normalizedCwd) {
-  const filePath = join8(encodeClaudeProjectDirectory(normalizedCwd), `${sessionId}.jsonl`);
+  const filePath = join9(encodeClaudeProjectDirectory(normalizedCwd), `${sessionId}.jsonl`);
   let fileModifiedAt;
   try {
-    const st = statSync4(filePath);
+    const st = statSync5(filePath);
     if (!st.isFile()) return null;
     fileModifiedAt = st.mtimeMs;
   } catch {
@@ -5483,7 +6079,7 @@ async function tryResolveKnownSession(sessionId, provider, startedTime, beforeRu
 function encodeClaudeProjectDirectory(cwd) {
   const normalized = resolve2(cwd);
   const parts = normalized.split(/[\\/]/).filter(Boolean);
-  return join8(CLAUDE_SESSIONS_DIR, `-${parts.join("-")}`);
+  return join9(CLAUDE_SESSIONS_DIR, `-${parts.join("-")}`);
 }
 function snapshotProjectSessions(projectDir) {
   const snapshot = /* @__PURE__ */ new Map();
@@ -5494,7 +6090,7 @@ function snapshotProjectSessions(projectDir) {
     if (!current) continue;
     let entries;
     try {
-      entries = readdirSync4(current);
+      entries = readdirSync5(current);
     } catch {
       continue;
     }
@@ -5502,10 +6098,10 @@ function snapshotProjectSessions(projectDir) {
       if (entry === "subagents") {
         continue;
       }
-      const fullPath = join8(current, entry);
+      const fullPath = join9(current, entry);
       let stat;
       try {
-        stat = statSync4(fullPath);
+        stat = statSync5(fullPath);
       } catch {
         continue;
       }
@@ -5537,7 +6133,7 @@ async function detectSessionInCurrentClaudeProject(startedTime, beforeRun, norma
     } catch {
       parsed = null;
     }
-    const sessionId = parsed?.session_id || basename4(filePath, ".jsonl");
+    const sessionId = parsed?.session_id || basename5(filePath, ".jsonl");
     const candidate = {
       session_id: sessionId,
       provider: "claude",
@@ -5559,7 +6155,7 @@ async function detectSessionInCurrentClaudeProject(startedTime, beforeRun, norma
       const after = currentProjectFiles.get(filePath);
       if (after === void 0) continue;
       if (!Number.isFinite(after) || after < startedTime || after <= beforeModifiedAt) continue;
-      const sessionId = basename4(filePath, ".jsonl");
+      const sessionId = basename5(filePath, ".jsonl");
       directCandidates.push({
         session_id: sessionId,
         provider: "claude",
@@ -5628,9 +6224,9 @@ async function pinSessionToCatalog(session, opts, space) {
     if (!existing.space_ids.includes(space.id)) {
       existing.space_ids.push(space.id);
       updateBookmark(existing.id, { space_ids: existing.space_ids });
-      console.log(chalk7.green(`Added ${existing.id} to catalog "${space.name}" (${space.id})`));
+      console.log(chalk8.green(`Added ${existing.id} to catalog "${space.name}" (${space.id})`));
     } else {
-      console.log(chalk7.yellow(`Session already in catalog "${space.name}".`));
+      console.log(chalk8.yellow(`Session already in catalog "${space.name}".`));
     }
     return;
   }
@@ -5652,7 +6248,7 @@ async function pinSessionToCatalog(session, opts, space) {
     created_at: now,
     updated_at: now
   });
-  console.log(chalk7.green(`Pinned: ${bookmarkId}`));
+  console.log(chalk8.green(`Pinned: ${bookmarkId}`));
   console.log(`  Title:   ${title}`);
   console.log(`  Catalog: ${space.name} (${space.id})`);
 }
@@ -5664,18 +6260,18 @@ function normalizeAgent(input) {
 
 // src/commands/model.ts
 import { Command as Command6 } from "commander";
-import chalk8 from "chalk";
+import chalk9 from "chalk";
 import Table4 from "cli-table3";
-import { existsSync as existsSync8, readFileSync as readFileSync8, readdirSync as readdirSync5, unlinkSync as unlinkSync8 } from "fs";
-import { basename as basename5, extname as extname5, join as join9 } from "path";
-import { homedir as homedir2 } from "os";
+import { existsSync as existsSync8, readFileSync as readFileSync9, readdirSync as readdirSync6, unlinkSync as unlinkSync8 } from "fs";
+import { basename as basename6, extname as extname5, join as join10 } from "path";
+import { homedir as homedir3 } from "os";
 var SUPPORTED_EXTENSIONS = /* @__PURE__ */ new Set([".json", ".jsonc", ".toml"]);
 function registerModelCommand(program2) {
   const model = new Command6("model").description("Inspect model configurations");
   model.command("list").alias("ls").description("List current and Starling-managed model configurations").option("-a, --agent <agent>", "filter by agent: claude | codex | all", "all").option("--json", "output JSON").action((opts) => {
     const agent = normalizeAgent2(opts.agent);
     if (!agent) {
-      console.error(chalk8.red(`Unknown agent: ${opts.agent}`));
+      console.error(chalk9.red(`Unknown agent: ${opts.agent}`));
       process.exit(1);
     }
     const rows = collectModelConfigs(agent);
@@ -5688,8 +6284,8 @@ function registerModelCommand(program2) {
   model.command("add <name>").description("Add a Starling model profile").requiredOption("-a, --agent <agent>", "agent: claude | codex").requiredOption("--model <model>", "model name").option("--base-url <url>", "provider base URL").option("--api-key <key>", "API key/token").option("--provider <provider>", "provider name", "custom").option("--reasoning <effort>", "Codex reasoning effort").option("--wire-api <api>", "Codex wire_api: responses | chat", "responses").option("--force", "overwrite existing profile").option("--json", "output JSON").action((name, opts) => {
     const agent = normalizeAgent2(opts.agent);
     if (!agent || agent === "all") {
-      console.error(chalk8.red(`Unknown agent: ${opts.agent}`));
-      console.error(chalk8.gray("Allowed values: claude, codex"));
+      console.error(chalk9.red(`Unknown agent: ${opts.agent}`));
+      console.error(chalk9.gray("Allowed values: claude, codex"));
       process.exit(1);
     }
     const result = addModelProfile(name, agent, opts);
@@ -5697,14 +6293,14 @@ function registerModelCommand(program2) {
       console.log(JSON.stringify(result, null, 2));
       return;
     }
-    console.log(chalk8.green(`Added ${agent} model profile: ${result.name}`));
-    console.log(chalk8.gray(`  Source: ${result.source}`));
+    console.log(chalk9.green(`Added ${agent} model profile: ${result.name}`));
+    console.log(chalk9.gray(`  Source: ${result.source}`));
   });
   model.command("delete <name>").aliases(["del", "rm"]).description("Delete a Starling model profile").requiredOption("-a, --agent <agent>", "agent: claude | codex").option("--json", "output JSON").action((name, opts) => {
     const agent = normalizeAgent2(opts.agent);
     if (!agent || agent === "all") {
-      console.error(chalk8.red(`Unknown agent: ${opts.agent}`));
-      console.error(chalk8.gray("Allowed values: claude, codex"));
+      console.error(chalk9.red(`Unknown agent: ${opts.agent}`));
+      console.error(chalk9.gray("Allowed values: claude, codex"));
       process.exit(1);
     }
     const result = deleteModelProfile(name, agent);
@@ -5712,9 +6308,9 @@ function registerModelCommand(program2) {
       console.log(JSON.stringify(result, null, 2));
       return;
     }
-    console.log(chalk8.green(`Deleted ${agent} model profile: ${result.name}`));
+    console.log(chalk9.green(`Deleted ${agent} model profile: ${result.name}`));
     for (const source of result.sources) {
-      console.log(chalk8.gray(`  Removed: ${source}`));
+      console.log(chalk9.gray(`  Removed: ${source}`));
     }
   });
   program2.addCommand(model);
@@ -5724,22 +6320,22 @@ function addModelProfile(name, agent, opts) {
   if (agent === "codex") {
     const existing = getCodexProviderProfile(profileName);
     if (existing && !opts.force) {
-      console.error(chalk8.red(`Model profile already exists: ${profileName}`));
-      console.error(chalk8.gray(`  Source: ${existing.filePath}`));
-      console.error(chalk8.gray("Use --force to overwrite it."));
+      console.error(chalk9.red(`Model profile already exists: ${profileName}`));
+      console.error(chalk9.gray(`  Source: ${existing.filePath}`));
+      console.error(chalk9.gray("Use --force to overwrite it."));
       process.exit(1);
     }
   }
-  const source = join9(DEFAULT_CLAUDE_SETTINGS_DIR, `${profileName}.json`);
+  const source = join10(DEFAULT_CLAUDE_SETTINGS_DIR, `${profileName}.json`);
   if (existsSync8(source) && !opts.force) {
-    console.error(chalk8.red(`Model profile already exists: ${profileName}`));
-    console.error(chalk8.gray(`  Source: ${source}`));
-    console.error(chalk8.gray("Use --force to overwrite it."));
+    console.error(chalk9.red(`Model profile already exists: ${profileName}`));
+    console.error(chalk9.gray(`  Source: ${source}`));
+    console.error(chalk9.gray("Use --force to overwrite it."));
     process.exit(1);
   }
   const model = opts.model.trim();
   if (!model) {
-    console.error(chalk8.red("Model name cannot be empty."));
+    console.error(chalk9.red("Model name cannot be empty."));
     process.exit(1);
   }
   if (agent === "codex") {
@@ -5766,10 +6362,10 @@ function deleteModelProfile(name, agent) {
   if (sources.length === 0) {
     const dir = agent === "claude" ? DEFAULT_CLAUDE_SETTINGS_DIR : DEFAULT_CODEX_SETTINGS_DIR;
     const extensions = agent === "claude" ? ".json or .jsonc" : ".toml, .json, or .jsonc";
-    console.error(chalk8.red(`Model profile not found: ${profileName}`));
-    console.error(chalk8.gray(`  Agent: ${agent}`));
-    console.error(chalk8.gray(`  Expected under: ${dir}`));
-    console.error(chalk8.gray(`  Supported files: ${profileName}${extensions}`));
+    console.error(chalk9.red(`Model profile not found: ${profileName}`));
+    console.error(chalk9.gray(`  Agent: ${agent}`));
+    console.error(chalk9.gray(`  Expected under: ${dir}`));
+    console.error(chalk9.gray(`  Supported files: ${profileName}${extensions}`));
     process.exit(1);
   }
   for (const source of sources) {
@@ -5780,7 +6376,7 @@ function deleteModelProfile(name, agent) {
 function findModelProfileSources(profileName, agent) {
   const dir = agent === "claude" ? DEFAULT_CLAUDE_SETTINGS_DIR : DEFAULT_CODEX_SETTINGS_DIR;
   const extensions = agent === "claude" ? [".json", ".jsonc"] : [".toml", ".json", ".jsonc"];
-  return extensions.map((extension) => join9(dir, `${profileName}${extension}`)).filter((source) => existsSync8(source));
+  return extensions.map((extension) => join10(dir, `${profileName}${extension}`)).filter((source) => existsSync8(source));
 }
 function buildClaudeProfile(opts, model) {
   const env = {
@@ -5810,13 +6406,13 @@ function buildClaudeProfile(opts, model) {
   };
 }
 function normalizeProfileName2(name) {
-  const normalized = basename5(name).replace(/\.(jsonc?|toml)$/i, "").trim();
+  const normalized = basename6(name).replace(/\.(jsonc?|toml)$/i, "").trim();
   if (!normalized || normalized === "." || normalized === "..") {
-    console.error(chalk8.red(`Invalid model profile name: ${name}`));
+    console.error(chalk9.red(`Invalid model profile name: ${name}`));
     process.exit(1);
   }
   if (!/^[A-Za-z0-9._-]+$/.test(normalized)) {
-    console.error(chalk8.red("Model profile name may only contain letters, numbers, dot, dash, and underscore."));
+    console.error(chalk9.red("Model profile name may only contain letters, numbers, dot, dash, and underscore."));
     process.exit(1);
   }
   return normalized;
@@ -5839,27 +6435,27 @@ function collectModelConfigs(agent) {
   return rows;
 }
 function collectClaudeConfigs() {
-  const currentPath = join9(homedir2(), ".claude", "settings.json");
+  const currentPath = join10(homedir3(), ".claude", "settings.json");
   return [
     summarizeClaudeJson(currentPath, "current", "current"),
     ...listProfileFiles(DEFAULT_CLAUDE_SETTINGS_DIR).map(
-      (filePath) => summarizeClaudeProfile(filePath, basename5(filePath, extname5(filePath)))
+      (filePath) => summarizeClaudeProfile(filePath, basename6(filePath, extname5(filePath)))
     )
   ];
 }
 function collectCodexConfigs() {
   migrateCodexJsonProfilesToToml();
-  const currentPath = join9(DEFAULT_CODEX_HOME, "config.toml");
+  const currentPath = join10(DEFAULT_CODEX_HOME, "config.toml");
   return [
     summarizeCodexToml(currentPath, "current", "current", readCodexAuthState()),
     ...listProfileFiles(DEFAULT_CODEX_SETTINGS_DIR).map(
-      (filePath) => summarizeCodexProfile(filePath, basename5(filePath, extname5(filePath)))
+      (filePath) => summarizeCodexProfile(filePath, basename6(filePath, extname5(filePath)))
     )
   ];
 }
 function listProfileFiles(dir) {
   if (!existsSync8(dir)) return [];
-  return readdirSync5(dir, { withFileTypes: true }).filter((entry) => entry.isFile()).map((entry) => join9(dir, entry.name)).filter((filePath) => SUPPORTED_EXTENSIONS.has(extname5(filePath).toLowerCase())).sort((a, b) => a.localeCompare(b));
+  return readdirSync6(dir, { withFileTypes: true }).filter((entry) => entry.isFile()).map((entry) => join10(dir, entry.name)).filter((filePath) => SUPPORTED_EXTENSIONS.has(extname5(filePath).toLowerCase())).sort((a, b) => a.localeCompare(b));
 }
 function summarizeClaudeProfile(filePath, name) {
   const extension = extname5(filePath).toLowerCase();
@@ -5943,7 +6539,7 @@ function summarizeCodexToml(filePath, name, scope, auth) {
   };
   if (!base.exists) return base;
   try {
-    const raw = readFileSync8(filePath, "utf-8");
+    const raw = readFileSync9(filePath, "utf-8");
     const provider = parseTomlValue(raw, "model_provider");
     const providerSection = provider ? parseTomlSection(raw, `model_providers.${provider}`) : {};
     return {
@@ -5974,7 +6570,7 @@ function summarizeCodexConfigObject(base, config, auth) {
   };
 }
 function readCodexAuthState() {
-  const authPath = join9(DEFAULT_CODEX_HOME, "auth.json");
+  const authPath = join10(DEFAULT_CODEX_HOME, "auth.json");
   if (!existsSync8(authPath)) return "none";
   try {
     const parsed = parseJsonFile(authPath);
@@ -5989,7 +6585,7 @@ function readCodexAuthState() {
 function readCodexTomlAuthState(filePath) {
   if (!existsSync8(filePath)) return "none";
   try {
-    const raw = readFileSync8(filePath, "utf-8");
+    const raw = readFileSync9(filePath, "utf-8");
     return /^\s*(experimental_bearer_token|OPENAI_API_KEY)\s*=\s*["'][^"']+["']/m.test(raw) ? "configured" : "none";
   } catch {
     return "unreadable";
@@ -5997,36 +6593,36 @@ function readCodexTomlAuthState(filePath) {
 }
 function printModelTable(rows) {
   if (rows.length === 0) {
-    console.log(chalk8.yellow("No model configurations found."));
+    console.log(chalk9.yellow("No model configurations found."));
     return;
   }
   const claudeRows = rows.filter((row) => row.agent === "claude");
   const codexRows = rows.filter((row) => row.agent === "codex");
   if (claudeRows.length > 0) {
-    console.log(chalk8.bold("Claude"));
+    console.log(chalk9.bold("Claude"));
     console.log(formatModelTable(claudeRows));
   }
   if (codexRows.length > 0) {
     if (claudeRows.length > 0) console.log("");
-    console.log(chalk8.bold("Codex"));
+    console.log(chalk9.bold("Codex"));
     console.log(formatModelTable(codexRows));
   }
 }
 function formatModelTable(rows) {
   const table = new Table4({
     head: [
-      chalk8.green("Name"),
-      chalk8.green("Model"),
-      chalk8.green("Auth"),
-      chalk8.green("Source")
+      chalk9.green("Name"),
+      chalk9.green("Model"),
+      chalk9.green("Auth"),
+      chalk9.green("Source")
     ],
     colWidths: [12, 28, 12, 76],
     wordWrap: true,
     style: { head: [] }
   });
   for (const row of rows) {
-    const source = row.exists ? row.source : chalk8.gray(`${row.source} (missing)`);
-    const model = row.error ? chalk8.red("error") : row.model || "-";
+    const source = row.exists ? row.source : chalk9.gray(`${row.source} (missing)`);
+    const model = row.error ? chalk9.red("error") : row.model || "-";
     const auth = row.error ? truncate(row.error, 10) : row.auth || "-";
     table.push([
       row.scope === "current" && row.name === "current" ? "default" : row.name,
@@ -6038,7 +6634,7 @@ function formatModelTable(rows) {
   return table.toString();
 }
 function parseJsonFile(filePath) {
-  const raw = readFileSync8(filePath, "utf-8");
+  const raw = readFileSync9(filePath, "utf-8");
   const parsed = JSON.parse(stripJsonComments4(raw));
   if (!isRecord7(parsed)) {
     throw new Error("JSON root is not an object");
@@ -6108,11 +6704,11 @@ function escapeRegex(value) {
 }
 
 // src/commands/config.ts
-import { copyFileSync, cpSync, existsSync as existsSync9, readFileSync as readFileSync9 } from "fs";
-import { homedir as homedir3 } from "os";
-import { join as join10, resolve as resolve3 } from "path";
+import { copyFileSync, cpSync, existsSync as existsSync9, readFileSync as readFileSync10 } from "fs";
+import { homedir as homedir4 } from "os";
+import { join as join11, resolve as resolve3 } from "path";
 import { Command as Command7 } from "commander";
-import chalk9 from "chalk";
+import chalk10 from "chalk";
 function registerConfigCommand(program2) {
   const config = new Command7("config").description("Manage Starling CLI settings");
   config.command("show").alias("ls").description("Show Starling CLI settings").option("--json", "output JSON").action((opts) => {
@@ -6129,7 +6725,7 @@ function registerConfigCommand(program2) {
       console.log(JSON.stringify(payload, null, 2));
       return;
     }
-    console.log(chalk9.green("Starling config"));
+    console.log(chalk10.green("Starling config"));
     console.log(`  Config:   ${payload.configPath}`);
     console.log(`  Home:     ${payload.effectiveHomePath}`);
     console.log(`  Source:   ${payload.homeSource}`);
@@ -6141,8 +6737,8 @@ function registerConfigCommand(program2) {
   });
   config.command("set <key> <value>").description("Set a Starling CLI setting").option("--migrate", "copy existing Starling metadata into the new home when target files do not exist").action((key, value, opts) => {
     if (key !== "home") {
-      console.error(chalk9.red(`Unknown config key: ${key}`));
-      console.error(chalk9.gray("Allowed keys: home"));
+      console.error(chalk10.red(`Unknown config key: ${key}`));
+      console.error(chalk10.gray("Allowed keys: home"));
       process.exit(1);
     }
     const homePath = normalizeHomePath(value);
@@ -6150,26 +6746,26 @@ function registerConfigCommand(program2) {
     const fileConfig = readCliConfig();
     fileConfig.homePath = homePath;
     atomicWriteJSON(CLI_CONFIG_PATH, fileConfig);
-    console.log(chalk9.green("Updated Starling config"));
+    console.log(chalk10.green("Updated Starling config"));
     console.log(`  Home:   ${homePath}`);
     console.log(`  Config: ${CLI_CONFIG_PATH}`);
     for (const entry of migrated) {
-      console.log(chalk9.gray(`  Migrated: ${entry}`));
+      console.log(chalk10.gray(`  Migrated: ${entry}`));
     }
     if (process.env.STARLING_HOME?.trim()) {
-      console.log(chalk9.yellow("  Note: STARLING_HOME is currently set and overrides this saved value for this process."));
+      console.log(chalk10.yellow("  Note: STARLING_HOME is currently set and overrides this saved value for this process."));
     }
   });
   config.command("unset <key>").description("Unset a Starling CLI setting").action((key) => {
     if (key !== "home") {
-      console.error(chalk9.red(`Unknown config key: ${key}`));
-      console.error(chalk9.gray("Allowed keys: home"));
+      console.error(chalk10.red(`Unknown config key: ${key}`));
+      console.error(chalk10.gray("Allowed keys: home"));
       process.exit(1);
     }
     const fileConfig = readCliConfig();
     delete fileConfig.homePath;
     atomicWriteJSON(CLI_CONFIG_PATH, fileConfig);
-    console.log(chalk9.green("Updated Starling config"));
+    console.log(chalk10.green("Updated Starling config"));
     console.log("  Home:   default");
     console.log(`  Config: ${CLI_CONFIG_PATH}`);
   });
@@ -6178,7 +6774,7 @@ function registerConfigCommand(program2) {
 function readCliConfig() {
   if (!existsSync9(CLI_CONFIG_PATH)) return {};
   try {
-    const parsed = JSON.parse(readFileSync9(CLI_CONFIG_PATH, "utf-8"));
+    const parsed = JSON.parse(readFileSync10(CLI_CONFIG_PATH, "utf-8"));
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
     const homePath = parsed.homePath;
     return typeof homePath === "string" && homePath.trim() ? { homePath: homePath.trim() } : {};
@@ -6189,30 +6785,30 @@ function readCliConfig() {
 function normalizeHomePath(value) {
   const trimmed = value.trim();
   if (!trimmed) {
-    console.error(chalk9.red("Home path cannot be empty."));
+    console.error(chalk10.red("Home path cannot be empty."));
     process.exit(1);
   }
-  if (trimmed === "~") return homedir3();
-  if (trimmed.startsWith("~/")) return resolve3(homedir3(), trimmed.slice(2));
+  if (trimmed === "~") return homedir4();
+  if (trimmed.startsWith("~/")) return resolve3(homedir4(), trimmed.slice(2));
   return resolve3(trimmed);
 }
 function migrateStarlingData(targetHome) {
   const migrated = [];
-  const targetStore = join10(targetHome, "store.json");
+  const targetStore = join11(targetHome, "store.json");
   if (existsSync9(DEFAULT_STORE_PATH) && !existsSync9(targetStore)) {
     ensureDir(targetStore);
     copyFileSync(DEFAULT_STORE_PATH, targetStore);
     migrated.push(targetStore);
   }
-  const targetSettings = join10(targetHome, "settings");
+  const targetSettings = join11(targetHome, "settings");
   if (existsSync9(DEFAULT_STARLING_SETTINGS_DIR) && !existsSync9(targetSettings)) {
     ensureDir(targetSettings);
     cpSync(DEFAULT_STARLING_SETTINGS_DIR, targetSettings, { recursive: true });
     migrated.push(targetSettings);
   }
   for (const name of ["session-index.json", "project-session-index.json", "codex-provider.json"]) {
-    const source = join10(DEFAULT_STARLING_HOME, name);
-    const target = join10(targetHome, name);
+    const source = join11(DEFAULT_STARLING_HOME, name);
+    const target = join11(targetHome, name);
     if (existsSync9(source) && !existsSync9(target)) {
       ensureDir(target);
       copyFileSync(source, target);
@@ -6224,7 +6820,7 @@ function migrateStarlingData(targetHome) {
 
 // src/commands/diagnose.ts
 import { Command as Command8 } from "commander";
-import chalk11 from "chalk";
+import chalk12 from "chalk";
 import { writeFileSync as writeFileSync6 } from "fs";
 
 // src/diagnose/tasks/personality.ts
@@ -6328,7 +6924,7 @@ function listTaskIds() {
 // src/diagnose/agentRunner.ts
 import { spawn as spawn3 } from "child_process";
 import { existsSync as existsSync10 } from "fs";
-import { basename as basename6, isAbsolute as isAbsolute3, join as join11 } from "path";
+import { basename as basename7, isAbsolute as isAbsolute3, join as join12 } from "path";
 var CAPTURE_STDOUT_MAX_BYTES = 2 * 1024 * 1024;
 var CAPTURE_STDERR_MAX_BYTES = 64 * 1024;
 var CAPTURE_SIGKILL_GRACE_MS = 5e3;
@@ -6355,7 +6951,7 @@ function resolveClaudeConfigPath(profile) {
   if (isAbsolute3(profile) || existsSync10(profile)) {
     return existsSync10(profile) ? profile : null;
   }
-  const base = join11(DEFAULT_CLAUDE_SETTINGS_DIR, basename6(profile));
+  const base = join12(DEFAULT_CLAUDE_SETTINGS_DIR, basename7(profile));
   if (existsSync10(base)) return base;
   if (!base.endsWith(".json") && !base.endsWith(".jsonc")) {
     for (const ext of [".json", ".jsonc"]) {
@@ -6620,37 +7216,37 @@ function parseJudgeVerdict(raw, evaluatees) {
 }
 
 // src/diagnose/format.ts
-import chalk10 from "chalk";
+import chalk11 from "chalk";
 function formatReportHuman(report) {
   const out = [];
   out.push("");
-  out.push(chalk10.bold.cyan("\u2550".repeat(64)));
-  out.push(chalk10.bold.cyan(`  Diagnosis report \u2014 ${report.taskName}`));
-  out.push(chalk10.gray(`  task: ${report.task}   judge: ${report.judge}   started: ${report.startedAt}`));
-  out.push(chalk10.cyan("\u2550".repeat(64)));
+  out.push(chalk11.bold.cyan("\u2550".repeat(64)));
+  out.push(chalk11.bold.cyan(`  Diagnosis report \u2014 ${report.taskName}`));
+  out.push(chalk11.gray(`  task: ${report.task}   judge: ${report.judge}   started: ${report.startedAt}`));
+  out.push(chalk11.cyan("\u2550".repeat(64)));
   for (const ev of report.evaluatees) {
     out.push("");
     out.push(formatEvaluatee(ev));
   }
   out.push("");
-  out.push(chalk10.bold.cyan("\u2500".repeat(64)));
-  out.push(chalk10.bold.cyan("  Judge verdict"));
-  out.push(chalk10.cyan("\u2500".repeat(64)));
+  out.push(chalk11.bold.cyan("\u2500".repeat(64)));
+  out.push(chalk11.bold.cyan("  Judge verdict"));
+  out.push(chalk11.cyan("\u2500".repeat(64)));
   out.push(formatVerdict(report.verdict, report.evaluatees));
   out.push("");
   return out.join("\n");
 }
 function formatEvaluatee(ev) {
   const out = [];
-  out.push(chalk10.bold.yellow(`\u25B8 ${ev.profileLabel}  `) + chalk10.gray(`(${ev.provider})`));
+  out.push(chalk11.bold.yellow(`\u25B8 ${ev.profileLabel}  `) + chalk11.gray(`(${ev.provider})`));
   if (ev.error) {
-    out.push(chalk10.red(`  error: ${ev.error}`));
+    out.push(chalk11.red(`  error: ${ev.error}`));
     return out.join("\n");
   }
   for (const r of ev.results) {
-    const status = r.timedOut ? chalk10.bgRed.white(" TIMEOUT ") : r.exitCode === 0 ? chalk10.green("ok") : chalk10.red(`exit ${r.exitCode}`);
-    out.push(`  ${chalk10.cyan(r.questionId)} ${chalk10.gray(`(${r.durationMs}ms)`)} ${status}`);
-    if (r.error) out.push(chalk10.gray(`    ${r.error}`));
+    const status = r.timedOut ? chalk11.bgRed.white(" TIMEOUT ") : r.exitCode === 0 ? chalk11.green("ok") : chalk11.red(`exit ${r.exitCode}`);
+    out.push(`  ${chalk11.cyan(r.questionId)} ${chalk11.gray(`(${r.durationMs}ms)`)} ${status}`);
+    if (r.error) out.push(chalk11.gray(`    ${r.error}`));
     const body = (r.response || "(empty)").trim();
     const indented = body.split("\n").map((l) => `    ${l}`).join("\n");
     out.push(indented);
@@ -6660,32 +7256,32 @@ function formatEvaluatee(ev) {
 function formatVerdict(verdict, evaluatees) {
   const out = [];
   if (verdict.parseError) {
-    out.push(chalk10.red(`Could not parse structured verdict: ${verdict.parseError}`));
-    out.push(chalk10.gray("Raw judge output:"));
+    out.push(chalk11.red(`Could not parse structured verdict: ${verdict.parseError}`));
+    out.push(chalk11.gray("Raw judge output:"));
     out.push(verdict.raw.trim());
     return out.join("\n");
   }
   if (verdict.assessments.length === 0) {
-    out.push(chalk10.yellow("Judge returned no assessments."));
+    out.push(chalk11.yellow("Judge returned no assessments."));
     out.push(verdict.raw.trim());
     return out.join("\n");
   }
   for (const a of verdict.assessments) {
     out.push("");
-    out.push(chalk10.bold.yellow(`\u25B8 ${a.profileLabel}`) + "  " + chalk10.green(a.personalityType || "(no type)"));
+    out.push(chalk11.bold.yellow(`\u25B8 ${a.profileLabel}`) + "  " + chalk11.green(a.personalityType || "(no type)"));
     const scoreKeys = Object.keys(a.scores);
     if (scoreKeys.length > 0) {
       const cols = scoreKeys.map((k) => `${k}:${a.scores[k]}`);
-      out.push(chalk10.gray("  scores  ") + cols.join("  "));
+      out.push(chalk11.gray("  scores  ") + cols.join("  "));
     }
     if (a.rationale) {
-      out.push(chalk10.gray("  why     ") + a.rationale);
+      out.push(chalk11.gray("  why     ") + a.rationale);
     }
   }
   const assessed = new Set(verdict.assessments.map((a) => a.profileLabel));
   for (const ev of evaluatees) {
     if (!assessed.has(ev.profileLabel)) {
-      out.push(chalk10.gray(`  (no assessment for ${ev.profileLabel})`));
+      out.push(chalk11.gray(`  (no assessment for ${ev.profileLabel})`));
     }
   }
   return out.join("\n");
@@ -6698,7 +7294,7 @@ function formatReportJson(report) {
 function registerDiagnoseCommand(program2) {
   const diagnose = new Command8("diagnose").alias("diag").description("Run a benchmark task against one or more agents and have a judge agent assess them").option("--task <task>", "benchmark task id", "personality").option("--judge <provider[:profile]>", "judge/launcher agent, e.g. claude:sonnet / codex:gpt5 / claude (bare provider = default config)").option("--agent <provider[:profile]>", "evaluatee agent (repeatable)", accumulate, []).option("--timeout <ms>", "per-call timeout in ms", "120000").option("--concurrency <n>", "max evaluatees to run in parallel; 0 = all at once", "0").option("--json", "emit full report as JSON on stdout").option("--out <file>", "write the JSON report to a file").action(async (opts) => {
     await runDiagnose(opts).catch((err) => {
-      console.error(chalk11.red(err instanceof Error ? err.message : String(err)));
+      console.error(chalk12.red(err instanceof Error ? err.message : String(err)));
       process.exit(1);
     });
   });
@@ -6714,17 +7310,17 @@ async function runDiagnose(opts) {
   try {
     task = loadTask(opts.task);
   } catch (err) {
-    console.error(chalk11.red(err instanceof Error ? err.message : String(err)));
+    console.error(chalk12.red(err instanceof Error ? err.message : String(err)));
     process.exit(1);
   }
   if (!opts.judge) {
-    console.error(chalk11.red("Missing required option: --judge <provider:profile>"));
-    console.error(chalk11.gray("Example: --judge claude:sonnet"));
+    console.error(chalk12.red("Missing required option: --judge <provider:profile>"));
+    console.error(chalk12.gray("Example: --judge claude:sonnet"));
     process.exit(1);
   }
   if (!opts.agent || opts.agent.length === 0) {
-    console.error(chalk11.red("Missing required option: --agent <provider:profile> (repeatable)"));
-    console.error(chalk11.gray("Example: --agent claude:ds --agent codex:gpt5"));
+    console.error(chalk12.red("Missing required option: --agent <provider:profile> (repeatable)"));
+    console.error(chalk12.gray("Example: --agent claude:ds --agent codex:gpt5"));
     process.exit(1);
   }
   const judgeSpec = parseSpecOrExit(opts.judge, "--judge");
@@ -6732,9 +7328,9 @@ async function runDiagnose(opts) {
   const concurrency = concurrencyRaw === 0 ? evaluateeSpecs.length : concurrencyRaw;
   const judgeLabel = specLabel(judgeSpec);
   const startedAt = (/* @__PURE__ */ new Date()).toISOString();
-  logProgress(chalk11.bold.cyan(`Diagnose: ${task.name} (${task.id})`));
+  logProgress(chalk12.bold.cyan(`Diagnose: ${task.name} (${task.id})`));
   logProgress(
-    chalk11.gray(
+    chalk12.gray(
       `judge=${judgeLabel}  evaluatees=${evaluateeSpecs.length}  questions=${task.questions.length}  timeout=${timeoutMs}ms  concurrency=${concurrency}`
     )
   );
@@ -6743,11 +7339,11 @@ async function runDiagnose(opts) {
     concurrency,
     async (spec) => {
       const label = specLabel(spec);
-      logProgress(chalk11.cyan(`\u25B8 ${label}  starting (${task.questions.length} questions)`));
+      logProgress(chalk12.cyan(`\u25B8 ${label}  starting (${task.questions.length} questions)`));
       const results = [];
       for (let i = 0; i < task.questions.length; i++) {
         const question = task.questions[i];
-        logProgress(chalk11.gray(`  ${label}  Q${i + 1}/${task.questions.length} [${question.dimension}]`));
+        logProgress(chalk12.gray(`  ${label}  Q${i + 1}/${task.questions.length} [${question.dimension}]`));
         const capture = await runAgentCapture(spec, question.prompt, timeoutMs);
         const result = {
           questionId: question.id,
@@ -6774,12 +7370,12 @@ async function runDiagnose(opts) {
         ...errored ? { error: "all questions failed" } : {}
       };
       logProgress(
-        errored ? chalk11.red(`  ${label}  done (all questions failed)`) : chalk11.green(`  ${label}  done`)
+        errored ? chalk12.red(`  ${label}  done (all questions failed)`) : chalk12.green(`  ${label}  done`)
       );
       return evaluatee;
     }
   );
-  logProgress(chalk11.cyan(`\u25B8 ${judgeLabel}  judging ${evaluateeResults.length} evaluatee(s)`));
+  logProgress(chalk12.cyan(`\u25B8 ${judgeLabel}  judging ${evaluateeResults.length} evaluatee(s)`));
   const judgePrompt = buildJudgePrompt(task, evaluateeResults);
   const judgeCapture = await runAgentCapture(judgeSpec, judgePrompt, timeoutMs);
   const verdict = {
@@ -6794,7 +7390,7 @@ async function runDiagnose(opts) {
   } else if (judgeCapture.exitCode !== 0 && !verdict.assessments.length) {
     verdict.parseError = `judge exited ${judgeCapture.exitCode}${judgeCapture.stderr ? `: ${judgeCapture.stderr.slice(0, 500)}` : ""}`;
   }
-  logProgress(chalk11.green(`\u25B8 ${judgeLabel}  done (${verdict.assessments.length} assessments)`));
+  logProgress(chalk12.green(`\u25B8 ${judgeLabel}  done (${verdict.assessments.length} assessments)`));
   const report = {
     task: task.id,
     taskName: task.name,
@@ -6806,7 +7402,7 @@ async function runDiagnose(opts) {
   };
   if (opts.out) {
     writeFileSync6(opts.out, formatReportJson(report), "utf-8");
-    logProgress(chalk11.gray(`report written to ${opts.out}`));
+    logProgress(chalk12.gray(`report written to ${opts.out}`));
   }
   if (opts.json) {
     process.stdout.write(formatReportJson(report) + "\n");
@@ -6818,14 +7414,14 @@ function parseSpecOrExit(spec, flag) {
   try {
     return parseAgentSpec(spec);
   } catch (err) {
-    console.error(chalk11.red(`Invalid ${flag} spec: ${err instanceof Error ? err.message : String(err)}`));
+    console.error(chalk12.red(`Invalid ${flag} spec: ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
   }
 }
 function parsePositiveInt(value, name) {
   const n = Number(value);
   if (!Number.isInteger(n) || n <= 0) {
-    console.error(chalk11.red(`--${name} must be a positive integer, got "${value}".`));
+    console.error(chalk12.red(`--${name} must be a positive integer, got "${value}".`));
     process.exit(1);
   }
   return n;
@@ -6833,7 +7429,7 @@ function parsePositiveInt(value, name) {
 function parseNonNegativeInt(value, name) {
   const n = Number(value);
   if (!Number.isInteger(n) || n < 0) {
-    console.error(chalk11.red(`--${name} must be a non-negative integer, got "${value}".`));
+    console.error(chalk12.red(`--${name} must be a non-negative integer, got "${value}".`));
     process.exit(1);
   }
   return n;
@@ -6854,6 +7450,776 @@ async function runWithConcurrency(items, limit, worker) {
   }
   await Promise.all(Array.from({ length: size }, () => runOne()));
   return results;
+}
+
+// src/commands/status.ts
+import { Command as Command9 } from "commander";
+import chalk13 from "chalk";
+import Table5 from "cli-table3";
+function resolveStatus(sessionId, latest, detected) {
+  if (detected.has(sessionId)) return "running";
+  if (latest && latest.status === "running") return "running";
+  return latest?.status ?? "unknown";
+}
+async function collectCatalogBookmarks(catalogFilter) {
+  const all = listBookmarks().filter((b) => b.space_ids.length > 0);
+  if (!catalogFilter) return { bookmarks: all };
+  const resolution = resolveCatalogReference(catalogFilter);
+  if (resolution.kind !== "found") {
+    return {
+      bookmarks: [],
+      catalogError: resolution.kind === "ambiguous" ? `Ambiguous catalog "${catalogFilter}": ${resolution.matches.map((m) => m.name).join(", ")}` : `Catalog not found: ${catalogFilter}`
+    };
+  }
+  const catalogId = resolution.space.id;
+  return { bookmarks: all.filter((b) => b.space_ids.includes(catalogId)) };
+}
+async function buildSnapshot(catalogFilter, withDetection = false) {
+  reconcileStaleRuns();
+  const { bookmarks, catalogError } = await collectCatalogBookmarks(catalogFilter);
+  if (catalogError) return { rows: [], error: catalogError };
+  const detected = withDetection ? await detectRunningSessions() : /* @__PURE__ */ new Map();
+  const spaces = listSpaces();
+  const rows = bookmarks.map((b) => {
+    const latest = getLatestRunForSession(b.session_id);
+    const firstSpaceId = b.space_ids[0];
+    const space = firstSpaceId ? spaces.find((s) => s.id === firstSpaceId) : void 0;
+    const catalog = space ? catalogPath(space, spaces) : b.space_ids.join(",") || "-";
+    return {
+      catalog,
+      session_id: b.session_id,
+      title: b.title,
+      status: resolveStatus(b.session_id, latest, detected),
+      started_at: latest?.started_at,
+      ended_at: latest?.ended_at,
+      exit_code: latest?.exit_code,
+      pid: latest?.pid,
+      source: latest?.source
+    };
+  });
+  rows.sort((a, b) => {
+    if (a.status === "running" && b.status !== "running") return -1;
+    if (b.status === "running" && a.status !== "running") return 1;
+    return (b.started_at ?? "").localeCompare(a.started_at ?? "");
+  });
+  return { rows };
+}
+function fmtDate(value) {
+  if (!value) return "-";
+  return value.slice(0, 19).replace("T", " ");
+}
+function renderTable(rows) {
+  if (rows.length === 0) return chalk13.yellow("No catalog-archived sessions.");
+  const table = new Table5({
+    head: [
+      chalk13.cyan("Catalog"),
+      chalk13.cyan("Session"),
+      chalk13.cyan("Title"),
+      chalk13.cyan("Status"),
+      chalk13.cyan("Started"),
+      chalk13.cyan("Ended"),
+      chalk13.cyan("Exit"),
+      chalk13.cyan("PID")
+    ],
+    colWidths: [18, 14, 24, 14, 20, 20, 7, 9],
+    style: { head: [] }
+  });
+  for (const r of rows) {
+    const title = r.title.length > 22 ? r.title.slice(0, 22) + "\u2026" : r.title;
+    table.push([
+      r.catalog.length > 16 ? "\u2026" + r.catalog.slice(-15) : r.catalog,
+      shortSessionId(r.session_id),
+      title,
+      `${statusBadge(r.status)} ${r.status}`,
+      fmtDate(r.started_at),
+      fmtDate(r.ended_at),
+      r.exit_code === void 0 ? "-" : String(r.exit_code),
+      r.pid === void 0 ? "-" : String(r.pid)
+    ]);
+  }
+  return table.toString();
+}
+function clearScreen() {
+  process.stdout.write("\x1Bc");
+}
+function registerStatusCommand(program2) {
+  const status = new Command9("status").description("Monitor the run status of catalog-archived sessions").argument("[catalog]", "filter to a catalog (name, path, or id)").option("-c, --catalog <catalog>", "filter to a catalog (name, path, or id)").option("--watch", "live monitoring mode (re-render every few seconds)").option("--json", "output current snapshot as JSON").action(async (arg, opts) => {
+    const catalogFilter = opts.catalog ?? arg;
+    if (opts.json) {
+      const { rows, error } = await buildSnapshot(catalogFilter, true);
+      if (error) {
+        console.error(chalk13.red(error));
+        process.exit(1);
+      }
+      console.log(JSON.stringify(rows, null, 2));
+      return;
+    }
+    if (!opts.watch) {
+      const { rows, error } = await buildSnapshot(catalogFilter, true);
+      if (error) {
+        console.error(chalk13.red(error));
+        process.exit(1);
+      }
+      console.log(renderTable(rows));
+      return;
+    }
+    let previous = /* @__PURE__ */ new Map();
+    let tick = 0;
+    let stopped = false;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      clearScreen();
+      process.exit(0);
+    };
+    process.on("SIGINT", stop);
+    const renderOnce = async () => {
+      tick++;
+      const withDetection = tick % 2 === 1;
+      const { rows } = await buildSnapshot(catalogFilter, withDetection);
+      const current = new Map(rows.map((r) => [r.session_id, r.status]));
+      const events = [];
+      for (const [sid, status2] of current) {
+        const prev = previous.get(sid);
+        if (prev === void 0) continue;
+        if (prev !== status2) {
+          events.push(`[${(/* @__PURE__ */ new Date()).toISOString().slice(11, 19)}] session ${shortSessionId(sid)} ${prev} \u2192 ${status2}`);
+        }
+      }
+      previous = current;
+      clearScreen();
+      const filterLine = catalogFilter ? chalk13.gray(`catalog: ${catalogFilter}
+`) : "";
+      process.stdout.write(filterLine + renderTable(rows) + "\n");
+      if (events.length > 0) {
+        process.stdout.write(chalk13.gray("\n\u2014 transitions \u2014\n") + events.map((e) => chalk13.gray(e)).join("\n") + "\n");
+      }
+      process.stdout.write(chalk13.gray(`
+refreshing\u2026 (Ctrl-C to exit, tick ${tick})
+`));
+    };
+    await renderOnce();
+    const interval = setInterval(() => {
+      renderOnce().catch(() => void 0);
+    }, 3e3);
+    interval.unref?.();
+  });
+  status.command("prune").description("Remove crashed and stale run records").action(() => {
+    const crashed = clearRuns({ status: "crashed" });
+    const stale = clearRuns({ status: "stale" });
+    console.log(chalk13.green(`Pruned ${crashed + stale} run record(s) (crashed: ${crashed}, stale: ${stale}).`));
+  });
+  status.command("clear <run-or-session>").description("Remove a run record by run_id or all records for a session_id").action((target) => {
+    const run = findRun(target);
+    if (run) {
+      removeRun(target);
+      console.log(chalk13.green(`Removed run ${target}.`));
+      return;
+    }
+    const removed = clearRuns({ session_id: target });
+    if (removed > 0) {
+      console.log(chalk13.green(`Removed ${removed} run record(s) for session ${target}.`));
+    } else {
+      console.log(chalk13.yellow(`No run records matched "${target}".`));
+    }
+  });
+  program2.addCommand(status);
+}
+
+// src/commands/monitor.ts
+import { Command as Command10 } from "commander";
+import chalk14 from "chalk";
+import Table6 from "cli-table3";
+import { basename as basename8 } from "path";
+import { existsSync as existsSync11 } from "fs";
+
+// src/lib/processMetrics.ts
+import { readFileSync as readFileSync11 } from "fs";
+var CLK_TCK = 100;
+var prevSample = /* @__PURE__ */ new Map();
+var childCache = null;
+var CHILD_CACHE_TTL_MS = 1e3;
+function readUptime() {
+  try {
+    const first = readFileSync11("/proc/uptime", "utf-8").split(/\s+/)[0];
+    return Number(first) || 0;
+  } catch {
+    return 0;
+  }
+}
+function readVmRssKb(pid) {
+  try {
+    const status = readFileSync11(`/proc/${pid}/status`, "utf-8");
+    const m = status.match(/^VmRSS:\s*(\d+)\s*kB/m);
+    return m ? Number(m[1]) : 0;
+  } catch {
+    return 0;
+  }
+}
+function readTicksAndStart(pid) {
+  try {
+    const stat = parseProcStat(readFileSync11(`/proc/${pid}/stat`, "utf-8"));
+    if (!stat) return { ticks: 0, starttime: 0 };
+    return { ticks: stat.utime + stat.stime, starttime: stat.starttime };
+  } catch {
+    return { ticks: 0, starttime: 0 };
+  }
+}
+function getCachedChildMap() {
+  const now = Date.now();
+  if (childCache && childCache.expiresAt > now) return childCache.map;
+  const map = buildChildMap();
+  childCache = { expiresAt: now + CHILD_CACHE_TTL_MS, map };
+  return map;
+}
+function collectTree(rootPid, childMap) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  const queue = [rootPid];
+  while (queue.length > 0) {
+    const pid = queue.shift();
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    out.push(pid);
+    const children = childMap.get(pid);
+    if (children) {
+      for (const c of children) if (!seen.has(c)) queue.push(c);
+    }
+  }
+  return out;
+}
+function averageSinceStart(rootPid, totalTicks, now) {
+  const { starttime } = readTicksAndStart(rootPid);
+  if (!starttime) return 0;
+  const elapsedS = now - starttime / CLK_TCK;
+  if (elapsedS <= 0) return 0;
+  return totalTicks / CLK_TCK / elapsedS * 100;
+}
+function getProcessTreeMetrics(rootPid) {
+  if (process.platform !== "linux") return { pids: [], cpuPct: 0, memKb: 0 };
+  if (!Number.isFinite(rootPid) || rootPid <= 0) return { pids: [], cpuPct: 0, memKb: 0 };
+  const childMap = getCachedChildMap();
+  const pids = collectTree(rootPid, childMap);
+  let totalTicks = 0;
+  let totalMem = 0;
+  for (const pid of pids) {
+    totalTicks += readTicksAndStart(pid).ticks;
+    totalMem += readVmRssKb(pid);
+  }
+  const now = readUptime();
+  const prev = prevSample.get(rootPid);
+  let cpuPct;
+  if (prev && now > prev.wallS) {
+    const dTicks = totalTicks - prev.ticks;
+    cpuPct = dTicks / CLK_TCK / (now - prev.wallS) * 100;
+  } else {
+    cpuPct = averageSinceStart(rootPid, totalTicks, now);
+  }
+  if (!Number.isFinite(cpuPct) || cpuPct < 0) cpuPct = 0;
+  prevSample.set(rootPid, { ticks: totalTicks, wallS: now });
+  return { pids, cpuPct, memKb: totalMem };
+}
+function resetCpuSampler() {
+  prevSample.clear();
+  childCache = null;
+}
+
+// src/lib/sessionMetrics.ts
+import { openSync, readSync, closeSync, statSync as statSync6 } from "fs";
+var FULL_READ_THRESHOLD = 8 * 1024 * 1024;
+var TAIL_BYTES = 65536;
+var MAX_LINES = 1e5;
+var DEFAULT_WINDOW = 2e5;
+function modelContextWindow(model) {
+  if (!model) return DEFAULT_WINDOW;
+  const m = model.toLowerCase();
+  if (m.includes("1m") || m.includes("1000k")) return 1e6;
+  return DEFAULT_WINDOW;
+}
+var cache = /* @__PURE__ */ new Map();
+function isRecord8(value) {
+  return typeof value === "object" && value !== null;
+}
+function asNum(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  return 0;
+}
+function extractAssistantUsage(entry) {
+  const msg = isRecord8(entry.message) ? entry.message : null;
+  const u = msg && isRecord8(msg.usage) ? msg.usage : isRecord8(entry.usage) ? entry.usage : null;
+  if (!u) return null;
+  const input = asNum(u.input_tokens ?? u.inputTokens) + asNum(u.prompt_tokens ?? u.promptTokens);
+  const output = asNum(u.output_tokens ?? u.outputTokens ?? u.completion_tokens ?? u.completionTokens);
+  const cacheCreation = asNum(u.cache_creation_input_tokens ?? u.cacheCreationInputTokens);
+  const cacheRead = asNum(u.cache_read_input_tokens ?? u.cacheReadInputTokens);
+  if (!input && !output && !cacheCreation && !cacheRead) return null;
+  return { input, output, cacheCreation, cacheRead };
+}
+function extractModel(entry) {
+  const direct = typeof entry.model === "string" ? entry.model : null;
+  if (direct && !direct.startsWith("<") && direct !== "synthetic") return direct;
+  const msg = isRecord8(entry.message) ? entry.message : null;
+  const mm = msg && typeof msg.model === "string" ? msg.model : null;
+  if (mm && !mm.startsWith("<") && mm !== "synthetic") return mm;
+  return null;
+}
+function extractToolNames(entry) {
+  const names = [];
+  const msg = isRecord8(entry.message) ? entry.message : null;
+  const content = msg && Array.isArray(msg.content) ? msg.content : Array.isArray(entry.content) ? entry.content : null;
+  if (content) {
+    for (const part of content) {
+      if (isRecord8(part) && part.type === "tool_use" && typeof part.name === "string") {
+        names.push(part.name);
+      }
+    }
+  }
+  if (entry.type === "function_call" && typeof entry.name === "string") names.push(entry.name);
+  return names;
+}
+function reduceEntries(entries, lastActivityMs, truncated) {
+  const st = {
+    model: "",
+    tokens: { input: 0, output: 0, cache: 0, total: 0 },
+    lastUsage: null,
+    lastTool: null,
+    toolCount: 0
+  };
+  for (const entry of entries) {
+    if (!st.model) {
+      const m = extractModel(entry);
+      if (m) st.model = m;
+    }
+    const usage = extractAssistantUsage(entry);
+    if (usage) {
+      st.tokens.input += usage.input;
+      st.tokens.output += usage.output;
+      st.tokens.cache += usage.cacheCreation + usage.cacheRead;
+      st.lastUsage = usage;
+    }
+    const tools = extractToolNames(entry);
+    if (tools.length > 0) {
+      st.toolCount += tools.length;
+      st.lastTool = tools[tools.length - 1];
+    }
+  }
+  st.tokens.total = st.tokens.input + st.tokens.output;
+  let ctxPct = -1;
+  if (st.lastUsage) {
+    const ctxInput = st.lastUsage.input + st.lastUsage.cacheCreation + st.lastUsage.cacheRead;
+    const window = modelContextWindow(st.model);
+    if (window > 0) ctxPct = ctxInput / window * 100;
+  }
+  return {
+    model: st.model,
+    tokens: st.tokens,
+    ctxPct,
+    lastTool: st.lastTool,
+    toolCount: st.toolCount,
+    lastActivityMs,
+    truncated
+  };
+}
+function readTailEntries(filePath, size) {
+  const fd = openSync(filePath, "r");
+  try {
+    const start = Math.max(0, size - TAIL_BYTES);
+    const buf = Buffer.alloc(size - start);
+    readSync(fd, buf, 0, buf.length, start);
+    let text = buf.toString("utf-8");
+    if (start > 0) {
+      const nl = text.indexOf("\n");
+      text = nl >= 0 ? text.slice(nl + 1) : "";
+    }
+    const entries = [];
+    const lines = text.split("\n");
+    for (let i = 0; i < lines.length && entries.length < MAX_LINES; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      try {
+        entries.push(JSON.parse(line));
+      } catch {
+      }
+    }
+    return entries;
+  } finally {
+    closeSync(fd);
+  }
+}
+async function getSessionLiveMetrics(filePath) {
+  let st;
+  try {
+    st = statSync6(filePath);
+  } catch {
+    return emptyLive(0);
+  }
+  const cached = cache.get(filePath);
+  if (cached && cached.mtimeMs === st.mtimeMs) return cached.result;
+  let result;
+  if (st.size <= FULL_READ_THRESHOLD) {
+    const entries = await parseJsonlHead(filePath, MAX_LINES);
+    result = reduceEntries(entries, st.mtimeMs, false);
+  } else {
+    const entries = readTailEntries(filePath, st.size);
+    result = reduceEntries(entries, st.mtimeMs, true);
+  }
+  cache.set(filePath, { mtimeMs: st.mtimeMs, result });
+  return result;
+}
+function emptyLive(lastActivityMs) {
+  return {
+    model: "",
+    tokens: { input: 0, output: 0, cache: 0, total: 0 },
+    ctxPct: -1,
+    lastTool: null,
+    toolCount: 0,
+    lastActivityMs,
+    truncated: false
+  };
+}
+
+// src/commands/monitor.ts
+var PINNED_DISPLAY_LIMIT = 30;
+var RECENT_LIMIT = 8;
+function resolveStatus2(sessionId, latest, detected) {
+  if (detected.has(sessionId)) return "running";
+  if (latest && latest.status === "running") return "running";
+  return latest?.status ?? "unknown";
+}
+async function buildRow(spec, detected, indexBySid) {
+  const det = detected.get(spec.session_id);
+  const latest = getLatestRunForSession(spec.session_id);
+  const status = resolveStatus2(spec.session_id, latest, detected);
+  const indexEntry = indexBySid.get(spec.session_id);
+  const filePath = det?.file_path ?? indexEntry?.file_path;
+  let model = "";
+  let tokens = { input: 0, output: 0, cache: 0, total: 0 };
+  let ctxPct = -1;
+  let lastTool = null;
+  let toolCount = 0;
+  let lastActivityMs = indexEntry ? Date.parse(indexEntry.modified_at) || 0 : 0;
+  if (filePath) {
+    try {
+      const live = await getSessionLiveMetrics(filePath);
+      model = live.model;
+      tokens = live.tokens;
+      ctxPct = live.ctxPct;
+      lastTool = live.lastTool;
+      toolCount = live.toolCount;
+      lastActivityMs = live.lastActivityMs;
+    } catch {
+    }
+  }
+  let pid = det?.pid;
+  let cpuPct;
+  let memKb;
+  if (pid) {
+    const m = getProcessTreeMetrics(pid);
+    cpuPct = m.cpuPct;
+    memKb = m.memKb;
+  }
+  return {
+    session_id: spec.session_id,
+    pinned: spec.pinned,
+    catalog: spec.catalog,
+    title: spec.title,
+    provider: spec.provider || (det?.provider ?? ""),
+    model,
+    status,
+    pid,
+    cpu_pct: cpuPct,
+    mem_kb: memKb,
+    ctx_pct: ctxPct,
+    tokens_in: tokens.input,
+    tokens_out: tokens.output,
+    tokens_cache: tokens.cache,
+    last_tool: lastTool,
+    tool_count: toolCount,
+    project_path: spec.project_path || (det?.project_path ?? ""),
+    file_path: filePath,
+    last_activity_ms: lastActivityMs
+  };
+}
+async function buildSnapshot2(opts) {
+  const catalogFilter = opts.catalogFilter;
+  const pinnedLimit = opts.pinnedLimit && opts.pinnedLimit > 0 ? opts.pinnedLimit : PINNED_DISPLAY_LIMIT;
+  reconcileStaleRuns();
+  const detected = await detectRunningSessions();
+  const index = loadSessionIndex();
+  const indexBySid = /* @__PURE__ */ new Map();
+  const metaBySid = /* @__PURE__ */ new Map();
+  if (index && Array.isArray(index.sessions)) {
+    for (const s of index.sessions) {
+      if (s.file_path) indexBySid.set(s.session_id, { file_path: s.file_path, modified_at: s.modified_at });
+      metaBySid.set(s.session_id, {
+        provider: s.provider,
+        project_path: s.project_path,
+        first_prompt: s.first_prompt,
+        custom_title: s.custom_title
+      });
+    }
+  }
+  const spaces = listSpaces();
+  let pinned = listBookmarks().filter((b) => b.space_ids.length > 0);
+  if (catalogFilter) {
+    const resolution = resolveCatalogReference(catalogFilter);
+    if (resolution.kind !== "found") {
+      const error = resolution.kind === "ambiguous" ? `Ambiguous catalog "${catalogFilter}": ${resolution.matches.map((m) => m.name).join(", ")}` : `Catalog not found: ${catalogFilter}`;
+      return { pinned: [], recent: [], pinnedTotal: 0, recentTotal: 0, activeCount: 0, error };
+    }
+    const catalogId = resolution.space.id;
+    pinned = pinned.filter((b) => b.space_ids.includes(catalogId));
+  }
+  const pinnedTotal = pinned.length;
+  const entries = pinned.map((b) => {
+    const firstSpaceId = b.space_ids[0];
+    const space = firstSpaceId ? spaces.find((s) => s.id === firstSpaceId) : void 0;
+    const catalog = space ? catalogPath(space, spaces) : b.space_ids.join(",") || "-";
+    const indexEntry = indexBySid.get(b.session_id);
+    const det = detected.get(b.session_id);
+    return {
+      spec: {
+        session_id: b.session_id,
+        provider: b.provider,
+        project_path: b.project_path,
+        title: b.title,
+        pinned: true,
+        catalog
+      },
+      modifiedAt: indexEntry?.modified_at ?? "",
+      running: !!det,
+      filePath: det?.file_path ?? indexEntry?.file_path
+    };
+  });
+  const running = entries.filter((e) => e.running);
+  const idleLimit = Math.max(0, pinnedLimit - running.length);
+  const sortedIdle = entries.filter((e) => !e.running).sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
+  const idle = [];
+  const statBudget = Math.max(idleLimit * 4, 60);
+  let stats = 0;
+  for (const e of sortedIdle) {
+    if (idle.length >= idleLimit) break;
+    if (e.filePath) {
+      if (stats++ >= statBudget && idle.length > 0) break;
+      if (!existsSync11(e.filePath)) continue;
+    }
+    idle.push(e);
+  }
+  const displayPinned = [...running, ...idle].map((e) => e.spec);
+  const pinnedRows = await Promise.all(displayPinned.map((s) => buildRow(s, detected, indexBySid)));
+  pinnedRows.sort((a, b) => {
+    if (a.status === "running" && b.status !== "running") return -1;
+    if (b.status === "running" && a.status !== "running") return 1;
+    return b.last_activity_ms - a.last_activity_ms;
+  });
+  let recentRows = [];
+  let recentTotal = 0;
+  if (opts.includeRecent && !catalogFilter) {
+    const pinnedIds = new Set(pinned.map((b) => b.session_id));
+    const recentCandidates = [...indexBySid.entries()].filter(([sid]) => !pinnedIds.has(sid)).map(([sid, v]) => ({ sid, modified_at: v.modified_at, file_path: v.file_path })).sort((a, b) => b.modified_at.localeCompare(a.modified_at));
+    recentTotal = recentCandidates.length;
+    const recentMeta = [];
+    let budget = 0;
+    for (const c of recentCandidates) {
+      if (recentMeta.length >= RECENT_LIMIT) break;
+      if (budget++ >= RECENT_LIMIT * 4) break;
+      if (!existsSync11(c.file_path)) continue;
+      recentMeta.push(c);
+    }
+    const recentSpecs = recentMeta.map((m) => {
+      const meta = metaBySid.get(m.sid);
+      return {
+        session_id: m.sid,
+        provider: meta?.provider ?? "claude",
+        project_path: meta?.project_path ?? "",
+        title: meta?.custom_title || (meta?.first_prompt ? meta.first_prompt.slice(0, 40) : ""),
+        pinned: false
+      };
+    });
+    recentRows = await Promise.all(recentSpecs.map((s) => buildRow(s, detected, indexBySid)));
+    recentRows.sort((a, b) => {
+      if (a.status === "running" && b.status !== "running") return -1;
+      if (b.status === "running" && a.status !== "running") return 1;
+      return b.last_activity_ms - a.last_activity_ms;
+    });
+  }
+  const activeCount = [...pinnedRows, ...recentRows].filter((r) => r.status === "running").length;
+  return { pinned: pinnedRows, recent: recentRows, pinnedTotal, recentTotal, activeCount };
+}
+function shortModel(m) {
+  if (!m) return "-";
+  const low = m.toLowerCase();
+  if (low.includes("opus")) return low.includes("4-6") || low.includes("4.6") ? "opus-4.6" : low.includes("4-5") || low.includes("4.5") ? "opus-4.5" : "opus-4";
+  if (low.includes("sonnet")) return low.includes("4-6") || low.includes("4.6") ? "son-4.6" : "son-4";
+  if (low.includes("haiku")) return "haiku-4";
+  if (low.includes("codex") || low.includes("gpt-5")) return "codex";
+  return m.length > 12 ? m.slice(0, 11) + "\u2026" : m;
+}
+function compact(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(0) + "k";
+  return String(n);
+}
+function formatMem(kb) {
+  if (!kb || kb <= 0) return "-";
+  if (kb < 1024) return `${kb}K`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(mb < 10 ? 1 : 0)}M`;
+  return `${(mb / 1024).toFixed(2)}G`;
+}
+function cpuColor(pct) {
+  if (pct === void 0) return chalk14.gray("-");
+  const s = `${pct.toFixed(0)}%`;
+  if (pct >= 80) return chalk14.red(s);
+  if (pct >= 30) return chalk14.yellow(s);
+  return chalk14.green(s);
+}
+function ctxColor(pct) {
+  if (pct < 0) return chalk14.gray("-");
+  const s = `${pct.toFixed(0)}%`;
+  if (pct >= 90) return chalk14.red.bold(s);
+  if (pct >= 70) return chalk14.yellow(s);
+  return chalk14.gray(s);
+}
+function renderSection(rows) {
+  if (rows.length === 0) return chalk14.gray("  (none)");
+  const table = new Table6({
+    head: [
+      chalk14.cyan("Session"),
+      chalk14.cyan("Model"),
+      chalk14.cyan("Project"),
+      chalk14.cyan("CPU"),
+      chalk14.cyan("Mem"),
+      chalk14.cyan("CTX"),
+      chalk14.cyan("Tokens in/out/ch"),
+      chalk14.cyan("Last tool")
+    ],
+    colWidths: [15, 11, 16, 6, 7, 6, 18, 14],
+    style: { head: [] }
+  });
+  for (const r of rows) {
+    const proj = r.project_path ? basename8(r.project_path) || r.project_path : "-";
+    const tok = `${compact(r.tokens_in)}/${compact(r.tokens_out)}/${chalk14.gray(compact(r.tokens_cache))}`;
+    const last = r.last_tool ? `${r.last_tool}\xD7${r.tool_count}` : "-";
+    table.push([
+      `${statusBadge(r.status)} ${shortSessionId(r.session_id)}`,
+      shortModel(r.model),
+      proj.length > 15 ? proj.slice(0, 14) + "\u2026" : proj,
+      cpuColor(r.cpu_pct),
+      formatMem(r.mem_kb),
+      ctxColor(r.ctx_pct),
+      tok,
+      last.length > 13 ? last.slice(0, 12) + "\u2026" : last
+    ]);
+  }
+  return table.toString();
+}
+function renderSnapshot(snap, tick) {
+  const header = chalk14.bold("Starling monitor");
+  const tickInfo = tick !== void 0 ? chalk14.gray(`  refresh 3s  tick ${tick}`) : "";
+  const shown = snap.pinned.length;
+  const pinnedTitle = shown < snap.pinnedTotal ? chalk14.bold(`
+Pinned (${shown} of ${snap.pinnedTotal})`) : chalk14.bold(`
+Pinned (${snap.pinnedTotal})`);
+  const pinnedSection = renderSection(snap.pinned);
+  let out = `${header}${tickInfo}${pinnedTitle}
+${pinnedSection}`;
+  if (snap.recent.length > 0) {
+    const rshown = snap.recent.length;
+    const recentTitle = rshown < snap.recentTotal ? chalk14.bold(`
+Recent unpinned (${rshown} of ${snap.recentTotal})`) : chalk14.bold(`
+Recent unpinned (${snap.recentTotal})`);
+    out += recentTitle + "\n" + renderSection(snap.recent);
+  }
+  out += chalk14.gray(`
+active ${snap.activeCount}`) + chalk14.gray(tick !== void 0 ? "  \xB7  Ctrl-C to exit\n" : "\n");
+  return out;
+}
+function clearScreen2() {
+  process.stdout.write("\x1Bc");
+}
+function registerMonitorCommand(program2) {
+  const monitor = new Command10("monitor").description("Live per-session monitoring (CPU/mem/CTX%/tokens). Pinned sessions first; unpinned only with --recent.").argument("[catalog]", "filter to a catalog's pinned sessions (name, path, or id)").option("-c, --catalog <catalog>", "filter to a catalog (name, path, or id)").option("-n, --limit <n>", "max pinned sessions to display (default 30)").option("--recent", "also show recent unpinned sessions").option("--watch", "live monitoring mode (re-render every 3s)").option("--json", "output the current snapshot as JSON").action(async (arg, opts) => {
+    const catalogFilter = opts.catalog ?? arg;
+    const parsedLimit = Number(opts.limit);
+    const pinnedLimit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.floor(parsedLimit) : void 0;
+    const includeRecent = !!opts.recent;
+    const snapshotOpts = { catalogFilter, pinnedLimit, includeRecent };
+    const snapshotError = (msg) => {
+      console.error(chalk14.red(msg));
+      return process.exit(1);
+    };
+    if (opts.json) {
+      const snap = await buildSnapshot2(snapshotOpts);
+      if (snap.error) snapshotError(snap.error);
+      console.log(
+        JSON.stringify(
+          {
+            pinned_total: snap.pinnedTotal,
+            recent_total: snap.recentTotal,
+            active: snap.activeCount,
+            pinned: snap.pinned,
+            recent: snap.recent
+          },
+          null,
+          2
+        )
+      );
+      return;
+    }
+    if (!opts.watch) {
+      const snap = await buildSnapshot2(snapshotOpts);
+      if (snap.error) snapshotError(snap.error);
+      console.log(renderSnapshot(snap));
+      return;
+    }
+    resetCpuSampler();
+    let previous = /* @__PURE__ */ new Map();
+    let tick = 0;
+    let stopped = false;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      clearScreen2();
+      process.exit(0);
+    };
+    process.on("SIGINT", stop);
+    const renderOnce = async () => {
+      tick++;
+      const snap = await buildSnapshot2(snapshotOpts);
+      const all = [...snap.pinned, ...snap.recent];
+      const current = new Map(
+        all.map((r) => [r.session_id, { status: r.status, tool: r.last_tool }])
+      );
+      const events = [];
+      for (const [sid, cur] of current) {
+        const prev = previous.get(sid);
+        if (!prev) continue;
+        if (prev.status !== cur.status) {
+          events.push(
+            `[${(/* @__PURE__ */ new Date()).toISOString().slice(11, 19)}] ${shortSessionId(sid)} ${prev.status} \u2192 ${cur.status}`
+          );
+        }
+        if (prev.tool !== cur.tool && cur.tool) {
+          events.push(`[${(/* @__PURE__ */ new Date()).toISOString().slice(11, 19)}] ${shortSessionId(sid)} tool ${prev.tool ?? "-"} \u2192 ${cur.tool}`);
+        }
+      }
+      previous = current;
+      clearScreen2();
+      const filterLine = catalogFilter ? chalk14.gray(`catalog: ${catalogFilter}
+`) : "";
+      process.stdout.write(filterLine + renderSnapshot(snap, tick));
+      if (events.length > 0) {
+        process.stdout.write(chalk14.gray("\n\u2014 transitions \u2014\n") + events.map((e) => chalk14.gray(e)).join("\n") + "\n");
+      }
+    };
+    await renderOnce();
+    const interval = setInterval(() => {
+      renderOnce().catch(() => void 0);
+    }, 3e3);
+    interval.unref?.();
+  });
+  program2.addCommand(monitor);
 }
 
 // package.json
@@ -6905,7 +8271,7 @@ var package_default = {
 };
 
 // src/index.ts
-var program = new Command9();
+var program = new Command11();
 program.enablePositionalOptions();
 program.name("starling").description("Agent session manager \u2014 discover, pin, and organize AI coding sessions").version(package_default.version);
 registerSessionCommand(program);
@@ -6916,6 +8282,8 @@ registerRunCommand(program);
 registerModelCommand(program);
 registerConfigCommand(program);
 registerDiagnoseCommand(program);
+registerStatusCommand(program);
+registerMonitorCommand(program);
 program.command("resume <session-id>").description("Resume an agent session directly").action(async (sessionId) => {
   await resumeSession(sessionId);
 });
