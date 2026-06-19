@@ -8,7 +8,10 @@ use colored::Colorize;
 use crate::constants::{default_runs_path, now_iso, RUNS_VERSION};
 use crate::core::fs_utils::{atomic_write_json, read_json};
 use crate::core::process_map::map_processes_to_sessions;
-use crate::types::{Bookmark, RunRecord, RunStatus, RunsFile};
+use crate::types::{Bookmark, RunRecord, RunsFile};
+
+// Re-export RunStatus so callers don't need crate::types::RunStatus
+pub use crate::types::RunStatus;
 
 const MAX_RUN_RECORDS: usize = 500;
 
@@ -243,7 +246,7 @@ pub fn reconcile_stale_runs() -> usize {
 
 // --- Detection (in-memory) ---
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct DetectedSession {
     pub pid: Option<u32>,
     pub provider: String,

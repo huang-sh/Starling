@@ -12,3 +12,4 @@ pub mod session_index;
 pub mod process_map;
 pub mod process_metrics;
 pub mod runs;
+pub mod format;
