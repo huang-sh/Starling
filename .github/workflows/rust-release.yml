@@ -1,0 +1,189 @@
+# Release workflow for the Rust port of Starling.
+#
+# Trigger: push a tag matching `rust-v*.*.*` (e.g. `rust-v0.1.0`).
+#
+# Matrix-builds pre-built native binaries for 4 targets, stages each into a
+# platform-specific npm tarball (starling-linux-x64, starling-darwin-arm64, …)
+# and publishes them plus the meta-package (starling-ai) to npm.
+
+name: rust-release
+
+on:
+  push:
+    tags:
+      - "rust-v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  tag-check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse version from tag
+        id: parse
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            [[ "${GITHUB_REF_NAME}" =~ ^rust-v([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?)$ ]] \
+              || { echo "❌ Tag '${GITHUB_REF_NAME}' doesn't match rust-v*.*.*"; exit 1; }
+            version="${BASH_REMATCH[1]}"
+          else
+            # workflow_dispatch: read from Cargo.toml
+            version="$(grep -m1 '^version' rust/Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')"
+          fi
+          # Cross-check with Cargo.toml
+          cargo_ver="$(grep -m1 '^version' rust/Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')"
+          [[ "${version}" == "${cargo_ver}" ]] \
+            || { echo "❌ Tag ${version} ≠ Cargo.toml ${cargo_ver}"; exit 1; }
+          echo "version=${version}" >> $GITHUB_OUTPUT
+          echo "✅ Releasing version ${version}"
+
+  build:
+    needs: tag-check
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            platform: linux
+            arch: x64
+          - runner: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            platform: linux
+            arch: arm64
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            platform: darwin
+            arch: x64
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            platform: darwin
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl toolchain (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools
+
+      - name: Cargo build
+        working-directory: rust
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Stage binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg_name="starling-${{ matrix.platform }}-${{ matrix.arch }}"
+          staging="staging/${pkg_name}"
+          mkdir -p "${staging}/vendor/${{ matrix.target }}/bin"
+          cp "rust/target/${{ matrix.target }}/release/starling" "${staging}/vendor/${{ matrix.target }}/bin/starling"
+          chmod +x "${staging}/vendor/${{ matrix.target }}/bin/starling"
+
+          # platform package.json
+          cat > "${staging}/package.json" <<EOF
+          {
+            "name": "${pkg_name}",
+            "version": "${{ needs.tag-check.outputs.version }}",
+            "description": "Pre-built starling binary for ${{ matrix.platform }}-${{ matrix.arch }}",
+            "license": "MIT",
+            "os": ["${{ matrix.platform == 'linux' && 'linux' || 'darwin' }}"],
+            "cpu": ["${{ matrix.arch == 'x64' && 'x64' || 'arm64' }}"],
+            "files": ["vendor/"]
+          }
+          EOF
+
+          # tar + checksum
+          tar -C "staging/${pkg_name}" -czf "${pkg_name}-${{ needs.tag-check.outputs.version }}.tar.gz" .
+          sha256sum "${pkg_name}-${{ needs.tag-check.outputs.version }}.tar.gz" > "${pkg_name}-${{ needs.tag-check.outputs.version }}.tar.gz.sha256sum"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: starling-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            staging/starling-${{ matrix.platform }}-${{ matrix.arch }}-${{ needs.tag-check.outputs.version }}.tar.gz
+            staging/starling-${{ matrix.platform }}-${{ matrix.arch }}-${{ needs.tag-check.outputs.version }}.tar.gz.sha256sum
+            staging/starling-${{ matrix.platform }}-${{ matrix.arch }}/package.json
+
+  publish:
+    needs: [tag-check, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Stage + publish platform packages
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.tag-check.outputs.version }}
+        run: |
+          set -euo pipefail
+          for triple in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+            pkg="starling-${triple}"
+            src="artifacts/${pkg}"
+            [[ -d "${src}" ]] || { echo "❌ Missing artifact for ${pkg}"; exit 1; }
+            mkdir -p "publish/${pkg}"
+            tar -xzf "${src}/${pkg}-${VERSION}.tar.gz" -C "publish/${pkg}"
+            # Verify checksum
+            (cd "${src}" && sha256sum -c "${pkg}-${VERSION}.tar.gz.sha256sum")
+            (cd "publish/${pkg}" && npm publish --access public --provenance)
+            echo "✅ Published ${pkg}@${VERSION}"
+          done
+
+      - name: Publish meta-package
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.tag-check.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd npm
+          # Sync version + optionalDependencies versions
+          node -e "
+          const fs = require('fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.version = process.env.VERSION;
+          for (const k of Object.keys(pkg.optionalDependencies || {})) {
+            pkg.optionalDependencies[k] = process.env.VERSION;
+          }
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          # Bundle scripts/ and skills/ for postinstall
+          mkdir -p scripts
+          cp ../scripts/install-agent-skills.js scripts/
+          cp -R ../skills .
+          npm publish --access public --provenance
+          echo "✅ Published starling-ai@${VERSION}"
