@@ -9,3 +9,6 @@ pub mod session_display;
 pub mod session_metrics;
 pub mod discovery;
 pub mod session_index;
+pub mod process_map;
+pub mod process_metrics;
+pub mod runs;
