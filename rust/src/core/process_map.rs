@@ -259,6 +259,11 @@ fn read_open_jsonl_files(pid: u32) -> Vec<PathBuf> {
 
 pub fn is_pid_alive(pid: u32) -> bool {
     if pid == 0 { return false; }
+    is_pid_alive_platform(pid)
+}
+
+#[cfg(target_os = "linux")]
+fn is_pid_alive_platform(pid: u32) -> bool {
     // kill(pid, 0) returns 0 if process exists, ESRCH if not, EPERM if exists
     // but not ours.
     let rc = unsafe { libc::kill(pid as i32, 0) };
@@ -266,6 +271,18 @@ pub fn is_pid_alive(pid: u32) -> bool {
     let errno = unsafe { *libc::__errno_location() };
     // EPERM = 1
     errno == 1
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn is_pid_alive_platform(pid: u32) -> bool {
+    let rc = unsafe { libc::kill(pid as i32, 0) };
+    if rc == 0 { return true; }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn is_pid_alive_platform(_pid: u32) -> bool {
+    false
 }
 
 /// ppid → children[] index over /proc.
