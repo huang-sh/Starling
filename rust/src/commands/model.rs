@@ -10,16 +10,24 @@ use crate::constants::{default_claude_settings_dir, default_codex_home, default_
 
 pub fn handle(cmd: ModelCommand) -> Result<()> {
     match cmd {
-        ModelCommand::List => list(),
+        ModelCommand::List { json, agent } => list(json, agent),
         ModelCommand::Add { name } => add(&name),
-        ModelCommand::Delete { name } => delete(&name),
+        ModelCommand::Delete { name, agent, json } => delete(&name, agent.as_deref(), json),
         ModelCommand::Use { name } => use_cmd(&name),
     }
 }
 
-fn list() -> Result<()> {
-    let claude_rows = collect_claude_configs();
-    let codex_rows = collect_codex_configs();
+fn list(json: bool, agent: Option<String>) -> Result<()> {
+    let filter = normalize_agent(agent.as_deref());
+    let claude_rows = if filter.map(|a| a == "claude").unwrap_or(true) { collect_claude_configs() } else { Vec::new() };
+    let codex_rows = if filter.map(|a| a == "codex").unwrap_or(true) { collect_codex_configs() } else { Vec::new() };
+
+    if json {
+        let mut rows = claude_rows.clone();
+        rows.extend(codex_rows.clone());
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
 
     if claude_rows.is_empty() && codex_rows.is_empty() {
         println!("{}", "No model configurations found.".yellow());
@@ -38,8 +46,21 @@ fn list() -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Default)]
+fn normalize_agent(agent: Option<&str>) -> Option<&str> {
+    match agent {
+        Some("claude") => Some("claude"),
+        Some("codex") => Some("codex"),
+        Some(other) => {
+            eprintln!("{}: unknown agent '{}'", "error".red(), other);
+            std::process::exit(2);
+        }
+        None => None,
+    }
+}
+
+#[derive(Clone, Default, serde::Serialize)]
 struct ModelRow {
+    agent: String,
     name: String,
     scope: String,
     source: String,
@@ -102,6 +123,7 @@ fn summarize_claude_json(path: &std::path::Path, scope: &str, name: &str) -> Mod
         (String::new(), String::new())
     };
     ModelRow {
+        agent: "claude".into(),
         name: name.to_string(),
         scope: scope.to_string(),
         source: path.to_string_lossy().to_string(),
@@ -127,6 +149,7 @@ fn summarize_codex_toml(path: &std::path::Path, scope: &str, name: &str) -> Mode
         (String::new(), String::new())
     };
     ModelRow {
+        agent: "codex".into(),
         name: name.to_string(),
         scope: scope.to_string(),
         source: path.to_string_lossy().to_string(),
@@ -198,9 +221,53 @@ fn add(_name: &str) -> Result<()> {
     Ok(())
 }
 
-fn delete(_name: &str) -> Result<()> {
-    eprintln!("{}", "model delete: not yet implemented in the Rust version (Phase 7).".yellow());
+fn delete(name: &str, agent: Option<&str>, json: bool) -> Result<()> {
+    let agent = normalize_agent(agent);
+    let mut matches = Vec::new();
+
+    if agent.map(|a| a == "claude").unwrap_or(true) {
+        for path in profile_paths_for_name(&default_claude_settings_dir(), name) {
+            matches.push(("claude", path));
+        }
+    }
+    if agent.map(|a| a == "codex").unwrap_or(true) {
+        for path in profile_paths_for_name(&default_codex_settings_dir(), name) {
+            matches.push(("codex", path));
+        }
+    }
+
+    if matches.is_empty() {
+        eprintln!("{}: model profile not found: {}", "error".red(), name);
+        std::process::exit(2);
+    }
+    if matches.len() > 1 {
+        eprintln!("{}: model profile name is ambiguous; pass --agent claude or --agent codex", "error".red());
+        std::process::exit(2);
+    }
+
+    let (agent, path) = matches.remove(0);
+    std::fs::remove_file(&path)?;
+    if json {
+        return super::print_json_result(
+            "model.delete",
+            &format!("Deleted {} model profile: {}", agent, name),
+            serde_json::json!({
+                "agent": agent,
+                "name": name,
+                "path": path.to_string_lossy(),
+                "deleted": true,
+            }),
+        );
+    }
+    println!("{}", format!("Deleted {} model profile: {}", agent, name).green());
     Ok(())
+}
+
+fn profile_paths_for_name(dir: &PathBuf, name: &str) -> Vec<PathBuf> {
+    list_profile_files(dir)
+        .into_iter()
+        .filter(|path| path.file_stem().and_then(|s| s.to_str()).map(|s| s == name).unwrap_or(false))
+        .collect()
 }
 
 fn use_cmd(_name: &str) -> Result<()> {

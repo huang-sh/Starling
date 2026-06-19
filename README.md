@@ -76,16 +76,16 @@ starling catalog add paper-review <session-id> --title "Figure review"
 Launch Codex and assign the new session to a catalog:
 
 ```bash
-starling run --catalog paper-review codex
+starling run -c paper-review codex
 ```
 
 Launch Claude Code with a Starling config profile:
 
 ```bash
-starling run --config ds --catalog paper-review claude
+starling run --setting ds -c paper-review claude
 ```
 
-Starling options must be placed before the agent name. Everything after `claude` or `codex` is passed directly to that agent:
+Starling options must be placed before the agent name. `-c` is the short alias for `--catalog`. Everything after `claude` or `codex` is passed directly to that agent:
 
 ```bash
 starling run --catalog paper-review codex exec "summarize this repo"
@@ -209,11 +209,11 @@ starling model delete demo --agent codex
 Use a profile when launching an agent:
 
 ```bash
-starling run --config demo --catalog paper-review codex
-starling run --config ds --catalog paper-review claude
+starling run --setting demo --catalog paper-review codex
+starling run --setting ds --catalog paper-review claude
 ```
 
-If `--config` is not provided, Starling uses the agent's normal default configuration.
+If `--setting` is not provided, Starling uses the agent's normal default configuration.
 
 ## Configuration Files
 
@@ -260,7 +260,7 @@ See [docs/data-path-design.md](docs/data-path-design.md) for the full data path 
 
 Claude profiles are JSON files that Starling passes to Claude Code as settings.
 
-Codex profiles are Codex-style TOML files. Starling copies them into a temporary Codex profile for the run, so `starling run --config <name> codex` does not overwrite the user's default `~/.codex/config.toml`.
+Codex profiles are Codex-style TOML files. Starling copies them into a temporary Codex profile for the run, so `starling run --setting <name> codex` does not overwrite the user's default `~/.codex/config.toml`.
 
 Example Codex profile:
 

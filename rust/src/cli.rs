@@ -12,7 +12,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Command {
     /// Discover and manage agent sessions
-    #[command(subcommand, alias = "s")]
+    #[command(subcommand, alias = "s", alias = "ses")]
     Session(SessionCommand),
 
     /// Pin and annotate agent sessions
@@ -36,21 +36,26 @@ pub enum Command {
         /// Pin the most recent session
         #[arg(long)]
         current: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Create, list, and organize catalogs of sessions
-    #[command(subcommand, alias = "space", alias = "sp")]
+    #[command(subcommand, alias = "space", alias = "sp", alias = "cat")]
     Catalog(CatalogCommand),
 
     /// List and inspect projects
-    #[command(subcommand)]
+    #[command(subcommand, alias = "prj")]
     Project(ProjectCommand),
 
-    /// Launch an agent session (Phase 6)
-    #[command(subcommand)]
-    Run(RunCommand),
+    /// Launch a Claude Code or Codex session under Starling tracking
+    ///
+    /// Records the run, maps the spawned process to its session, and optionally
+    /// assigns it to a catalog. Use --setting to launch with a model profile.
+    Run(#[command(flatten)] RunCommand),
 
-    /// Manage model profiles (Phase 6)
+    /// Manage model profiles used to launch agents with non-default providers
     #[command(subcommand, alias = "models")]
     Model(ModelCommand),
 
@@ -58,19 +63,25 @@ pub enum Command {
     #[command(subcommand)]
     Config(ConfigCommand),
 
-    /// Benchmark agents against a task suite (Phase 7)
+    /// Benchmark agents against a task suite
+    ///
     /// Run a benchmark task against one or more agents and have a judge agent assess them
+    #[command(alias = "diag")]
     Diagnose(#[command(flatten)] DiagnoseCommand),
 
     /// Show pinned sessions and their run status
     #[command(subcommand)]
     Status(StatusCommand),
 
-    /// Live monitor of agent sessions
-    Monitor(#[command(flatten)] MonitorCommand),
+    /// Live top-style view of agent sessions
+    #[command(alias = "monitor")]
+    Top(#[command(flatten)] MonitorCommand),
 
     /// Resume an agent session directly
-    Resume { session_id: String },
+    Resume {
+        /// Session ID to resume
+        session_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -79,7 +90,7 @@ pub enum SessionCommand {
     #[command(alias = "ls")]
     List {
         /// Max sessions to show
-        #[arg(short, long, default_value = "20")]
+        #[arg(short = 'n', visible_short_alias = 'l', long, default_value = "20")]
         limit: usize,
 
         /// Filter by agent: claude | codex
@@ -105,7 +116,9 @@ pub enum SessionCommand {
 
     /// Show session details
     Show {
+        /// Session ID to inspect
         session_id: String,
+        /// Output as JSON
         #[arg(long)]
         json: bool,
     },
@@ -114,42 +127,68 @@ pub enum SessionCommand {
     Lookup {
         /// One or more session IDs
         session_ids: Vec<String>,
+        /// Filter by agent: claude | codex
         #[arg(short, long)]
         agent: Option<String>,
+        /// Output as JSON
         #[arg(long)]
         json: bool,
     },
 
     /// Resume an agent session
-    Resume { session_id: String },
+    Resume {
+        /// Session ID to resume
+        session_id: String,
+    },
 
     /// Create or update session metadata
     Meta {
+        /// Session ID to annotate
         session_id: String,
+        /// Set the session title
         #[arg(short, long)]
         title: Option<String>,
+        /// Replace tags entirely (comma-separated)
         #[arg(long)]
         tags: Option<String>,
+        /// Append tags to the existing set (comma-separated)
         #[arg(long)]
         add_tags: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Add a note to a session
     Note {
+        /// Session ID to annotate
         session_id: String,
         /// Note content (joined as a single string)
         content: Vec<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Remove Starling metadata for a session without deleting the file
-    Unpin { session_id: String },
+    Unpin {
+        /// Session ID to unpin
+        session_id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Delete a session file and remove Starling metadata
     Delete {
+        /// Session ID to delete
         session_id: String,
         /// Confirm deletion
         #[arg(short = 'y', long)]
         yes: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Manage the local session index
@@ -165,40 +204,63 @@ pub enum SessionCommand {
 pub enum IndexCommand {
     /// Show session index status
     Status {
+        /// Output as JSON
         #[arg(long)]
         json: bool,
     },
     /// Rebuild ~/.starling/session-index.json
     Rebuild {
+        /// Filter by agent: claude | codex
         #[arg(short, long)]
         agent: Option<String>,
+        /// Output as JSON
         #[arg(long)]
         json: bool,
     },
     /// Remove ~/.starling/session-index.json
-    Clear,
+    Clear {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum SessionCatalogCommand {
     /// Add a session to a catalog
     Add {
+        /// Session ID to assign
         session_id: String,
+        /// Catalog to add to (name, path, or id)
         catalog: String,
+        /// Set the session title
         #[arg(short, long)]
         title: Option<String>,
+        /// Comma-separated tags
         #[arg(long)]
         tags: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Remove a session from a catalog
     #[command(alias = "rm")]
     Remove {
+        /// Session ID to remove
         session_id: String,
+        /// Catalog to remove from (name, path, or id)
         catalog: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Remove a session from all catalogs
     Clear {
+        /// Session ID to clear catalog assignments for
         session_id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -206,110 +268,277 @@ pub enum SessionCatalogCommand {
 pub enum CatalogCommand {
     /// Create a new catalog
     Create {
+        /// Name for the new catalog (must be unique among siblings)
         name: String,
-        #[arg(long)]
+        /// Short description of the catalog
+        #[arg(short = 'd', long)]
         description: Option<String>,
+        /// Comma-separated tags
+        #[arg(long)]
+        tags: Option<String>,
+        /// Parent catalog (name, path, or id); omit for top level
         #[arg(long)]
         parent: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// List catalogs
     #[command(alias = "ls")]
     List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Include pinned sessions under each catalog
+        #[arg(long)]
+        pins: bool,
+    },
+    /// Show catalog tree
+    Tree {
+        /// Include pinned sessions in the catalog tree
+        #[arg(long)]
+        sessions: bool,
+    },
+    /// Add a session to a catalog
+    Add {
+        /// Catalog to add to (name, path, or id)
+        catalog: String,
+        /// Session ID to assign
+        session_id: String,
+        /// Set the session title
+        #[arg(short, long)]
+        title: Option<String>,
+        /// Comma-separated tags
+        #[arg(long)]
+        tags: Option<String>,
+        /// Output as JSON
         #[arg(long)]
         json: bool,
     },
-    /// Show catalog tree
-    Tree,
-    /// Add a session to a catalog
-    Add {
-        catalog: String,
-        session_id: String,
-        #[arg(short, long)]
-        title: Option<String>,
-        #[arg(long)]
-        tags: Option<String>,
-    },
     /// Show catalog details
-    Show { name: String },
+    Show {
+        /// Catalog to show (name, path, or id)
+        name: String,
+    },
     /// Detach a session from a catalog
     #[command(alias = "rm")]
     Detach {
+        /// Catalog to detach from (name, path, or id)
         catalog: String,
+        /// Session ID to detach
         session_id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Clear all sessions from a catalog
-    Clear { catalog: String },
+    Clear {
+        /// Catalog to clear (name, path, or id)
+        catalog: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Delete a catalog
     Delete {
+        /// Catalog to delete (name, path, or id)
         catalog: String,
+        /// Confirm deletion
         #[arg(short = 'y', long)]
         yes: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Add tags to a catalog
     Tag {
+        /// Catalog to tag (name, path, or id)
         name: String,
         /// Tag list
         tags: Vec<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Rename a catalog
     Rename {
+        /// Catalog to rename (name, path, or id)
         catalog: String,
+        /// New name (must be unique among siblings)
         new_name: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Move a catalog under a new parent
     #[command(alias = "mv")]
     Move {
+        /// Catalog to move (name, path, or id)
         catalog: String,
+        /// New parent (name, path, or id); omit, or use `root` / `/` for top level
         #[arg(long)]
         parent: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
-    /// Edit a catalog interactively (Phase 6)
-    Edit { name: String },
+    /// Edit a catalog's description, name, or parent in one call
+    Edit {
+        /// Catalog to edit (name, path, or id)
+        name: String,
+        /// New description
+        #[arg(short = 'd', long)]
+        description: Option<String>,
+        /// New name (must be unique among siblings)
+        #[arg(long)]
+        rename: Option<String>,
+        /// New parent (name, path, or id); use `root` / `/` / empty for top level
+        #[arg(long)]
+        parent: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum ProjectCommand {
     /// List known projects
+    #[command(alias = "ls")]
     List {
+        /// Filter by agent: claude | codex
         #[arg(short, long)]
         agent: Option<String>,
+        /// Max projects to show
+        #[arg(short = 'n', visible_short_alias = 'l', long)]
+        limit: Option<usize>,
+        /// List all projects
+        #[arg(long)]
+        all: bool,
+        /// Rebuild/read without cached index when available (accepted for extension compatibility)
+        #[arg(long)]
+        refresh_index: bool,
+        /// Bypass cached index when available (accepted for extension compatibility)
+        #[arg(long)]
+        no_index: bool,
+        /// Output as JSON
         #[arg(long)]
         json: bool,
     },
     /// Show project details
-    Show { path: String },
+    Show {
+        /// Project path to inspect
+        path: String,
+        /// Filter by agent: claude | codex
+        #[arg(short, long)]
+        agent: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Args)]
+pub struct RunCommand {
+    /// Starling model/profile setting name to use for this run
+    #[arg(short = 's', long = "setting", alias = "config")]
+    pub setting: Option<String>,
+
+    /// Catalog to associate with the launched run
+    #[arg(short = 'c', long)]
+    pub catalog: Option<String>,
+
+    /// Optional run/session title
+    #[arg(long)]
+    pub title: Option<String>,
+
+    /// Working directory for the launched agent
+    #[arg(long)]
+    pub cwd: Option<String>,
+
+    #[command(subcommand)]
+    pub command: RunSubcommand,
 }
 
 #[derive(Subcommand)]
-pub enum RunCommand {
-    /// (Phase 6)
+pub enum RunSubcommand {
+    /// Launch Claude Code
     Claude {
+        /// Arguments passed through to Claude
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// (Phase 6)
+    /// Launch Codex
     Codex {
+        /// Arguments passed through to Codex
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// (Phase 6)
+    /// Show recorded Starling runs
     Status {
+        /// Run ID to inspect; omit to list recent runs
         run_id: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
-    /// (Phase 6)
+    /// Stop a recorded Starling run
     Stop {
+        /// Run ID to stop
         run_id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
 #[derive(Subcommand)]
 pub enum ModelCommand {
-    /// (Phase 6)
-    List,
-    /// (Phase 6)
-    Add { name: String },
-    /// (Phase 6)
-    Delete { name: String },
-    /// (Phase 6)
-    Use { name: String },
+    /// List model profiles and current agent configs
+    ///
+    /// Scans the active configs (~/.claude/settings.json, ~/.codex/config.toml)
+    /// and any saved profiles under ~/.starling/settings/{claude,codex}/,
+    /// showing the model, auth/provider, scope, and source file for each.
+    #[command(alias = "ls")]
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Filter by agent: claude | codex
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Create a new model profile
+    ///
+    /// Not yet implemented in the Rust CLI. Create the profile file directly
+    /// under ~/.starling/settings/{claude,codex}/, or use the VS Code extension.
+    Add {
+        /// Name for the new profile
+        name: String,
+    },
+    /// Delete a model profile
+    ///
+    /// Removes a profile file from ~/.starling/settings/{claude,codex}/.
+    /// If the name exists for both agents, disambiguate with --agent.
+    /// The agent's default 'current' config cannot be deleted here.
+    Delete {
+        /// Name of the profile to delete
+        name: String,
+        /// Disambiguate by agent: claude | codex
+        #[arg(long)]
+        agent: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set a model profile as the active default
+    ///
+    /// Not yet implemented in the Rust CLI. Select a profile per-run with:
+    /// starling run --setting <name> <agent>
+    Use {
+        /// Name of the profile to activate
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -317,13 +546,28 @@ pub enum ConfigCommand {
     /// Show Starling CLI settings
     #[command(alias = "ls")]
     Show {
+        /// Output as JSON
         #[arg(long)]
         json: bool,
     },
     /// Set a setting
-    Set { key: String, value: String },
+    Set {
+        /// Setting key (currently only `home` / `home_path`)
+        key: String,
+        /// Setting value
+        value: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Unset a setting
-    Unset { key: String },
+    Unset {
+        /// Setting key (currently only `home` / `home_path`)
+        key: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args)]
@@ -362,19 +606,30 @@ pub enum StatusCommand {
     /// Show status
     #[command(name = "show", alias = "ls")]
     Show {
+        /// Filter to a catalog (name, path, or id)
         #[arg(short = 'c', long)]
         catalog: Option<String>,
+        /// Detect live agent processes and show CPU/memory
         #[arg(long)]
         live: bool,
+        /// Output as JSON
         #[arg(long)]
         json: bool,
     },
     /// Mark running records with dead pids as crashed
-    Prune,
+    Prune {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Clear all run records
     Clear {
+        /// Confirm clearing all run records
         #[arg(short = 'y', long)]
         yes: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -392,8 +647,8 @@ pub struct MonitorCommand {
     #[arg(short, long)]
     pub limit: Option<usize>,
 
-    /// Also show recent unpinned sessions
-    #[arg(long)]
+    /// Also show unpinned sessions
+    #[arg(long, visible_alias = "unpin", visible_alias = "unpinned")]
     pub recent: bool,
 
     /// Live monitoring mode (re-render every 3s)

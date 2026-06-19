@@ -149,13 +149,14 @@ starling config show
 Starling arguments go before the agent name. Agent arguments go after the agent name and should be passed through unchanged.
 
 ```bash
-starling run --catalog paper-review codex
-starling run --catalog paper-review codex exec "summarize this repo"
-starling run --config ds --catalog paper-review claude
+starling run -c paper-review codex
+starling run -c paper-review codex exec "summarize this repo"
+starling run --setting ds -c paper-review claude
 starling run --catalog paper-review claude --dangerously-skip-permissions
 ```
 
-If `--config` is omitted, Starling uses the agent's normal default configuration.
+If `--setting` is omitted, Starling uses the agent's normal default configuration.
+`-c` is the short alias for `--catalog`.
 
 To put a run into a nested catalog, use a catalog path:
 

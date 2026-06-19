@@ -221,17 +221,14 @@ pub fn run_agent_capture(
 
     let timed_out = waited_ok.is_none();
     if timed_out {
-        // Try SIGTERM, then SIGKILL.
-        unsafe {
-            libc::kill(child_id as i32, libc::SIGTERM);
-        }
+        terminate_child(&mut child, child_id, false);
         let kill_deadline = Instant::now() + Duration::from_millis(CAPTURE_SIGKILL_GRACE_MS);
         while Instant::now() < kill_deadline {
             if let Ok(Some(_)) = child.try_wait() { break; }
             std::thread::sleep(Duration::from_millis(50));
         }
         if child.try_wait().ok().flatten().is_none() {
-            unsafe { libc::kill(child_id as i32, libc::SIGKILL); }
+            terminate_child(&mut child, child_id, true);
         }
     }
 
@@ -271,6 +268,19 @@ pub fn run_agent_capture(
         stderr: if stderr_capped.is_empty() { None } else { Some(stderr_capped) },
         spawn_error: None,
     }
+}
+
+#[cfg(unix)]
+fn terminate_child(_child: &mut std::process::Child, child_id: u32, force: bool) {
+    let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
+    unsafe {
+        libc::kill(child_id as i32, signal);
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_child(child: &mut std::process::Child, _child_id: u32, _force: bool) {
+    let _ = child.kill();
 }
 
 #[cfg(test)]

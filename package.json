@@ -5,6 +5,7 @@
   "description": "Starling CLI — Rust development orchestration root",
   "type": "module",
   "scripts": {
+    "build:ts": "tsc -p tsconfig.json",
     "build": "scripts/build.sh",
     "build:debug": "scripts/build.sh --debug",
     "dev": "scripts/build.sh --debug && node npm/bin/starling.js",
@@ -12,5 +13,9 @@
     "run": "node npm/bin/starling.js",
     "install:skill": "node scripts/install-agent-skills.js"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
 }

@@ -77,7 +77,7 @@ Sessions
 配置名就是之后启动时选择的 profile 名。例如配置名是 `deepseek`，等价 CLI 是：
 
 ```bash
-starling run --config deepseek codex
+starling run --setting deepseek codex
 ```
 
 ## DeepSeek Codex profile 示例
@@ -167,13 +167,13 @@ Starling Codex adapter: routing deepseek via http://127.0.0.1:<port>/v1
 CLI 等价命令：
 
 ```bash
-starling run --config deepseek --catalog codex-deepseek codex
+starling run --setting deepseek -c codex-deepseek codex
 ```
 
 Starling 参数放在 `codex` 前面，Codex 原始参数放在 `codex` 后面：
 
 ```bash
-starling run --config deepseek --catalog codex-deepseek codex exec "总结这个项目"
+starling run --setting deepseek --catalog codex-deepseek codex exec "总结这个项目"
 ```
 
 规则是：
@@ -208,13 +208,13 @@ starling model delete deepseek --agent codex
 可以先用一个短任务测试：
 
 ```bash
-starling run --config deepseek codex exec "say hi"
+starling run --setting deepseek codex exec "say hi"
 ```
 
 或者启动 TUI：
 
 ```bash
-starling run --config deepseek codex
+starling run --setting deepseek codex
 ```
 
 进入 Codex 后问：
@@ -294,7 +294,7 @@ starling model ls --agent codex
 使用 Starling profile 启动：
 
 ```bash
-starling run --config deepseek codex
+starling run --setting deepseek codex
 ```
 
 不要直接修改 `~/.codex/config.toml`。Starling 会为本次运行生成临时 Codex 配置，并在结束后清理，不应该覆盖默认 Codex 配置。

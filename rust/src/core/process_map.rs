@@ -620,6 +620,33 @@ pub fn map_processes_to_sessions() -> HashMap<String, MappedSession> {
     result
 }
 
+/// Resolve one launched agent process (and its descendants) to the session it
+/// has opened. This is useful for wrappers like `starling run`, where we know
+/// the child PID and want to annotate the session while it is still running.
+pub fn map_process_tree_to_session(root_pid: u32) -> Option<MappedSession> {
+    if !is_linux() || !is_pid_alive(root_pid) { return None; }
+    let args = read_cmdline(root_pid)?;
+    let provider = provider_from_cmdline(&args)?;
+    let scan = scan_proc_once();
+    let mut visited = HashSet::new();
+    let mut cache = ResolverCache::default();
+    resolve_process(root_pid, provider, &args, &scan.child_map, &mut visited, &mut cache)
+}
+
+pub fn map_process_tree_to_session_since(root_pid: u32, since_ms: u64) -> Option<MappedSession> {
+    let mapped = map_process_tree_to_session(root_pid)?;
+    let file_path = mapped.file_path.as_deref()?;
+    let mtime = std::fs::metadata(file_path).ok()?
+        .modified().ok()?
+        .duration_since(std::time::UNIX_EPOCH).ok()?
+        .as_millis() as u64;
+    if mtime >= since_ms {
+        Some(mapped)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

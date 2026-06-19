@@ -37,8 +37,8 @@ struct StatusRow {
 pub fn handle(cmd: StatusCommand) -> Result<()> {
     match cmd {
         StatusCommand::Show { catalog, live, json } => show(catalog, live, json),
-        StatusCommand::Prune => prune(),
-        StatusCommand::Clear { yes } => clear_cmd(yes),
+        StatusCommand::Prune { json } => prune(json),
+        StatusCommand::Clear { yes, json } => clear_cmd(yes, json),
     }
 }
 
@@ -163,13 +163,20 @@ fn parse_status(s: &str) -> RunStatus {
     }
 }
 
-fn prune() -> Result<()> {
+fn prune(json: bool) -> Result<()> {
     let n = reconcile_stale_runs();
+    if json {
+        return super::print_json_result(
+            "status.prune",
+            &format!("Reconciled {} stale run(s).", n),
+            serde_json::json!({ "reconciled": n }),
+        );
+    }
     println!("{}", format!("Reconciled {} stale run(s).", n).green());
     Ok(())
 }
 
-fn clear_cmd(yes: bool) -> Result<()> {
+fn clear_cmd(yes: bool, json: bool) -> Result<()> {
     if !yes {
         eprintln!("{}: clearing all run records requires --yes", "error".red());
         std::process::exit(2);
@@ -177,6 +184,13 @@ fn clear_cmd(yes: bool) -> Result<()> {
     let removed = clear_runs(None);
     let _ = ListFilter::default();
     let _ = RunFilter::default();
+    if json {
+        return super::print_json_result(
+            "status.clear",
+            &format!("Cleared {} run record(s).", removed),
+            serde_json::json!({ "removed": removed }),
+        );
+    }
     println!("{}", format!("Cleared {} run record(s).", removed).green());
     Ok(())
 }

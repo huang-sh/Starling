@@ -26,10 +26,10 @@ pub fn handle(cmd: SessionCommand) -> Result<()> {
         SessionCommand::Show { session_id, json } => show_cmd(&session_id, json),
         SessionCommand::Lookup { session_ids, agent, json } => lookup_cmd(session_ids, agent, json),
         SessionCommand::Resume { session_id } => super::resume::run(&session_id),
-        SessionCommand::Meta { session_id, title, tags, add_tags } => meta_cmd(&session_id, title, tags, add_tags),
-        SessionCommand::Note { session_id, content } => note_cmd(&session_id, &content.join(" ")),
-        SessionCommand::Unpin { session_id } => unpin_cmd(&session_id),
-        SessionCommand::Delete { session_id, yes } => delete_cmd(&session_id, yes),
+        SessionCommand::Meta { session_id, title, tags, add_tags, json } => meta_cmd(&session_id, title, tags, add_tags, json),
+        SessionCommand::Note { session_id, content, json } => note_cmd(&session_id, &content.join(" "), json),
+        SessionCommand::Unpin { session_id, json } => unpin_cmd(&session_id, json),
+        SessionCommand::Delete { session_id, yes, json } => delete_cmd(&session_id, yes, json),
         SessionCommand::Index(sub) => handle_index(sub),
         SessionCommand::Catalog(sub) => handle_session_catalog(sub),
     }
@@ -256,7 +256,7 @@ fn parse_tags(s: &str) -> Vec<String> {
     s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect()
 }
 
-fn meta_cmd(session_id: &str, title: Option<String>, tags: Option<String>, add_tags: Option<String>) -> Result<()> {
+fn meta_cmd(session_id: &str, title: Option<String>, tags: Option<String>, add_tags: Option<String>, json: bool) -> Result<()> {
     let meta = match resolve_session_meta(session_id) {
         Some(m) => m,
         None => {
@@ -276,15 +276,29 @@ fn meta_cmd(session_id: &str, title: Option<String>, tags: Option<String>, add_t
         patch.tags = Some(merged);
     }
     if patch.title.is_none() && patch.tags.is_none() {
+        if json {
+            return super::print_json_result(
+                "session.meta",
+                &format!("No metadata changes provided for {}.", bookmark.id),
+                serde_json::json!({ "bookmark": bookmark, "changed": false }),
+            );
+        }
         println!("{}", format!("No metadata changes provided for {}.", bookmark.id).yellow());
         return Ok(());
     }
     let updated = update_bookmark(&bookmark.id, patch).unwrap_or(bookmark);
+    if json {
+        return super::print_json_result(
+            "session.meta",
+            &format!("Updated session metadata: {}", updated.id),
+            serde_json::json!({ "bookmark": updated, "changed": true }),
+        );
+    }
     println!("{}", format!("Updated session metadata: {}", updated.id).green());
     Ok(())
 }
 
-fn note_cmd(session_id: &str, content: &str) -> Result<()> {
+fn note_cmd(session_id: &str, content: &str, json: bool) -> Result<()> {
     let content = content.trim();
     if content.is_empty() {
         eprintln!("{}: note content is required.", "error".red());
@@ -299,30 +313,52 @@ fn note_cmd(session_id: &str, content: &str) -> Result<()> {
     };
     let bookmark = ensure_session_bookmark(&meta, None, None);
     let mut notes = bookmark.notes.clone();
-    notes.push(crate::types::Note {
+    let note = crate::types::Note {
         id: generate_note_id(),
         content: content.to_string(),
         created_at: now_iso(),
-    });
+    };
+    notes.push(note.clone());
     update_bookmark(&bookmark.id, BookmarkPatch { notes: Some(notes), ..Default::default() });
+    if json {
+        return super::print_json_result(
+            "session.note",
+            &format!("Note added to {}", bookmark.id),
+            serde_json::json!({ "bookmark_id": bookmark.id, "note": note }),
+        );
+    }
     println!("{}", format!("Note added to {}", bookmark.id).green());
     Ok(())
 }
 
-fn unpin_cmd(session_id: &str) -> Result<()> {
+fn unpin_cmd(session_id: &str, json: bool) -> Result<()> {
     let bookmark = match find_bookmark(session_id) {
         Some(b) => b,
         None => {
+            if json {
+                return super::print_json_result(
+                    "session.unpin",
+                    &format!("Session metadata not found: {}", session_id),
+                    serde_json::json!({ "session_id": session_id, "removed": false }),
+                );
+            }
             println!("{}", format!("Session metadata not found: {}", session_id).yellow());
             return Ok(());
         }
     };
     remove_bookmark(&bookmark.id);
+    if json {
+        return super::print_json_result(
+            "session.unpin",
+            &format!("Removed pin metadata for {}", short_session_id(&bookmark.session_id)),
+            serde_json::json!({ "bookmark": bookmark, "removed": true }),
+        );
+    }
     println!("{}", format!("Removed pin metadata for {}", short_session_id(&bookmark.session_id)).green());
     Ok(())
 }
 
-fn delete_cmd(session_id: &str, yes: bool) -> Result<()> {
+fn delete_cmd(session_id: &str, yes: bool, json: bool) -> Result<()> {
     if !yes {
         eprintln!("{}: deleting a session file requires --yes.", "error".red());
         std::process::exit(1);
@@ -348,6 +384,17 @@ fn delete_cmd(session_id: &str, yes: bool) -> Result<()> {
         remove_bookmark(&b.id);
     }
     remove_session_from_index(&meta.session_id);
+    if json {
+        return super::print_json_result(
+            "session.delete",
+            &format!("Deleted session {}", short_session_id(&meta.session_id)),
+            serde_json::json!({
+                "session_id": meta.session_id,
+                "file_path": meta.file_path,
+                "removed_pin": bookmark,
+            }),
+        );
+    }
     println!("{}", format!("Deleted session {}", short_session_id(&meta.session_id)).green());
     println!("  File: {}", meta.file_path);
     if let Some(b) = &bookmark {
@@ -414,8 +461,15 @@ fn handle_index(sub: IndexCommand) -> Result<()> {
             println!("  Projects: {}", rebuilt.project_count);
             Ok(())
         }
-        IndexCommand::Clear => {
+        IndexCommand::Clear { json } => {
             let removed = clear_session_index();
+            if json {
+                return super::print_json_result(
+                    "session.index.clear",
+                    if removed { "Session index removed." } else { "No session index found." },
+                    serde_json::json!({ "removed": removed, "path": session_index_path().to_string_lossy() }),
+                );
+            }
             println!("{}", if removed { "Session index removed.".green() } else { "No session index found.".yellow() });
             Ok(())
         }
@@ -424,7 +478,7 @@ fn handle_index(sub: IndexCommand) -> Result<()> {
 
 fn handle_session_catalog(sub: SessionCatalogCommand) -> Result<()> {
     match sub {
-        SessionCatalogCommand::Add { session_id, catalog, title, tags } => {
+        SessionCatalogCommand::Add { session_id, catalog, title, tags, json } => {
             let entry = match resolve_catalog_reference(&catalog) {
                 crate::core::catalog_resolver::CatalogResolution::Found(s) => s,
                 crate::core::catalog_resolver::CatalogResolution::Ambiguous(_) => {
@@ -446,16 +500,31 @@ fn handle_session_catalog(sub: SessionCatalogCommand) -> Result<()> {
             let tags_vec = tags.as_ref().map(|s| parse_tags(s));
             let bookmark = ensure_session_bookmark(&meta, title.as_deref(), tags_vec);
             if bookmark.space_ids.contains(&entry.id) {
+                if json {
+                    return super::print_json_result(
+                        "session.catalog.add",
+                        &format!("Session already in catalog \"{}\".", entry.name),
+                        serde_json::json!({ "bookmark": bookmark, "catalog": entry, "changed": false }),
+                    );
+                }
                 println!("{}", format!("Session already in catalog \"{}\".", entry.name).yellow());
                 return Ok(());
             }
             let mut ids = bookmark.space_ids.clone();
             ids.push(entry.id.clone());
             update_bookmark(&bookmark.id, BookmarkPatch { space_ids: Some(ids), ..Default::default() });
+            if json {
+                let updated = find_bookmark(&bookmark.session_id).unwrap_or(bookmark);
+                return super::print_json_result(
+                    "session.catalog.add",
+                    &format!("Added session {} to catalog \"{}\"", short_session_id(&updated.session_id), entry.name),
+                    serde_json::json!({ "bookmark": updated, "catalog": entry, "changed": true }),
+                );
+            }
             println!("{}", format!("Added session {} to catalog \"{}\"", short_session_id(&bookmark.session_id), entry.name).green());
             Ok(())
         }
-        SessionCatalogCommand::Remove { session_id, catalog } => {
+        SessionCatalogCommand::Remove { session_id, catalog, json } => {
             let entry = match resolve_catalog_reference(&catalog) {
                 crate::core::catalog_resolver::CatalogResolution::Found(s) => s,
                 _ => {
@@ -472,10 +541,18 @@ fn handle_session_catalog(sub: SessionCatalogCommand) -> Result<()> {
             };
             let ids: Vec<String> = bookmark.space_ids.iter().filter(|id| *id != &entry.id).cloned().collect();
             update_bookmark(&bookmark.id, BookmarkPatch { space_ids: Some(ids), ..Default::default() });
+            if json {
+                let updated = find_bookmark(&bookmark.session_id).unwrap_or_else(|| bookmark.clone());
+                return super::print_json_result(
+                    "session.catalog.remove",
+                    &format!("Removed session {} from catalog \"{}\"", short_session_id(&bookmark.session_id), entry.name),
+                    serde_json::json!({ "bookmark": updated, "catalog": entry }),
+                );
+            }
             println!("{}", format!("Removed session {} from catalog \"{}\"", short_session_id(&bookmark.session_id), entry.name).green());
             Ok(())
         }
-        SessionCatalogCommand::Clear { session_id } => {
+        SessionCatalogCommand::Clear { session_id, json } => {
             let bookmark = match find_bookmark(&session_id) {
                 Some(b) => b,
                 None => {
@@ -484,6 +561,14 @@ fn handle_session_catalog(sub: SessionCatalogCommand) -> Result<()> {
                 }
             };
             update_bookmark(&bookmark.id, BookmarkPatch { space_ids: Some(vec![]), ..Default::default() });
+            if json {
+                let updated = find_bookmark(&bookmark.session_id).unwrap_or_else(|| bookmark.clone());
+                return super::print_json_result(
+                    "session.catalog.clear",
+                    &format!("Cleared catalogs for session {}", short_session_id(&bookmark.session_id)),
+                    serde_json::json!({ "bookmark": updated }),
+                );
+            }
             println!("{}", format!("Cleared catalogs for session {}", short_session_id(&bookmark.session_id)).green());
             Ok(())
         }

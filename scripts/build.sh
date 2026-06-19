@@ -14,6 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 RUST_DIR="${ROOT_DIR}/rust"
 VENDOR_DIR="${ROOT_DIR}/npm/vendor"
+TSC="${ROOT_DIR}/node_modules/.bin/tsc"
 
 DEBUG=0
 TARGET=""
@@ -44,6 +45,15 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 cd "${RUST_DIR}"
+
+if [ -f "${ROOT_DIR}/tsconfig.json" ]; then
+  if [ -x "${TSC}" ]; then
+    echo "Building Starling TypeScript CLI renderer…"
+    "${TSC}" -p "${ROOT_DIR}/tsconfig.json"
+  else
+    echo "warning: TypeScript compiler not found; skipping npm/lib rebuild" >&2
+  fi
+fi
 
 BUILD_PROFILE="release"
 CARGO_ARGS=(--release)

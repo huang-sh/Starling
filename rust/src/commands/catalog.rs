@@ -12,22 +12,22 @@ use crate::core::store::{
     add_space, find_space, has_sibling_space_name, list_bookmarks, list_spaces, remove_space,
     update_space, BookmarkFilter, BookmarkPatch, SpacePatch,
 };
-use crate::types::Space;
+use crate::types::{Bookmark, Space};
 
 pub fn handle(cmd: CatalogCommand) -> Result<()> {
     match cmd {
-        CatalogCommand::Create { name, description, parent } => create(&name, description, parent.as_deref()),
-        CatalogCommand::List { json } => list(json),
-        CatalogCommand::Tree => tree(),
-        CatalogCommand::Add { catalog, session_id, title, tags } => add(&catalog, &session_id, title, tags),
+        CatalogCommand::Create { name, description, tags, parent, json } => create(&name, description, tags, parent.as_deref(), json),
+        CatalogCommand::List { json, pins } => list(json, pins),
+        CatalogCommand::Tree { sessions } => tree(sessions),
+        CatalogCommand::Add { catalog, session_id, title, tags, json } => add(&catalog, &session_id, title, tags, json),
         CatalogCommand::Show { name } => show(&name),
-        CatalogCommand::Detach { catalog, session_id } => detach(&catalog, &session_id),
-        CatalogCommand::Clear { catalog } => clear(&catalog),
-        CatalogCommand::Delete { catalog, yes } => delete(&catalog, yes),
-        CatalogCommand::Tag { name, tags } => tag(&name, &tags),
-        CatalogCommand::Rename { catalog, new_name } => rename(&catalog, &new_name),
-        CatalogCommand::Move { catalog, parent } => mv(&catalog, parent.as_deref()),
-        CatalogCommand::Edit { name } => edit(&name),
+        CatalogCommand::Detach { catalog, session_id, json } => detach(&catalog, &session_id, json),
+        CatalogCommand::Clear { catalog, json } => clear(&catalog, json),
+        CatalogCommand::Delete { catalog, yes, json } => delete(&catalog, yes, json),
+        CatalogCommand::Tag { name, tags, json } => tag(&name, &tags, json),
+        CatalogCommand::Rename { catalog, new_name, json } => rename(&catalog, &new_name, json),
+        CatalogCommand::Move { catalog, parent, json } => mv(&catalog, parent.as_deref(), json),
+        CatalogCommand::Edit { name, description, rename, parent, json } => edit(&name, description, rename, parent, json),
     }
 }
 
@@ -46,7 +46,16 @@ fn resolve_or_exit(r: &str) -> Space {
     }
 }
 
-fn create(name: &str, description: Option<String>, parent: Option<&str>) -> Result<()> {
+fn parse_tags(tags: Option<String>) -> Vec<String> {
+    tags.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn create(name: &str, description: Option<String>, tags: Option<String>, parent: Option<&str>, json: bool) -> Result<()> {
     let parent_id = match parent {
         Some(p) => {
             let ps = resolve_or_exit(p);
@@ -65,27 +74,67 @@ fn create(name: &str, description: Option<String>, parent: Option<&str>) -> Resu
         id,
         name: name.to_string(),
         description: description.unwrap_or_default(),
-        tags: vec![],
+        tags: parse_tags(tags),
         parent_id,
         created_at: now.clone(),
         updated_at: now,
     };
     add_space(space.clone());
+    if json {
+        return super::print_json_result(
+            "catalog.create",
+            &format!("Created catalog: {} ({})", space.name, space.id),
+            serde_json::json!({ "catalog": space }),
+        );
+    }
     println!("{}", format!("Created catalog: {} ({})", space.name, space.id).green());
     Ok(())
 }
 
-fn list(json: bool) -> Result<()> {
+#[derive(serde::Serialize)]
+struct SpaceWithPins {
+    #[serde(flatten)]
+    space: Space,
+    pins: Vec<Bookmark>,
+    pin_count: usize,
+    session_count: usize,
+}
+
+fn spaces_with_pins(spaces: &[Space], bookmarks: &[Bookmark]) -> Vec<SpaceWithPins> {
+    spaces.iter().cloned().map(|space| {
+        let pins: Vec<Bookmark> = bookmarks.iter()
+            .filter(|b| b.space_ids.contains(&space.id))
+            .cloned()
+            .collect();
+        let pin_count = pins.len();
+        SpaceWithPins {
+            space,
+            pins,
+            pin_count,
+            session_count: pin_count,
+        }
+    }).collect()
+}
+
+fn list(json: bool, pins: bool) -> Result<()> {
     let spaces = list_spaces();
+    let bookmarks = list_bookmarks(BookmarkFilter::default());
     if json {
-        println!("{}", serde_json::to_string_pretty(&spaces)?);
+        if pins {
+            println!("{}", serde_json::to_string_pretty(&spaces_with_pins(&spaces, &bookmarks))?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&spaces)?);
+        }
         return Ok(());
     }
     if spaces.is_empty() {
         println!("{}", "No catalogs created yet.".yellow());
         return Ok(());
     }
-    let bookmarks = list_bookmarks(BookmarkFilter::default());
+    if pins {
+        println!("{}", format_space_tree(&spaces, &bookmarks));
+        return Ok(());
+    }
     let spaces_clone = spaces.clone();
     for s in spaces {
         let count = bookmarks.iter().filter(|b| b.space_ids.contains(&s.id)).count();
@@ -96,19 +145,24 @@ fn list(json: bool) -> Result<()> {
     Ok(())
 }
 
-fn tree() -> Result<()> {
+fn tree(sessions: bool) -> Result<()> {
     let spaces = list_spaces();
-    let bookmarks = list_bookmarks(BookmarkFilter::default());
-    println!("{}", crate::core::format::format_space_tree(&spaces, &bookmarks));
+    let bookmarks = if sessions {
+        list_bookmarks(BookmarkFilter::default())
+    } else {
+        Vec::new()
+    };
+    println!("{}", format_space_tree(&spaces, &bookmarks));
     Ok(())
 }
 
-fn add(catalog: &str, session_id: &str, title: Option<String>, tags: Option<String>) -> Result<()> {
+fn add(catalog: &str, session_id: &str, title: Option<String>, tags: Option<String>, json: bool) -> Result<()> {
     super::session::handle(SessionCommand::Catalog(SessionCatalogCommand::Add {
         session_id: session_id.to_string(),
         catalog: catalog.to_string(),
         title,
         tags,
+        json,
     }))
 }
 
@@ -133,19 +187,27 @@ fn show(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn detach(catalog: &str, session_id: &str) -> Result<()> {
+fn detach(catalog: &str, session_id: &str, json: bool) -> Result<()> {
     super::session::handle(SessionCommand::Catalog(SessionCatalogCommand::Remove {
         session_id: session_id.to_string(),
         catalog: catalog.to_string(),
+        json,
     }))
 }
 
-fn clear(catalog: &str) -> Result<()> {
+fn clear(catalog: &str, json: bool) -> Result<()> {
     let space = resolve_or_exit(catalog);
     let bookmarks: Vec<_> = list_bookmarks(BookmarkFilter::default()).into_iter()
         .filter(|b| b.space_ids.contains(&space.id))
         .collect();
     if bookmarks.is_empty() {
+        if json {
+            return super::print_json_result(
+                "catalog.clear",
+                &format!("Catalog \"{}\" has no sessions to clear.", space.name),
+                serde_json::json!({ "catalog": space, "cleared": 0 }),
+            );
+        }
         println!("{}", format!("Catalog \"{}\" has no sessions to clear.", space.name).yellow());
         return Ok(());
     }
@@ -155,11 +217,18 @@ fn clear(catalog: &str) -> Result<()> {
         crate::core::store::update_bookmark(&b.id, BookmarkPatch { space_ids: Some(new_ids), ..Default::default() });
         count += 1;
     }
+    if json {
+        return super::print_json_result(
+            "catalog.clear",
+            &format!("Cleared {} sessions from \"{}\"", count, space.name),
+            serde_json::json!({ "catalog": space, "cleared": count }),
+        );
+    }
     println!("{}", format!("Cleared {} sessions from \"{}\"", count, space.name).green());
     Ok(())
 }
 
-fn delete(catalog: &str, yes: bool) -> Result<()> {
+fn delete(catalog: &str, yes: bool, json: bool) -> Result<()> {
     let space = resolve_or_exit(catalog);
     if !yes {
         eprintln!("{}: deleting a catalog requires --yes (would also detach {} sessions)",
@@ -168,6 +237,13 @@ fn delete(catalog: &str, yes: bool) -> Result<()> {
         std::process::exit(2);
     }
     if remove_space(&space.id) {
+        if json {
+            return super::print_json_result(
+                "catalog.delete",
+                &format!("Deleted catalog: {} ({})", space.name, space.id),
+                serde_json::json!({ "catalog": space, "deleted": true }),
+            );
+        }
         println!("{}", format!("Deleted catalog: {} ({})", space.name, space.id).green());
     } else {
         eprintln!("{}: catalog could not be deleted", "error".red());
@@ -176,30 +252,47 @@ fn delete(catalog: &str, yes: bool) -> Result<()> {
     Ok(())
 }
 
-fn tag(name: &str, tags: &[String]) -> Result<()> {
+fn tag(name: &str, tags: &[String], json: bool) -> Result<()> {
     let space = resolve_or_exit(name);
+    let catalog_name = space.name.clone();
     let mut merged = space.tags.clone();
     for t in tags {
         if !merged.contains(t) { merged.push(t.clone()); }
     }
-    update_space(&space.id, SpacePatch { tags: Some(merged.clone()), ..Default::default() });
-    println!("{}", format!("Tagged \"{}\": [{}]", space.name, merged.join(", ")).green());
+    let updated = update_space(&space.id, SpacePatch { tags: Some(merged.clone()), ..Default::default() }).unwrap_or(space);
+    if json {
+        return super::print_json_result(
+            "catalog.tag",
+            &format!("Tagged \"{}\": [{}]", updated.name, merged.join(", ")),
+            serde_json::json!({ "catalog": updated }),
+        );
+    }
+    println!("{}", format!("Tagged \"{}\": [{}]", catalog_name, merged.join(", ")).green());
     Ok(())
 }
 
-fn rename(catalog: &str, new_name: &str) -> Result<()> {
+fn rename(catalog: &str, new_name: &str, json: bool) -> Result<()> {
     let space = resolve_or_exit(catalog);
     if has_sibling_space_name(new_name, space.parent_id.as_deref(), Some(&space.id)) {
         eprintln!("{}: a sibling catalog already named \"{}\" exists", "error".red(), new_name);
         std::process::exit(2);
     }
-    update_space(&space.id, SpacePatch { name: Some(new_name.to_string()), ..Default::default() });
-    println!("{}", format!("Renamed catalog: {} → {}", space.name, new_name).green());
+    let old_name = space.name.clone();
+    let updated = update_space(&space.id, SpacePatch { name: Some(new_name.to_string()), ..Default::default() }).unwrap_or(space);
+    if json {
+        return super::print_json_result(
+            "catalog.rename",
+            &format!("Renamed catalog: {} -> {}", old_name, new_name),
+            serde_json::json!({ "catalog": updated, "old_name": old_name }),
+        );
+    }
+    println!("{}", format!("Renamed catalog: {} → {}", old_name, new_name).green());
     Ok(())
 }
 
-fn mv(catalog: &str, parent: Option<&str>) -> Result<()> {
+fn mv(catalog: &str, parent: Option<&str>, json: bool) -> Result<()> {
     let space = resolve_or_exit(catalog);
+    let catalog_name = space.name.clone();
     let new_parent_id = match parent {
         Some(p) => Some(resolve_or_exit(p).id),
         None => None,
@@ -227,13 +320,99 @@ fn mv(catalog: &str, parent: Option<&str>) -> Result<()> {
         eprintln!("{}: a sibling catalog already named \"{}\" exists", "error".red(), space.name);
         std::process::exit(2);
     }
-    update_space(&space.id, SpacePatch { parent_id: Some(new_parent_id), ..Default::default() });
-    println!("{}", format!("Moved catalog: {}", space.name).green());
+    let updated = update_space(&space.id, SpacePatch { parent_id: Some(new_parent_id), ..Default::default() }).unwrap_or(space);
+    if json {
+        return super::print_json_result(
+            "catalog.move",
+            &format!("Moved catalog: {}", updated.name),
+            serde_json::json!({ "catalog": updated }),
+        );
+    }
+    println!("{}", format!("Moved catalog: {}", catalog_name).green());
     Ok(())
 }
 
-fn edit(_name: &str) -> Result<()> {
-    eprintln!("{}", "Interactive edit is not implemented in the Rust version yet.".yellow());
+fn edit(
+    name: &str,
+    description: Option<String>,
+    rename_to: Option<String>,
+    parent: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let space = resolve_or_exit(name);
+    let mut patch = SpacePatch::default();
+    let mut changed = false;
+
+    if let Some(description) = description {
+        patch.description = Some(description);
+        changed = true;
+    }
+
+    if let Some(new_name) = rename_to {
+        if has_sibling_space_name(&new_name, space.parent_id.as_deref(), Some(&space.id)) {
+            eprintln!("{}: a sibling catalog already named \"{}\" exists", "error".red(), new_name);
+            std::process::exit(2);
+        }
+        patch.name = Some(new_name);
+        changed = true;
+    }
+
+    if let Some(parent_ref) = parent {
+        let trimmed = parent_ref.trim();
+        let new_parent_id = if trimmed.is_empty() || trimmed == "/" || trimmed.eq_ignore_ascii_case("root") {
+            None
+        } else {
+            Some(resolve_or_exit(trimmed).id)
+        };
+
+        if let Some(pid) = &new_parent_id {
+            if pid == &space.id {
+                eprintln!("{}: a catalog cannot be its own parent", "error".red());
+                std::process::exit(2);
+            }
+            let spaces = list_spaces();
+            let mut cursor = pid.clone();
+            let mut seen = std::collections::HashSet::new();
+            while let Some(s) = spaces.iter().find(|x| x.id == cursor) {
+                if !seen.insert(s.id.clone()) { break; }
+                if s.id == space.id {
+                    eprintln!("{}: cycle detected moving into descendant", "error".red());
+                    std::process::exit(2);
+                }
+                cursor = match &s.parent_id { Some(p) => p.clone(), None => break };
+            }
+        }
+
+        let effective_name = patch.name.as_deref().unwrap_or(&space.name);
+        if has_sibling_space_name(effective_name, new_parent_id.as_deref(), Some(&space.id)) {
+            eprintln!("{}: a sibling catalog already named \"{}\" exists", "error".red(), effective_name);
+            std::process::exit(2);
+        }
+        patch.parent_id = Some(new_parent_id);
+        changed = true;
+    }
+
+    if !changed {
+        if json {
+            return super::print_json_result(
+                "catalog.edit",
+                "No catalog changes requested.",
+                serde_json::json!({ "catalog": space, "changed": false }),
+            );
+        }
+        println!("{}", "No catalog changes requested.".yellow());
+        return Ok(());
+    }
+
+    let updated = update_space(&space.id, patch).unwrap_or(space);
+    if json {
+        return super::print_json_result(
+            "catalog.edit",
+            &format!("Updated catalog: {} ({})", updated.name, updated.id),
+            serde_json::json!({ "catalog": updated, "changed": true }),
+        );
+    }
+    println!("{}", format!("Updated catalog: {} ({})", updated.name, updated.id).green());
     Ok(())
 }
 

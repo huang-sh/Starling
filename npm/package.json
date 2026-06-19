@@ -12,6 +12,7 @@
   },
   "files": [
     "bin/starling.js",
+    "lib/",
     "scripts/install-agent-skills.js",
     "skills/"
   ],

@@ -42,8 +42,8 @@ fn write_cli_config(cfg: &CliConfig) -> Result<()> {
 pub fn handle(cmd: ConfigCommand) -> Result<()> {
     match cmd {
         ConfigCommand::Show { json } => show(json),
-        ConfigCommand::Set { key, value } => set(&key, &value),
-        ConfigCommand::Unset { key } => unset(&key),
+        ConfigCommand::Set { key, value, json } => set(&key, &value, json),
+        ConfigCommand::Unset { key, json } => unset(&key, json),
     }
 }
 
@@ -84,7 +84,7 @@ fn show(json: bool) -> Result<()> {
     Ok(())
 }
 
-fn set(key: &str, value: &str) -> Result<()> {
+fn set(key: &str, value: &str, json: bool) -> Result<()> {
     let mut cfg = read_cli_config();
     match key.to_lowercase().as_str() {
         "home" | "homepath" | "home_path" => {
@@ -96,11 +96,18 @@ fn set(key: &str, value: &str) -> Result<()> {
         }
     }
     write_cli_config(&cfg)?;
+    if json {
+        return super::print_json_result(
+            "config.set",
+            &format!("Set {} = {}", key, value),
+            serde_json::json!({ "key": key, "value": value, "config": cfg }),
+        );
+    }
     println!("{}", format!("Set {} = {}", key, value).green());
     Ok(())
 }
 
-fn unset(key: &str) -> Result<()> {
+fn unset(key: &str, json: bool) -> Result<()> {
     let mut cfg = read_cli_config();
     let changed = match key.to_lowercase().as_str() {
         "home" | "homepath" | "home_path" => {
@@ -115,8 +122,22 @@ fn unset(key: &str) -> Result<()> {
     };
     if changed {
         write_cli_config(&cfg)?;
+        if json {
+            return super::print_json_result(
+                "config.unset",
+                &format!("Unset {}", key),
+                serde_json::json!({ "key": key, "changed": true, "config": cfg }),
+            );
+        }
         println!("{}", format!("Unset {}", key).green());
     } else {
+        if json {
+            return super::print_json_result(
+                "config.unset",
+                &format!("{} was not set", key),
+                serde_json::json!({ "key": key, "changed": false, "config": cfg }),
+            );
+        }
         println!("{}", format!("{} was not set", key).yellow());
     }
     Ok(())

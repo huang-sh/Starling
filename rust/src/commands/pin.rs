@@ -13,7 +13,7 @@ use crate::core::store::{find_bookmark, list_bookmarks, update_bookmark, Bookmar
 use crate::types::{Bookmark, SessionMeta};
 use crate::commands::session::resolve_session_meta;
 
-pub fn run(session_id: Option<String>, title: Option<String>, tags: Option<String>, to: Option<String>, current: bool) -> Result<()> {
+pub fn run(session_id: Option<String>, title: Option<String>, tags: Option<String>, to: Option<String>, current: bool, json: bool) -> Result<()> {
     if session_id.is_none() && !current {
         eprintln!("{}: pass a session id, or use --current for the most recent", "usage".yellow());
         return Ok(());
@@ -80,7 +80,9 @@ pub fn run(session_id: Option<String>, title: Option<String>, tags: Option<Strin
                 if !ids.contains(&s.id) {
                     ids.push(s.id.clone());
                     update_bookmark(&bookmark.id, BookmarkPatch { space_ids: Some(ids), ..Default::default() });
-                    println!("{}", format!("Added to catalog: {} ({})", s.name, s.id).green());
+                    if !json {
+                        println!("{}", format!("Added to catalog: {} ({})", s.name, s.id).green());
+                    }
                 }
             }
             other => {
@@ -91,6 +93,13 @@ pub fn run(session_id: Option<String>, title: Option<String>, tags: Option<Strin
     }
 
     let updated = find_bookmark(&meta.session_id).unwrap_or(bookmark);
+    if json {
+        return super::print_json_result(
+            "pin",
+            &format!("Pinned session {}", short_session_id(&meta.session_id)),
+            serde_json::json!({ "bookmark": updated, "session_id": meta.session_id }),
+        );
+    }
     println!("{}", format_bookmark_detail(&updated));
     println!("\n{}: pinned session {}", "ok".green().bold(), short_session_id(&meta.session_id));
     Ok(())

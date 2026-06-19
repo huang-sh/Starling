@@ -162,7 +162,7 @@ pub fn format_bookmark_detail(b: &Bookmark) -> String {
     lines.join("\n")
 }
 
-/// `starling` tree of catalogs + pinned sessions.
+/// `starling` tree of catalogs, plus pinned sessions when bookmarks are supplied.
 pub fn format_space_tree(spaces: &[Space], bookmarks: &[Bookmark]) -> String {
     if spaces.is_empty() {
         return "No catalogs created yet.".yellow().to_string();
@@ -235,4 +235,52 @@ pub fn format_space_tree(spaces: &[Space], bookmarks: &[Bookmark]) -> String {
         lines.extend(render_node(root, "", is_last, &children_map, &bookmark_by_space));
     }
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn space(id: &str, name: &str, parent_id: Option<&str>) -> Space {
+        Space {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: String::new(),
+            tags: Vec::new(),
+            parent_id: parent_id.map(str::to_string),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    fn bookmark(id: &str, title: &str, session_id: &str, space_ids: Vec<&str>) -> Bookmark {
+        Bookmark {
+            id: id.to_string(),
+            provider: "claude".to_string(),
+            session_id: session_id.to_string(),
+            title: title.to_string(),
+            category: String::new(),
+            tags: Vec::new(),
+            project_path: "/tmp/project".to_string(),
+            first_prompt: String::new(),
+            notes: Vec::new(),
+            space_ids: space_ids.into_iter().map(str::to_string).collect(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn space_tree_without_bookmarks_shows_catalogs_only() {
+        let spaces = vec![space("root", "Research", None), space("child", "Paper", Some("root"))];
+        let bookmarks = vec![bookmark("b1", "Review session", "session-123", vec!["root"])];
+
+        let rendered = format_space_tree(&spaces, &[]);
+
+        assert!(rendered.contains("Research"));
+        assert!(rendered.contains("Paper"));
+        assert!(!rendered.contains("Review session"));
+        assert!(!rendered.contains("session-123"));
+        assert!(format_space_tree(&spaces, &bookmarks).contains("Review session"));
+    }
 }
