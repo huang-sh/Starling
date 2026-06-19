@@ -1,6 +1,6 @@
 //! Clap command/arg definitions.
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "starling", version, about = "Agent session manager — discover, pin, and organize AI coding sessions")]
@@ -59,16 +59,15 @@ pub enum Command {
     Config(ConfigCommand),
 
     /// Benchmark agents against a task suite (Phase 7)
-    #[command(subcommand)]
-    Diagnose(DiagnoseCommand),
+    /// Run a benchmark task against one or more agents and have a judge agent assess them
+    Diagnose(#[command(flatten)] DiagnoseCommand),
 
     /// Show pinned sessions and their run status
     #[command(subcommand)]
     Status(StatusCommand),
 
     /// Live monitor of agent sessions
-    #[command(subcommand)]
-    Monitor(MonitorCommand),
+    Monitor(#[command(flatten)] MonitorCommand),
 
     /// Resume an agent session directly
     Resume { session_id: String },
@@ -327,15 +326,35 @@ pub enum ConfigCommand {
     Unset { key: String },
 }
 
-#[derive(Subcommand)]
-pub enum DiagnoseCommand {
-    /// (Phase 7)
-    Run {
-        #[arg(long)]
-        agent: Option<String>,
-    },
-    /// (Phase 7)
-    List,
+#[derive(Args)]
+pub struct DiagnoseCommand {
+    /// Benchmark task id
+    #[arg(long, default_value = "personality")]
+    pub task: String,
+
+    /// Judge/launcher agent, e.g. claude:sonnet / codex:gpt5 / claude (bare provider = default config)
+    #[arg(long)]
+    pub judge: Option<String>,
+
+    /// Evaluatee agent (repeatable)
+    #[arg(long, num_args = 1..)]
+    pub agent: Vec<String>,
+
+    /// Per-call timeout in ms
+    #[arg(long, default_value = "120000")]
+    pub timeout: String,
+
+    /// Max evaluatees to run in parallel; 0 = all at once
+    #[arg(long, default_value = "0")]
+    pub concurrency: String,
+
+    /// Emit full report as JSON on stdout
+    #[arg(long)]
+    pub json: bool,
+
+    /// Write the JSON report to a file
+    #[arg(long)]
+    pub out: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -359,28 +378,31 @@ pub enum StatusCommand {
     },
 }
 
-#[derive(Subcommand)]
-pub enum MonitorCommand {
-    /// Live monitor (Phase 6)
-    Live {
-        #[arg(short, long)]
-        agent: Option<String>,
-    },
-    /// Snapshot of currently running agents
-    #[command(name = "snap")]
-    Snapshot {
-        #[arg(long)]
-        recent: bool,
-        #[arg(short, long)]
-        agent: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Monitor watch (Phase 6)
-    Watch {
-        #[arg(short, long, default_value = "3")]
-        interval: f64,
-    },
+#[derive(Args)]
+pub struct MonitorCommand {
+    /// Filter to a catalog's pinned sessions (name, path, or id)
+    #[arg(num_args = 0..=1)]
+    pub catalog: Option<String>,
+
+    /// Filter to a catalog (name, path, or id)
+    #[arg(short, long)]
+    pub catalog_filter: Option<String>,
+
+    /// Max pinned sessions to display
+    #[arg(short, long)]
+    pub limit: Option<usize>,
+
+    /// Also show recent unpinned sessions
+    #[arg(long)]
+    pub recent: bool,
+
+    /// Live monitoring mode (re-render every 3s)
+    #[arg(long)]
+    pub watch: bool,
+
+    /// Output the current snapshot as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 impl Cli {
