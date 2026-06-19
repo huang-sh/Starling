@@ -701,6 +701,7 @@ dependencies = [
  "dirs",
  "indexmap",
  "libc",
+ "once_cell",
  "serde",
  "serde_json",
  "thiserror",
