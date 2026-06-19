@@ -63,7 +63,10 @@ describe("constants", () => {
     expect(module.CLAUDE_SESSIONS_DIR).toBe(join(homedir(), ".claude", "projects"));
     expect(module.CODEX_SESSIONS_DIR).toBe(join(homedir(), ".codex", "sessions"));
     expect(module.claudeSessionRoots()).toEqual([join(homedir(), ".claude", "projects")]);
-    expect(module.codexSessionRoots()).toEqual([join(homedir(), ".codex", "sessions")]);
+    expect(module.codexSessionRoots()).toEqual([
+      join(homedir(), ".codex", "sessions"),
+      join(homedir(), ".codex", "archived_sessions"),
+    ]);
   });
 
   it("honors CLAUDE_CONFIG_DIR and CODEX_HOME for session roots", async () => {
@@ -73,6 +76,10 @@ describe("constants", () => {
     expect(module.CLAUDE_SESSIONS_DIR).toBe(join("/tmp/iso-claude", "projects"));
     expect(module.CODEX_SESSIONS_DIR).toBe(join("/tmp/iso-codex", "sessions"));
     expect(module.claudeSessionRoots()).toEqual([join("/tmp/iso-claude", "projects")]);
+    expect(module.codexSessionRoots()).toEqual([
+      join("/tmp/iso-codex", "sessions"),
+      join("/tmp/iso-codex", "archived_sessions"),
+    ]);
   });
 
   it("expands tilde in CLAUDE_CONFIG_DIR / CODEX_HOME", async () => {

@@ -56,6 +56,8 @@ vi.mock("../src/constants.js", () => {
     CLAUDE_SESSIONS_DIR: normalize("/sessions/claude"),
     CODEX_SESSIONS_DIR: normalize("/sessions/codex"),
     DEFAULT_STARLING_HOME: normalize("/starling"),
+    claudeSessionRoots: () => [normalize("/sessions/claude")],
+    codexSessionRoots: () => [normalize("/sessions/codex")],
   };
 });
 

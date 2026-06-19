@@ -37,7 +37,7 @@ vi.mock("../src/constants.js", () => {
     CLAUDE_SESSIONS_DIR: normalize("/sessions/claude"),
     CODEX_SESSIONS_DIR: normalize("/sessions/codex"),
     claudeSessionRoots: () => [normalize("/sessions/claude")],
-    codexSessionRoots: () => [normalize("/sessions/codex")],
+    codexSessionRoots: () => [normalize("/sessions/codex"), normalize("/sessions/codex-archive")],
   };
 });
 
@@ -134,5 +134,19 @@ describe("findSessions", () => {
     expect(candidates).toHaveLength(1);
     expect(candidates[0].session_id).toBe("1234abcd-5678-90ef");
     expect(candidates[0].provider).toBe("codex");
+  });
+
+  it("findSessionCandidates discovers codex archived_sessions", async () => {
+    const archived =
+      "rollout-2026-06-16T06-02-54-019ecf06-8f93-7763-a1c6-5e26edb353a3.jsonl";
+    addDir("/sessions/codex-archive", 100, [archived]);
+    addFile(`/sessions/codex-archive/${archived}`, 400);
+
+    const { findSessionCandidates } = await import("../src/lib/discovery.js");
+    const candidates = await findSessionCandidates("019ecf06");
+
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].provider).toBe("codex");
+    expect(candidates[0].file_path).toBe(normalize(`/sessions/codex-archive/${archived}`));
   });
 });

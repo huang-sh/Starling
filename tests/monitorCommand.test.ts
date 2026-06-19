@@ -26,6 +26,15 @@ vi.mock("../src/lib/sessionMetrics.js", () => ({
     toolCount: 8,
     lastActivityMs: Date.now(),
     truncated: false,
+    startedAtMs: 0,
+    pendingSinceMs: 0,
+    thinkingSinceMs: 0,
+    tokenHistory: [10000, 20000, 30000],
+    contextHistory: [10000, 20000, 30000],
+    compactionCount: 1,
+    currentTask: "/work/demo/file.ts",
+    toolCallsTail: [{ name: "Edit", arg: "/work/demo/file.ts", duration_ms: 0 }],
+    chatTail: [{ role: "user", text: "fix the bug" }],
   })),
   clearSessionMetricsCache: vi.fn(),
 }));
@@ -139,7 +148,12 @@ describe("monitor command", () => {
     expect(out).toContain("512M"); // mem (524288 kB)
     expect(out).toContain("78%"); // CTX
     expect(out).toContain("45k/12k"); // tokens
-    expect(out).toContain("Edit×8"); // last tool
+    // Task column now shows current_task (truncated) instead of "Edit×8".
+    expect(out).toContain("/work/demo");
+    // LiveStatus glyph for an active session with pending tools would be ▸ (executing),
+    // but the mock has no pendingSinceMs; with thinkingSinceMs=0 and recent lastActivityMs
+    // (Date.now()), resolveLiveStatus returns "executing" via the recent-activity branch.
+    expect(out).toContain("▸");
   });
 
   it("emits JSON with pinned + recent sections and the row shape", async () => {
@@ -151,9 +165,19 @@ describe("monitor command", () => {
     const parsed = JSON.parse((console.log as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]![0] as string);
     expect(parsed.pinned).toHaveLength(1);
     expect(parsed.recent).toEqual([]);
-    expect(parsed.pinned[0]).toMatchObject({ session_id: "sess-x", pinned: true, status: "errored" });
+    // errored RunStatus → done LiveStatus
+    expect(parsed.pinned[0]).toMatchObject({ session_id: "sess-x", pinned: true, status: "done" });
     expect(parsed.pinned[0]).toHaveProperty("tokens_in");
     expect(parsed.pinned[0]).toHaveProperty("ctx_pct");
+    // Tier 1 enrichment fields present.
+    expect(parsed.pinned[0]).toHaveProperty("started_at_ms");
+    expect(parsed.pinned[0]).toHaveProperty("elapsed_secs");
+    expect(parsed.pinned[0]).toHaveProperty("current_task");
+    expect(parsed.pinned[0]).toHaveProperty("token_history");
+    expect(parsed.pinned[0]).toHaveProperty("context_history");
+    expect(parsed.pinned[0]).toHaveProperty("compaction_count");
+    expect(parsed.pinned[0]).toHaveProperty("chat_tail");
+    expect(parsed.pinned[0]).toHaveProperty("tool_calls_tail");
   });
 
   it("filters pinned sessions by catalog and hides recent", async () => {

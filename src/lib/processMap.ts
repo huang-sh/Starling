@@ -142,11 +142,109 @@ export function extractSessionIdFromPath(filePath: string): string | null {
 }
 
 /**
+ * Per-scan cache of directory listings + recent-file scans, keyed by directory
+ * path. Without this, every agent from the same home re-scans the projects/
+ * tree on every monitor tick: 30+ agents × readdir+stat-per-subdir = hundreds
+ * of syscalls. The cache lives only for the duration of one
+ * `mapProcessesToSessions` call (processes come and go, but the directory
+ * layout is stable within a 3s tick).
+ */
+export interface ResolverCache {
+  /** root → list of immediate subdirectory names. */
+  rootDirs: Map<string, string[]>;
+  /** root → most-recent .jsonl under it (recursive scan result). */
+  recentJsonl: Map<string, { path: string; mtime: number } | null>;
+  /** dir → most-recent .jsonl directly under it (non-recursive). */
+  recentJsonlFlat: Map<string, { path: string; mtime: number } | null>;
+  /**
+   * root → (session basename lowercased → full path). Built lazily on first
+   * findSessionFileById call for that root by readdir'ing every subdir once.
+   * On large fleets (3000+ project subdirs) this turns N × O(subdirs) stat
+   * scans into one O(total_files) readdir pass + O(1) map lookups.
+   */
+  fileIndex: Map<string, Map<string, string> | null>;
+}
+
+export function createResolverCache(): ResolverCache {
+  return { rootDirs: new Map(), recentJsonl: new Map(), recentJsonlFlat: new Map(), fileIndex: new Map() };
+}
+
+/**
+ * Build a `<basename>.jsonl → full path` index for a root by readdir'ing each
+ * immediate subdir once. Returns null if root is unreadable. The index covers
+ * files directly under `<root>/<subdir>/` (Claude layout) and `<root>/` itself
+ * (Codex layout).
+ */
+function buildFileIndex(root: string, dirs: string[]): Map<string, string> | null {
+  const index = new Map<string, string>();
+  // Codex: session files may live directly under root.
+  try {
+    for (const entry of readdirSync(root)) {
+      if (entry.endsWith(".jsonl")) {
+        index.set(entry.toLowerCase(), join(root, entry));
+      }
+    }
+  } catch {
+    /* root itself unreadable — subdirs may still work */
+  }
+  // Claude: one subdir per cwd, each holding many `<uuid>.jsonl`.
+  for (const d of dirs) {
+    if (d === "subagents") continue;
+    const subdir = join(root, d);
+    let entries: string[];
+    try {
+      entries = readdirSync(subdir);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.endsWith(".jsonl")) {
+        index.set(entry.toLowerCase(), join(subdir, entry));
+      }
+    }
+  }
+  return index;
+}
+
+/**
  * Locate `<root>/<...>/<sessionId>.jsonl`. Claude stores one projects-dir per
  * cwd, so this scans immediate children for a matching filename.
  */
-export function findSessionFileById(root: string, sessionId: string): string | null {
+export function findSessionFileById(root: string, sessionId: string, cache?: ResolverCache): string | null {
   const target = sessionId.toLowerCase();
+  const targetFile = `${target}.jsonl`;
+
+  // Fast path: use the lazy per-root file index when a cache is available.
+  // On large fleets (3000+ subdirs) this avoids one stat() per subdir per
+  // lookup — the index is built once per snapshot by readdir'ing each subdir,
+  // then every lookup is an O(1) map probe.
+  if (cache) {
+    let index = cache.fileIndex.get(root);
+    if (index === undefined) {
+      let dirs = cache.rootDirs.get(root);
+      if (!dirs) {
+        try {
+          dirs = readdirSync(root);
+          cache.rootDirs.set(root, dirs);
+        } catch {
+          cache.fileIndex.set(root, null);
+          return null;
+        }
+      }
+      index = buildFileIndex(root, dirs);
+      cache.fileIndex.set(root, index);
+    }
+    if (index) {
+      const hit = index.get(targetFile);
+      if (hit) return hit;
+      // Not in the flat index — try the deeper recursive fallback (isolated
+      // homes sometimes nest further than one level).
+      return findFileRecursive(root, target, 0);
+    }
+    return null;
+  }
+
+  // No cache: fall back to per-subdir stat scan.
   let dirs: string[];
   try {
     dirs = readdirSync(root);
@@ -255,24 +353,32 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
-function listAgentProcesses(): { pid: number; provider: Provider; args: string[] }[] {
-  if (process.platform !== "linux") return [];
-  let pids: string[];
-  try {
-    pids = readdirSync("/proc").filter((name) => /^\d+$/.test(name));
-  } catch {
-    return [];
+/**
+ * Process names whose cmdline is worth inspecting for an agent invocation.
+ * Stat's comm is truncated to 15 chars, so we match the leading fragment.
+ * Most processes on a busy fleet machine aren't agents, so this filter skips
+ * the cmdline read for ~95% of PIDs and is the dominant win in the /proc scan.
+ */
+const AGENT_COMM_PREFIXES = [
+  "claude",
+  "codex",
+  "node",
+  "npm",
+  "npx",
+  "bash",
+  "sh",
+  "deno",
+  "bun",
+];
+
+function commMightBeAgent(comm: string): boolean {
+  if (!comm) return false;
+  // stat comm is basename of the executable, ≤15 chars. Match by prefix so
+  // "claude-code" / "node" / "npm" all hit; everything else skips cmdline.
+  for (const p of AGENT_COMM_PREFIXES) {
+    if (comm === p || comm.startsWith(p)) return true;
   }
-  const out: { pid: number; provider: Provider; args: string[] }[] = [];
-  for (const pidStr of pids) {
-    const pid = Number(pidStr);
-    const args = readCmdline(pid);
-    if (!args || args.length === 0) continue;
-    const provider = providerFromCmdline(args);
-    if (!provider) continue;
-    out.push({ pid, provider, args });
-  }
-  return out;
+  return false;
 }
 
 /** Build ppid → children[] over /proc once per scan. */
@@ -305,10 +411,11 @@ interface ResolveContext {
   home: string;
   root: string;
   cwd: string | null;
+  cache?: ResolverCache;
 }
 
 function resolveFromResume(ctx: ResolveContext, uuid: string): MappedSession | null {
-  const file = findSessionFileById(ctx.root, uuid);
+  const file = findSessionFileById(ctx.root, uuid, ctx.cache);
   if (!file) return null;
   return {
     pid: 0, // filled by caller
@@ -348,9 +455,13 @@ function resolveFromOpenFiles(
 function resolveFromCwdMtime(ctx: ResolveContext, provider: Provider, pid: number): MappedSession | null {
   if (!ctx.cwd) return null;
   // Look under the encoded-cwd dir first (Claude), else scan the whole root.
+  // Both scans are cached per directory for the lifetime of one snapshot —
+  // without this, 2+ agents from the same home each re-walk the projects/ tree
+  // (~150ms per pass on a large fleet).
   const encoded = encodeClaudeCwd(ctx.cwd);
   const dir = join(ctx.root, encoded);
-  const best = mostRecentJsonl(dir) ?? mostRecentJsonlRecursive(ctx.root, 0);
+  const flatBest = ctx.cache ? cachedMostRecentJsonl(dir, ctx.cache) : mostRecentJsonl(dir);
+  const best = flatBest ?? (ctx.cache ? cachedMostRecentJsonlRecursive(ctx.root, ctx.cache) : mostRecentJsonlRecursive(ctx.root, 0));
   if (!best) return null;
   const sid = extractSessionIdFromPath(best.path);
   if (!sid) return null;
@@ -362,6 +473,22 @@ function resolveFromCwdMtime(ctx: ResolveContext, provider: Provider, pid: numbe
     home: ctx.home,
     project_path: ctx.cwd,
   };
+}
+
+function cachedMostRecentJsonl(dir: string, cache: ResolverCache): { path: string; mtime: number } | null {
+  const hit = cache.recentJsonlFlat.get(dir);
+  if (hit !== undefined) return hit;
+  const result = mostRecentJsonl(dir);
+  cache.recentJsonlFlat.set(dir, result);
+  return result;
+}
+
+function cachedMostRecentJsonlRecursive(root: string, cache: ResolverCache): { path: string; mtime: number } | null {
+  const hit = cache.recentJsonl.get(root);
+  if (hit !== undefined) return hit;
+  const result = mostRecentJsonlRecursive(root, 0);
+  cache.recentJsonl.set(root, result);
+  return result;
 }
 
 function mostRecentJsonl(dir: string): { path: string; mtime: number } | null {
@@ -417,17 +544,65 @@ function mostRecentJsonlRecursive(dir: string, depth: number): { path: string; m
  * Map every running claude/codex process to its session. Returns session_id →
  * info. Linux-only (returns an empty map elsewhere). Pure / in-memory.
  */
+/**
+ * Single /proc walk producing both the agent list and the ppid → children
+ * index. Replaces the old pair of walks (listAgentProcesses + buildChildMap)
+ * which together read /proc/<pid>/{stat,cmdline} twice for every PID.
+ *
+ * Stat is read for every PID (cheap, ~few hundred bytes); cmdline is read
+ * only when `comm` suggests the process could be an agent launcher, which
+ * filters ~95% of PIDs on a busy fleet machine.
+ */
+export interface ProcScan {
+  agents: { pid: number; provider: Provider; args: string[] }[];
+  childMap: Map<number, number[]>;
+}
+
+export function scanProcOnce(): ProcScan {
+  const agents: { pid: number; provider: Provider; args: string[] }[] = [];
+  const childMap = new Map<number, number[]>();
+  if (process.platform !== "linux") return { agents, childMap };
+  let pids: string[];
+  try {
+    pids = readdirSync("/proc").filter((name) => /^\d+$/.test(name));
+  } catch {
+    return { agents, childMap };
+  }
+  for (const pidStr of pids) {
+    let stat: ProcStat | null = null;
+    try {
+      stat = parseProcStat(readFileSync(`/proc/${pidStr}/stat`, "utf-8"));
+    } catch {
+      continue;
+    }
+    if (!stat) continue;
+    // Build ppid index for every process (cheap; we already have stat).
+    const arr = childMap.get(stat.ppid);
+    if (arr) arr.push(stat.pid);
+    else childMap.set(stat.ppid, [stat.pid]);
+    // Conditionally read cmdline based on comm to find agents.
+    if (!commMightBeAgent(stat.comm)) continue;
+    const pid = stat.pid;
+    const args = readCmdline(pid);
+    if (!args || args.length === 0) continue;
+    const provider = providerFromCmdline(args);
+    if (!provider) continue;
+    agents.push({ pid, provider, args });
+  }
+  return { agents, childMap };
+}
+
 export async function mapProcessesToSessions(): Promise<Map<string, MappedSession>> {
   const result = new Map<string, MappedSession>();
   if (process.platform !== "linux") return result;
 
-  const procs = listAgentProcesses();
+  const { agents: procs, childMap } = scanProcOnce();
   if (procs.length === 0) return result;
-  const childMap = buildChildMap();
 
+  const cache = createResolverCache();
   for (const proc of procs) {
     if (!isPidAlive(proc.pid)) continue;
-    const mapped = resolveProcess(proc, childMap, new Set<number>());
+    const mapped = resolveProcess(proc, childMap, new Set<number>(), cache);
     if (mapped?.session_id && !result.has(mapped.session_id)) {
       result.set(mapped.session_id, mapped);
     }
@@ -438,7 +613,8 @@ export async function mapProcessesToSessions(): Promise<Map<string, MappedSessio
 function resolveProcess(
   proc: { pid: number; provider: Provider; args: string[] },
   childMap: Map<number, number[]>,
-  visited: Set<number>
+  visited: Set<number>,
+  cache: ResolverCache
 ): MappedSession | null {
   if (visited.has(proc.pid)) return null;
   visited.add(proc.pid);
@@ -447,18 +623,22 @@ function resolveProcess(
   const home = resolveAgentHome(proc.provider, environ);
   const root = sessionRootForHome(proc.provider, home);
   const cwd = readCwd(proc.pid);
-  const ctx: ResolveContext = { environ, home, root, cwd };
+  const ctx: ResolveContext = { environ, home, root, cwd, cache };
 
-  // 1. --resume <uuid>
+  // 1. open .jsonl files via /proc/<pid>/fd — cheap (O(open fds)) and almost
+  // always succeeds for a running agent (the session file is held open for
+  // appending). Tried BEFORE the --resume lookup because that lookup scans
+  // thousands of project subdirs on large fleets (~60ms per call here).
+  const fromFd = resolveFromOpenFiles(ctx, proc.provider, proc.pid);
+  if (fromFd) return fromFd;
+
+  // 2. --resume <uuid> on cmdline — precise but expensive (subdir scan).
+  // Only reached when the fd scan missed (rare for live agents).
   const uuid = extractResumeUuid(proc.args);
   if (uuid) {
     const hit = resolveFromResume(ctx, uuid);
     if (hit) return { ...hit, pid: proc.pid, provider: proc.provider };
   }
-
-  // 2. open .jsonl files
-  const fromFd = resolveFromOpenFiles(ctx, proc.provider, proc.pid);
-  if (fromFd) return fromFd;
 
   // 3. process-tree BFS over children
   const children = childMap.get(proc.pid) ?? [];
@@ -467,7 +647,7 @@ function resolveProcess(
     const childArgs = readCmdline(childPid);
     if (!childArgs) continue;
     const childProc = { pid: childPid, provider: proc.provider, args: childArgs };
-    const childHit = resolveProcess(childProc, childMap, visited);
+    const childHit = resolveProcess(childProc, childMap, visited, cache);
     if (childHit) return childHit;
   }
 

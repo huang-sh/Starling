@@ -60,7 +60,8 @@ function claudeSessionRoots() {
   return [join(resolveClaudeConfigDir(), "projects")];
 }
 function codexSessionRoots() {
-  return [join(resolveCodexHome(), "sessions")];
+  const home = resolveCodexHome();
+  return [join(home, "sessions"), join(home, "archived_sessions")];
 }
 var CLAUDE_SESSIONS_DIR = claudeSessionRoots()[0];
 var CODEX_SESSIONS_DIR = codexSessionRoots()[0];
@@ -614,8 +615,62 @@ function extractSessionIdFromPath(filePath) {
   const m = stripped.match(UUID_RE);
   return m ? m[0].toLowerCase() : stripped.toLowerCase();
 }
-function findSessionFileById(root, sessionId) {
+function createResolverCache() {
+  return { rootDirs: /* @__PURE__ */ new Map(), recentJsonl: /* @__PURE__ */ new Map(), recentJsonlFlat: /* @__PURE__ */ new Map(), fileIndex: /* @__PURE__ */ new Map() };
+}
+function buildFileIndex(root, dirs) {
+  const index = /* @__PURE__ */ new Map();
+  try {
+    for (const entry of readdirSync2(root)) {
+      if (entry.endsWith(".jsonl")) {
+        index.set(entry.toLowerCase(), join4(root, entry));
+      }
+    }
+  } catch {
+  }
+  for (const d of dirs) {
+    if (d === "subagents") continue;
+    const subdir = join4(root, d);
+    let entries;
+    try {
+      entries = readdirSync2(subdir);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.endsWith(".jsonl")) {
+        index.set(entry.toLowerCase(), join4(subdir, entry));
+      }
+    }
+  }
+  return index;
+}
+function findSessionFileById(root, sessionId, cache2) {
   const target = sessionId.toLowerCase();
+  const targetFile = `${target}.jsonl`;
+  if (cache2) {
+    let index = cache2.fileIndex.get(root);
+    if (index === void 0) {
+      let dirs2 = cache2.rootDirs.get(root);
+      if (!dirs2) {
+        try {
+          dirs2 = readdirSync2(root);
+          cache2.rootDirs.set(root, dirs2);
+        } catch {
+          cache2.fileIndex.set(root, null);
+          return null;
+        }
+      }
+      index = buildFileIndex(root, dirs2);
+      cache2.fileIndex.set(root, index);
+    }
+    if (index) {
+      const hit = index.get(targetFile);
+      if (hit) return hit;
+      return findFileRecursive(root, target, 0);
+    }
+    return null;
+  }
   let dirs;
   try {
     dirs = readdirSync2(root);
@@ -710,24 +765,23 @@ function isPidAlive(pid) {
     return error.code === "EPERM";
   }
 }
-function listAgentProcesses() {
-  if (process.platform !== "linux") return [];
-  let pids;
-  try {
-    pids = readdirSync2("/proc").filter((name) => /^\d+$/.test(name));
-  } catch {
-    return [];
+var AGENT_COMM_PREFIXES = [
+  "claude",
+  "codex",
+  "node",
+  "npm",
+  "npx",
+  "bash",
+  "sh",
+  "deno",
+  "bun"
+];
+function commMightBeAgent(comm) {
+  if (!comm) return false;
+  for (const p of AGENT_COMM_PREFIXES) {
+    if (comm === p || comm.startsWith(p)) return true;
   }
-  const out = [];
-  for (const pidStr of pids) {
-    const pid = Number(pidStr);
-    const args = readCmdline(pid);
-    if (!args || args.length === 0) continue;
-    const provider = providerFromCmdline(args);
-    if (!provider) continue;
-    out.push({ pid, provider, args });
-  }
-  return out;
+  return false;
 }
 function buildChildMap() {
   const children = /* @__PURE__ */ new Map();
@@ -753,7 +807,7 @@ function buildChildMap() {
   return children;
 }
 function resolveFromResume(ctx, uuid) {
-  const file = findSessionFileById(ctx.root, uuid);
+  const file = findSessionFileById(ctx.root, uuid, ctx.cache);
   if (!file) return null;
   return {
     pid: 0,
@@ -786,7 +840,8 @@ function resolveFromCwdMtime(ctx, provider, pid) {
   if (!ctx.cwd) return null;
   const encoded = encodeClaudeCwd(ctx.cwd);
   const dir = join4(ctx.root, encoded);
-  const best = mostRecentJsonl(dir) ?? mostRecentJsonlRecursive(ctx.root, 0);
+  const flatBest = ctx.cache ? cachedMostRecentJsonl(dir, ctx.cache) : mostRecentJsonl(dir);
+  const best = flatBest ?? (ctx.cache ? cachedMostRecentJsonlRecursive(ctx.root, ctx.cache) : mostRecentJsonlRecursive(ctx.root, 0));
   if (!best) return null;
   const sid = extractSessionIdFromPath(best.path);
   if (!sid) return null;
@@ -798,6 +853,20 @@ function resolveFromCwdMtime(ctx, provider, pid) {
     home: ctx.home,
     project_path: ctx.cwd
   };
+}
+function cachedMostRecentJsonl(dir, cache2) {
+  const hit = cache2.recentJsonlFlat.get(dir);
+  if (hit !== void 0) return hit;
+  const result = mostRecentJsonl(dir);
+  cache2.recentJsonlFlat.set(dir, result);
+  return result;
+}
+function cachedMostRecentJsonlRecursive(root, cache2) {
+  const hit = cache2.recentJsonl.get(root);
+  if (hit !== void 0) return hit;
+  const result = mostRecentJsonlRecursive(root, 0);
+  cache2.recentJsonl.set(root, result);
+  return result;
 }
 function mostRecentJsonl(dir) {
   let entries;
@@ -845,43 +914,74 @@ function mostRecentJsonlRecursive(dir, depth) {
   }
   return best;
 }
+function scanProcOnce() {
+  const agents = [];
+  const childMap = /* @__PURE__ */ new Map();
+  if (process.platform !== "linux") return { agents, childMap };
+  let pids;
+  try {
+    pids = readdirSync2("/proc").filter((name) => /^\d+$/.test(name));
+  } catch {
+    return { agents, childMap };
+  }
+  for (const pidStr of pids) {
+    let stat = null;
+    try {
+      stat = parseProcStat(readFileSync3(`/proc/${pidStr}/stat`, "utf-8"));
+    } catch {
+      continue;
+    }
+    if (!stat) continue;
+    const arr = childMap.get(stat.ppid);
+    if (arr) arr.push(stat.pid);
+    else childMap.set(stat.ppid, [stat.pid]);
+    if (!commMightBeAgent(stat.comm)) continue;
+    const pid = stat.pid;
+    const args = readCmdline(pid);
+    if (!args || args.length === 0) continue;
+    const provider = providerFromCmdline(args);
+    if (!provider) continue;
+    agents.push({ pid, provider, args });
+  }
+  return { agents, childMap };
+}
 async function mapProcessesToSessions() {
   const result = /* @__PURE__ */ new Map();
   if (process.platform !== "linux") return result;
-  const procs = listAgentProcesses();
+  const { agents: procs, childMap } = scanProcOnce();
   if (procs.length === 0) return result;
-  const childMap = buildChildMap();
+  const cache2 = createResolverCache();
   for (const proc of procs) {
     if (!isPidAlive(proc.pid)) continue;
-    const mapped = resolveProcess(proc, childMap, /* @__PURE__ */ new Set());
+    const mapped = resolveProcess(proc, childMap, /* @__PURE__ */ new Set(), cache2);
     if (mapped?.session_id && !result.has(mapped.session_id)) {
       result.set(mapped.session_id, mapped);
     }
   }
   return result;
 }
-function resolveProcess(proc, childMap, visited) {
+function resolveProcess(proc, childMap, visited, cache2) {
   if (visited.has(proc.pid)) return null;
   visited.add(proc.pid);
   const environ = readEnviron(proc.pid);
   const home = resolveAgentHome(proc.provider, environ);
   const root = sessionRootForHome(proc.provider, home);
   const cwd = readCwd(proc.pid);
-  const ctx = { environ, home, root, cwd };
+  const ctx = { environ, home, root, cwd, cache: cache2 };
+  const fromFd = resolveFromOpenFiles(ctx, proc.provider, proc.pid);
+  if (fromFd) return fromFd;
   const uuid = extractResumeUuid(proc.args);
   if (uuid) {
     const hit = resolveFromResume(ctx, uuid);
     if (hit) return { ...hit, pid: proc.pid, provider: proc.provider };
   }
-  const fromFd = resolveFromOpenFiles(ctx, proc.provider, proc.pid);
-  if (fromFd) return fromFd;
   const children = childMap.get(proc.pid) ?? [];
   for (const childPid of children) {
     if (visited.has(childPid)) continue;
     const childArgs = readCmdline(childPid);
     if (!childArgs) continue;
     const childProc = { pid: childPid, provider: proc.provider, args: childArgs };
-    const childHit = resolveProcess(childProc, childMap, visited);
+    const childHit = resolveProcess(childProc, childMap, visited, cache2);
     if (childHit) return childHit;
   }
   return resolveFromCwdMtime(ctx, proc.provider, proc.pid);
@@ -1497,8 +1597,8 @@ function isSessionIndexFresh(provider, now = Date.now()) {
   if (!Number.isFinite(builtAt)) return false;
   if (now - builtAt < LOOKUP_FRESH_TTL_MS) return true;
   const roots = [];
-  if (!provider || provider === "claude") roots.push(CLAUDE_SESSIONS_DIR);
-  if (!provider || provider === "codex") roots.push(CODEX_SESSIONS_DIR);
+  if (!provider || provider === "claude") roots.push(...claudeSessionRoots());
+  if (!provider || provider === "codex") roots.push(...codexSessionRoots());
   for (const root of roots) {
     try {
       const stat = statSync3(root);
@@ -1641,8 +1741,12 @@ function indexedFilesFromSessions(sessions) {
 }
 function collectSessionDirectoryEntries(provider) {
   const roots = [];
-  if (!provider || provider === "claude") roots.push({ provider: "claude", path: CLAUDE_SESSIONS_DIR });
-  if (!provider || provider === "codex") roots.push({ provider: "codex", path: CODEX_SESSIONS_DIR });
+  if (!provider || provider === "claude") {
+    for (const path of claudeSessionRoots()) roots.push({ provider: "claude", path });
+  }
+  if (!provider || provider === "codex") {
+    for (const path of codexSessionRoots()) roots.push({ provider: "codex", path });
+  }
   const directories = [];
   for (const root of roots) {
     collectSessionDirectoryEntriesInDir(root.provider, root.path, directories);
@@ -1678,8 +1782,12 @@ function collectSessionDirectoryEntriesInDir(provider, dir, directories) {
 }
 function collectNewSessionFileEntries(provider, index, indexedPaths) {
   const roots = [];
-  if (!provider || provider === "claude") roots.push({ provider: "claude", path: CLAUDE_SESSIONS_DIR });
-  if (!provider || provider === "codex") roots.push({ provider: "codex", path: CODEX_SESSIONS_DIR });
+  if (!provider || provider === "claude") {
+    for (const path of claudeSessionRoots()) roots.push({ provider: "claude", path });
+  }
+  if (!provider || provider === "codex") {
+    for (const path of codexSessionRoots()) roots.push({ provider: "codex", path });
+  }
   const previousDirectories = index.directories ?? [];
   const previousDirMtimes = new Map(previousDirectories.map((entry) => [entry.path, entry.mtimeMs]));
   const previousChildDirs = mapIndexedChildDirectories(previousDirectories);
@@ -2415,7 +2523,7 @@ function registerSpaceCommand(program2) {
       colWidths: [12, 20, 10, 10, 18, 20, 30],
       style: { head: [] }
     });
-    const truncate2 = (value, max) => value.length > max ? value.slice(0, max - 1) + "\u2026" : value;
+    const truncate3 = (value, max) => value.length > max ? value.slice(0, max - 1) + "\u2026" : value;
     for (const row of rows) {
       table.push([
         row.id,
@@ -2424,7 +2532,7 @@ function registerSpaceCommand(program2) {
         String(row.pins),
         row.status,
         row.parent,
-        truncate2(row.description, 30)
+        truncate3(row.description, 30)
       ]);
     }
     console.log(table.toString());
@@ -7631,7 +7739,7 @@ import { Command as Command10 } from "commander";
 import chalk14 from "chalk";
 import Table6 from "cli-table3";
 import { basename as basename8 } from "path";
-import { existsSync as existsSync11 } from "fs";
+import { existsSync as existsSync11, statSync as statSync7 } from "fs";
 
 // src/lib/processMetrics.ts
 import { readFileSync as readFileSync11 } from "fs";
@@ -7730,6 +7838,16 @@ var FULL_READ_THRESHOLD = 8 * 1024 * 1024;
 var TAIL_BYTES = 65536;
 var MAX_LINES = 1e5;
 var DEFAULT_WINDOW = 2e5;
+var MAX_TOKEN_HISTORY = 32;
+var MAX_TOOL_TAIL = 12;
+var MAX_CHAT_TAIL = 6;
+var MAX_TOOL_ARG_LEN = 60;
+var MAX_CHAT_TEXT_LEN = 200;
+var COMPACTION_DROP_RATIO = 0.3;
+function truncate2(s, max) {
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + "\u2026";
+}
 function modelContextWindow(model) {
   if (!model) return DEFAULT_WINDOW;
   const m = model.toLowerCase();
@@ -7763,61 +7881,179 @@ function extractModel(entry) {
   if (mm && !mm.startsWith("<") && mm !== "synthetic") return mm;
   return null;
 }
-function extractToolNames(entry) {
-  const names = [];
+function extractToolUseArg(name, input) {
+  if (!isRecord8(input)) return "";
+  const lowName = name.toLowerCase();
+  if (lowName === "bash") {
+    const c = input.command;
+    return typeof c === "string" ? c : "";
+  }
+  if (lowName === "grep" || lowName === "glob") {
+    const p = input.pattern;
+    return typeof p === "string" ? p : "";
+  }
+  const fp = input.file_path;
+  if (typeof fp === "string") return fp;
+  const sat = input.subagent_type;
+  if (typeof sat === "string") return sat;
+  const desc = input.description;
+  if (typeof desc === "string") return desc;
+  try {
+    return JSON.stringify(input);
+  } catch {
+    return "";
+  }
+}
+function parseEntryTimestamp(entry) {
+  const ts = entry.timestamp;
+  if (typeof ts === "string") {
+    const ms = Date.parse(ts);
+    return Number.isFinite(ms) ? ms : 0;
+  }
+  if (typeof ts === "number" && Number.isFinite(ts)) {
+    return ts > 1e12 ? ts : ts * 1e3;
+  }
+  return 0;
+}
+function extractContentBlocks(entry) {
   const msg = isRecord8(entry.message) ? entry.message : null;
-  const content = msg && Array.isArray(msg.content) ? msg.content : Array.isArray(entry.content) ? entry.content : null;
-  if (content) {
-    for (const part of content) {
-      if (isRecord8(part) && part.type === "tool_use" && typeof part.name === "string") {
-        names.push(part.name);
+  const out = { text: [], toolResult: false, toolUse: [] };
+  if (!msg) return out;
+  if (typeof msg.content === "string") {
+    out.text.push(msg.content);
+    return out;
+  }
+  if (Array.isArray(msg.content)) {
+    for (const part of msg.content) {
+      if (!isRecord8(part)) continue;
+      if (part.type === "text" && typeof part.text === "string") {
+        out.text.push(part.text);
+      } else if (part.type === "tool_use" && typeof part.name === "string") {
+        out.toolUse.push({ name: part.name, input: part.input });
+      } else if (part.type === "tool_result") {
+        out.toolResult = true;
       }
     }
   }
-  if (entry.type === "function_call" && typeof entry.name === "string") names.push(entry.name);
-  return names;
+  return out;
 }
 function reduceEntries(entries, lastActivityMs, truncated) {
-  const st = {
-    model: "",
-    tokens: { input: 0, output: 0, cache: 0, total: 0 },
-    lastUsage: null,
-    lastTool: null,
-    toolCount: 0
-  };
+  let model = "";
+  const tokens = { input: 0, output: 0, cache: 0, total: 0 };
+  let lastUsage = null;
+  let lastTool = null;
+  let toolCount = 0;
+  let startedAtMs = 0;
+  let pendingSinceMs = 0;
+  let thinkingSinceMs = 0;
+  let currentTask = "";
+  const tokenHistory = [];
+  const contextHistory = [];
+  const toolCallsTail = [];
+  const chatTail = [];
   for (const entry of entries) {
-    if (!st.model) {
+    if (!model) {
       const m = extractModel(entry);
-      if (m) st.model = m;
+      if (m) model = m;
     }
+    const ts = parseEntryTimestamp(entry);
+    if (startedAtMs === 0 && ts > 0) startedAtMs = ts;
     const usage = extractAssistantUsage(entry);
     if (usage) {
-      st.tokens.input += usage.input;
-      st.tokens.output += usage.output;
-      st.tokens.cache += usage.cacheCreation + usage.cacheRead;
-      st.lastUsage = usage;
+      tokens.input += usage.input;
+      tokens.output += usage.output;
+      tokens.cache += usage.cacheCreation + usage.cacheRead;
+      lastUsage = usage;
     }
-    const tools = extractToolNames(entry);
-    if (tools.length > 0) {
-      st.toolCount += tools.length;
-      st.lastTool = tools[tools.length - 1];
+    const isAssistant = entry.type === "assistant" || entry.type === "function_call";
+    const isUser = entry.type === "user" || entry.type === "human" || entry.type === "function_call_output";
+    const blocks = isAssistant || isUser ? extractContentBlocks(entry) : null;
+    let toolUses = blocks?.toolUse ?? [];
+    if (toolUses.length === 0 && entry.type === "function_call" && typeof entry.name === "string") {
+      let input = {};
+      const args = entry.arguments;
+      if (typeof args === "string") {
+        try {
+          input = JSON.parse(args);
+        } catch {
+        }
+      } else if (isRecord8(args)) {
+        input = args;
+      }
+      toolUses = [{ name: entry.name, input }];
+    }
+    if (toolUses.length > 0) {
+      toolCount += toolUses.length;
+      const lastUse = toolUses[toolUses.length - 1];
+      lastTool = lastUse.name;
+      currentTask = truncate2(extractToolUseArg(lastUse.name, lastUse.input), MAX_TOOL_ARG_LEN);
+      for (const tu of toolUses) {
+        const arg = truncate2(extractToolUseArg(tu.name, tu.input), MAX_TOOL_ARG_LEN);
+        toolCallsTail.push({ name: tu.name, arg, duration_ms: 0 });
+        if (toolCallsTail.length > MAX_TOOL_TAIL) toolCallsTail.shift();
+      }
+    }
+    if (isAssistant && usage) {
+      const ctxSize = usage.input + usage.cacheCreation + usage.cacheRead;
+      tokenHistory.push(tokens.input + tokens.output + tokens.cache);
+      if (tokenHistory.length > MAX_TOKEN_HISTORY) tokenHistory.shift();
+      contextHistory.push(ctxSize);
+      if (contextHistory.length > MAX_TOKEN_HISTORY) contextHistory.shift();
+    }
+    if (isAssistant) {
+      thinkingSinceMs = 0;
+      if (toolUses.length > 0) pendingSinceMs = ts || lastActivityMs;
+      if (blocks) {
+        for (const t of blocks.text) {
+          if (t.trim()) {
+            chatTail.push({ role: "assistant", text: truncate2(t, MAX_CHAT_TEXT_LEN) });
+            if (chatTail.length > MAX_CHAT_TAIL) chatTail.shift();
+          }
+        }
+      }
+    } else if (isUser && blocks) {
+      pendingSinceMs = 0;
+      thinkingSinceMs = ts || lastActivityMs;
+      if (!blocks.toolResult) {
+        for (const t of blocks.text) {
+          if (t.trim()) {
+            chatTail.push({ role: "user", text: truncate2(t, MAX_CHAT_TEXT_LEN) });
+            if (chatTail.length > MAX_CHAT_TAIL) chatTail.shift();
+          }
+        }
+      }
     }
   }
-  st.tokens.total = st.tokens.input + st.tokens.output;
+  tokens.total = tokens.input + tokens.output;
   let ctxPct = -1;
-  if (st.lastUsage) {
-    const ctxInput = st.lastUsage.input + st.lastUsage.cacheCreation + st.lastUsage.cacheRead;
-    const window = modelContextWindow(st.model);
+  if (lastUsage) {
+    const ctxInput = lastUsage.input + lastUsage.cacheCreation + lastUsage.cacheRead;
+    const window = modelContextWindow(model);
     if (window > 0) ctxPct = ctxInput / window * 100;
   }
+  let compactionCount = 0;
+  for (let i = 1; i < contextHistory.length; i++) {
+    const prev = contextHistory[i - 1];
+    const cur = contextHistory[i];
+    if (prev > 0 && cur < prev * (1 - COMPACTION_DROP_RATIO)) compactionCount++;
+  }
   return {
-    model: st.model,
-    tokens: st.tokens,
+    model,
+    tokens,
     ctxPct,
-    lastTool: st.lastTool,
-    toolCount: st.toolCount,
+    lastTool,
+    toolCount,
     lastActivityMs,
-    truncated
+    truncated,
+    startedAtMs,
+    pendingSinceMs,
+    thinkingSinceMs,
+    tokenHistory,
+    contextHistory,
+    compactionCount,
+    currentTask,
+    toolCallsTail,
+    chatTail
   };
 }
 function readTailEntries(filePath, size) {
@@ -7874,22 +8110,65 @@ function emptyLive(lastActivityMs) {
     lastTool: null,
     toolCount: 0,
     lastActivityMs,
-    truncated: false
+    truncated: false,
+    startedAtMs: 0,
+    pendingSinceMs: 0,
+    thinkingSinceMs: 0,
+    tokenHistory: [],
+    contextHistory: [],
+    compactionCount: 0,
+    currentTask: "",
+    toolCallsTail: [],
+    chatTail: []
   };
 }
 
 // src/commands/monitor.ts
+var LIVE_GLYPH = {
+  thinking: "\u25D0",
+  executing: "\u25B8",
+  waiting: "\u23F8",
+  rate_limited: "\u23F1",
+  done: "\u2713",
+  unknown: "?"
+};
+var LIVE_COLOR = {
+  thinking: chalk14.cyan,
+  executing: chalk14.green,
+  waiting: chalk14.gray,
+  rate_limited: chalk14.magenta,
+  done: chalk14.dim,
+  unknown: chalk14.gray
+};
+var IDLE_THRESHOLD_MS = 3e4;
+function resolveLiveStatus(runStatus, live, detected, now = Date.now(), idleThresholdMs = IDLE_THRESHOLD_MS) {
+  if (!detected) {
+    if (runStatus === "completed" || runStatus === "errored" || runStatus === "crashed") return "done";
+    if (runStatus === "running") return "thinking";
+    return "unknown";
+  }
+  if (live) {
+    if (live.pendingSinceMs > 0) return "executing";
+    if (live.thinkingSinceMs > 0) {
+      return now - live.thinkingSinceMs < idleThresholdMs ? "thinking" : "waiting";
+    }
+    return now - live.lastActivityMs < idleThresholdMs ? "executing" : "waiting";
+  }
+  return "thinking";
+}
+function liveBadge(status) {
+  return LIVE_COLOR[status](LIVE_GLYPH[status]);
+}
+function isActiveLiveStatus(s) {
+  return s === "thinking" || s === "executing" || s === "rate_limited";
+}
 var PINNED_DISPLAY_LIMIT = 30;
 var RECENT_LIMIT = 8;
-function resolveStatus2(sessionId, latest, detected) {
-  if (detected.has(sessionId)) return "running";
-  if (latest && latest.status === "running") return "running";
-  return latest?.status ?? "unknown";
-}
-async function buildRow(spec, detected, indexBySid) {
+async function buildRow(spec, detected, indexBySid, latestRunBySid) {
   const det = detected.get(spec.session_id);
-  const latest = getLatestRunForSession(spec.session_id);
-  const status = resolveStatus2(spec.session_id, latest, detected);
+  const latest = latestRunBySid.get(spec.session_id);
+  const detectedFlag = !!det || latest?.status === "running";
+  const runStatus = latest?.status ?? "unknown";
   const indexEntry = indexBySid.get(spec.session_id);
   const filePath = det?.file_path ?? indexEntry?.file_path;
   let model = "";
@@ -7898,6 +8177,15 @@ async function buildRow(spec, detected, indexBySid) {
   let lastTool = null;
   let toolCount = 0;
   let lastActivityMs = indexEntry ? Date.parse(indexEntry.modified_at) || 0 : 0;
+  let startedAtMs = 0;
+  let pendingSinceMs = 0;
+  let thinkingSinceMs = 0;
+  let tokenHistory = [];
+  let contextHistory = [];
+  let compactionCount = 0;
+  let currentTask = "";
+  let toolCallsTail = [];
+  let chatTail = [];
   if (filePath) {
     try {
       const live = await getSessionLiveMetrics(filePath);
@@ -7907,9 +8195,20 @@ async function buildRow(spec, detected, indexBySid) {
       lastTool = live.lastTool;
       toolCount = live.toolCount;
       lastActivityMs = live.lastActivityMs;
+      startedAtMs = live.startedAtMs;
+      pendingSinceMs = live.pendingSinceMs;
+      thinkingSinceMs = live.thinkingSinceMs;
+      tokenHistory = live.tokenHistory;
+      contextHistory = live.contextHistory;
+      compactionCount = live.compactionCount;
+      currentTask = live.currentTask;
+      toolCallsTail = live.toolCallsTail;
+      chatTail = live.chatTail;
     } catch {
     }
   }
+  const liveForStatus = filePath ? { pendingSinceMs, thinkingSinceMs, lastActivityMs } : null;
+  const status = resolveLiveStatus(runStatus, liveForStatus, detectedFlag);
   let pid = det?.pid;
   let cpuPct;
   let memKb;
@@ -7918,6 +8217,8 @@ async function buildRow(spec, detected, indexBySid) {
     cpuPct = m.cpuPct;
     memKb = m.memKb;
   }
+  const now = Date.now();
+  const elapsedSecs = startedAtMs > 0 ? Math.max(0, Math.floor((now - startedAtMs) / 1e3)) : 0;
   return {
     session_id: spec.session_id,
     pinned: spec.pinned,
@@ -7937,15 +8238,66 @@ async function buildRow(spec, detected, indexBySid) {
     tool_count: toolCount,
     project_path: spec.project_path || (det?.project_path ?? ""),
     file_path: filePath,
-    last_activity_ms: lastActivityMs
+    last_activity_ms: lastActivityMs,
+    started_at_ms: startedAtMs,
+    elapsed_secs: elapsedSecs,
+    pending_since_ms: pendingSinceMs,
+    thinking_since_ms: thinkingSinceMs,
+    token_history: tokenHistory,
+    context_history: contextHistory,
+    compaction_count: compactionCount,
+    current_task: currentTask,
+    tool_calls_tail: toolCallsTail,
+    chat_tail: chatTail
   };
 }
-async function buildSnapshot2(opts) {
+async function buildSnapshot2(opts, caches) {
   const catalogFilter = opts.catalogFilter;
   const pinnedLimit = opts.pinnedLimit && opts.pinnedLimit > 0 ? opts.pinnedLimit : PINNED_DISPLAY_LIMIT;
   reconcileStaleRuns();
   const detected = await detectRunningSessions();
-  const index = loadSessionIndex();
+  let runs = caches?.runs;
+  if (caches) {
+    try {
+      const st = statSync7(runsPath());
+      if (caches.runsMtimeMs !== st.mtimeMs) {
+        caches.runsMtimeMs = st.mtimeMs;
+        caches.runs = void 0;
+      }
+    } catch {
+      caches.runs = void 0;
+    }
+    runs = caches.runs;
+  }
+  if (!runs) {
+    runs = loadRuns().runs;
+    if (caches) caches.runs = runs;
+  }
+  const latestRunBySid = /* @__PURE__ */ new Map();
+  for (const r of runs) {
+    if (!r.session_id) continue;
+    const existing = latestRunBySid.get(r.session_id);
+    if (!existing || r.started_at > existing.started_at) {
+      latestRunBySid.set(r.session_id, r);
+    }
+  }
+  let index = caches?.index;
+  if (caches) {
+    try {
+      const st = statSync7(SESSION_INDEX_PATH);
+      if (caches.indexMtimeMs !== st.mtimeMs) {
+        caches.indexMtimeMs = st.mtimeMs;
+        caches.index = void 0;
+      }
+    } catch {
+      caches.index = void 0;
+    }
+    index = caches.index;
+  }
+  if (index === void 0) {
+    index = loadSessionIndex();
+    if (caches) caches.index = index;
+  }
   const indexBySid = /* @__PURE__ */ new Map();
   const metaBySid = /* @__PURE__ */ new Map();
   if (index && Array.isArray(index.sessions)) {
@@ -8006,10 +8358,12 @@ async function buildSnapshot2(opts) {
     idle.push(e);
   }
   const displayPinned = [...running, ...idle].map((e) => e.spec);
-  const pinnedRows = await Promise.all(displayPinned.map((s) => buildRow(s, detected, indexBySid)));
+  const pinnedRows = await Promise.all(displayPinned.map((s) => buildRow(s, detected, indexBySid, latestRunBySid)));
   pinnedRows.sort((a, b) => {
-    if (a.status === "running" && b.status !== "running") return -1;
-    if (b.status === "running" && a.status !== "running") return 1;
+    const aActive = isActiveLiveStatus(a.status);
+    const bActive = isActiveLiveStatus(b.status);
+    if (aActive && !bActive) return -1;
+    if (bActive && !aActive) return 1;
     return b.last_activity_ms - a.last_activity_ms;
   });
   let recentRows = [];
@@ -8036,14 +8390,16 @@ async function buildSnapshot2(opts) {
         pinned: false
       };
     });
-    recentRows = await Promise.all(recentSpecs.map((s) => buildRow(s, detected, indexBySid)));
+    recentRows = await Promise.all(recentSpecs.map((s) => buildRow(s, detected, indexBySid, latestRunBySid)));
     recentRows.sort((a, b) => {
-      if (a.status === "running" && b.status !== "running") return -1;
-      if (b.status === "running" && a.status !== "running") return 1;
+      const aActive = isActiveLiveStatus(a.status);
+      const bActive = isActiveLiveStatus(b.status);
+      if (aActive && !bActive) return -1;
+      if (bActive && !aActive) return 1;
       return b.last_activity_ms - a.last_activity_ms;
     });
   }
-  const activeCount = [...pinnedRows, ...recentRows].filter((r) => r.status === "running").length;
+  const activeCount = [...pinnedRows, ...recentRows].filter((r) => isActiveLiveStatus(r.status)).length;
   return { pinned: pinnedRows, recent: recentRows, pinnedTotal, recentTotal, activeCount };
 }
 function shortModel(m) {
@@ -8092,7 +8448,7 @@ function renderSection(rows) {
       chalk14.cyan("Mem"),
       chalk14.cyan("CTX"),
       chalk14.cyan("Tokens in/out/ch"),
-      chalk14.cyan("Last tool")
+      chalk14.cyan("Task")
     ],
     colWidths: [15, 11, 16, 6, 7, 6, 18, 14],
     style: { head: [] }
@@ -8100,16 +8456,17 @@ function renderSection(rows) {
   for (const r of rows) {
     const proj = r.project_path ? basename8(r.project_path) || r.project_path : "-";
     const tok = `${compact(r.tokens_in)}/${compact(r.tokens_out)}/${chalk14.gray(compact(r.tokens_cache))}`;
-    const last = r.last_tool ? `${r.last_tool}\xD7${r.tool_count}` : "-";
+    let task = r.current_task;
+    if (!task) task = r.last_tool ? `${r.last_tool}\xD7${r.tool_count}` : "-";
     table.push([
-      `${statusBadge(r.status)} ${shortSessionId(r.session_id)}`,
+      `${liveBadge(r.status)} ${shortSessionId(r.session_id)}`,
       shortModel(r.model),
       proj.length > 15 ? proj.slice(0, 14) + "\u2026" : proj,
       cpuColor(r.cpu_pct),
       formatMem(r.mem_kb),
       ctxColor(r.ctx_pct),
       tok,
-      last.length > 13 ? last.slice(0, 12) + "\u2026" : last
+      task.length > 13 ? task.slice(0, 12) + "\u2026" : task
     ]);
   }
   return table.toString();
@@ -8177,6 +8534,7 @@ function registerMonitorCommand(program2) {
     let previous = /* @__PURE__ */ new Map();
     let tick = 0;
     let stopped = false;
+    const caches = {};
     const stop = () => {
       if (stopped) return;
       stopped = true;
@@ -8184,27 +8542,35 @@ function registerMonitorCommand(program2) {
       process.exit(0);
     };
     process.on("SIGINT", stop);
+    const TERMINAL_STATES = /* @__PURE__ */ new Set(["done", "rate_limited"]);
     const renderOnce = async () => {
       tick++;
-      const snap = await buildSnapshot2(snapshotOpts);
+      const snap = await buildSnapshot2(snapshotOpts, caches);
       const all = [...snap.pinned, ...snap.recent];
       const current = new Map(
         all.map((r) => [r.session_id, { status: r.status, tool: r.last_tool }])
       );
       const events = [];
+      const next = /* @__PURE__ */ new Map();
       for (const [sid, cur] of current) {
         const prev = previous.get(sid);
+        const since = prev && prev.status === cur.status ? prev.since : tick;
+        next.set(sid, { status: cur.status, since, tool: cur.tool });
         if (!prev) continue;
         if (prev.status !== cur.status) {
-          events.push(
-            `[${(/* @__PURE__ */ new Date()).toISOString().slice(11, 19)}] ${shortSessionId(sid)} ${prev.status} \u2192 ${cur.status}`
-          );
+          const isTerminal = TERMINAL_STATES.has(cur.status);
+          const stable = tick - since >= 1;
+          if (isTerminal || stable) {
+            events.push(
+              `[${(/* @__PURE__ */ new Date()).toISOString().slice(11, 19)}] ${shortSessionId(sid)} ${prev.status} \u2192 ${cur.status}`
+            );
+          }
         }
         if (prev.tool !== cur.tool && cur.tool) {
           events.push(`[${(/* @__PURE__ */ new Date()).toISOString().slice(11, 19)}] ${shortSessionId(sid)} tool ${prev.tool ?? "-"} \u2192 ${cur.tool}`);
         }
       }
-      previous = current;
+      previous = next;
       clearScreen2();
       const filterLine = catalogFilter ? chalk14.gray(`catalog: ${catalogFilter}
 `) : "";
@@ -8214,9 +8580,18 @@ function registerMonitorCommand(program2) {
       }
     };
     await renderOnce();
+    const TICK_MS = 3e3;
+    let renderInFlight = false;
+    let lastStart = 0;
     const interval = setInterval(() => {
-      renderOnce().catch(() => void 0);
-    }, 3e3);
+      if (renderInFlight) return;
+      if (Date.now() - lastStart < TICK_MS) return;
+      renderInFlight = true;
+      lastStart = Date.now();
+      renderOnce().catch(() => void 0).finally(() => {
+        renderInFlight = false;
+      });
+    }, 500);
     interval.unref?.();
   });
   program2.addCommand(monitor);

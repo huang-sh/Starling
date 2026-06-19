@@ -62,13 +62,23 @@ function resolveCodexHome(): string {
 export function claudeSessionRoots(): string[] {
   return [join(resolveClaudeConfigDir(), "projects")];
 }
+/**
+ * Codex writes live sessions under `<CODEX_HOME>/sessions/YYYY/MM/` and moves
+ * finished ones to `<CODEX_HOME>/archived_sessions/`. Both are returned so
+ * discovery / indexing / monitor see archived sessions too.
+ */
 export function codexSessionRoots(): string[] {
-  return [join(resolveCodexHome(), "sessions")];
+  const home = resolveCodexHome();
+  return [join(home, "sessions"), join(home, "archived_sessions")];
 }
 
 /** Env-aware single-root alias. Prefer claudeSessionRoots() for new code. */
 export const CLAUDE_SESSIONS_DIR = claudeSessionRoots()[0]!;
-/** Env-aware single-root alias. Prefer codexSessionRoots() for new code. */
+/**
+ * Env-aware primary-root alias (live sessions only). Use codexSessionRoots()
+ * for discovery — this omits archived_sessions/. Kept for callers that write
+ * new session files (run.ts) or only care about the live root.
+ */
 export const CODEX_SESSIONS_DIR = codexSessionRoots()[0]!;
 
 export const ENV_CONFIG_KEY = "STARLING_CONFIG";

@@ -16,6 +16,8 @@ vi.mock("../src/constants.js", () => ({
   DEFAULT_STORE_PATH: join(root, ".starling", "store.json"),
   CLAUDE_SESSIONS_DIR: join(root, ".claude", "projects"),
   CODEX_SESSIONS_DIR: join(root, ".codex", "sessions"),
+  claudeSessionRoots: () => [join(root, ".claude", "projects")],
+  codexSessionRoots: () => [join(root, ".codex", "sessions"), join(root, ".codex", "archived_sessions")],
 }));
 
 // Keep the real parseAgentSpec / specLabel; only stub the spawning function.

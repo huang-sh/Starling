@@ -2,21 +2,25 @@ import { Command } from "commander";
 import chalk from "chalk";
 import Table from "cli-table3";
 import { basename } from "path";
-import { existsSync } from "fs";
+import { existsSync, statSync } from "fs";
 import { listBookmarks, listSpaces } from "../lib/store.js";
 import { catalogPath, resolveCatalogReference } from "../lib/catalogResolver.js";
-import { loadSessionIndex } from "../lib/sessionIndex.js";
+import { loadSessionIndex, SESSION_INDEX_PATH, type SessionIndex } from "../lib/sessionIndex.js";
 import {
   detectRunningSessions,
-  getLatestRunForSession,
+  loadRuns,
   reconcileStaleRuns,
-  statusBadge,
+  runsPath,
   type DetectedSession,
 } from "../lib/runs.js";
 import { getProcessTreeMetrics, resetCpuSampler } from "../lib/processMetrics.js";
-import { getSessionLiveMetrics } from "../lib/sessionMetrics.js";
+import {
+  getSessionLiveMetrics,
+  type ChatMessageEntry,
+  type ToolCallEntry,
+} from "../lib/sessionMetrics.js";
 import { shortSessionId } from "../lib/sessionDisplay.js";
-import type { Bookmark, RunStatus } from "../types.js";
+import type { Bookmark, RunRecord, RunStatus } from "../types.js";
 
 interface RowSpec {
   session_id: string;
@@ -27,6 +31,75 @@ interface RowSpec {
   catalog?: string;
 }
 
+/**
+ * Fine-grained live status for monitor rows (6 states, mirrors abtop).
+ *
+ * `RunStatus` is left untouched for run records; the monitor boundary maps
+ * RunStatus → LiveStatus via `resolveLiveStatus`.
+ */
+export type LiveStatus =
+  | "thinking" // model generating; last user msg awaiting assistant
+  | "executing" // tool_use in flight or descendant CPU active
+  | "waiting" // idle, awaiting user input
+  | "rate_limited" // reserved (Tier 3)
+  | "done" // terminal (run completed/errored/crashed)
+  | "unknown"; // no process + no run record
+
+const LIVE_GLYPH: Record<LiveStatus, string> = {
+  thinking: "◐",
+  executing: "▸",
+  waiting: "⏸",
+  rate_limited: "⏱",
+  done: "✓",
+  unknown: "?",
+};
+
+const LIVE_COLOR: Record<LiveStatus, (s: string) => string> = {
+  thinking: chalk.cyan,
+  executing: chalk.green,
+  waiting: chalk.gray,
+  rate_limited: chalk.magenta,
+  done: chalk.dim,
+  unknown: chalk.gray,
+};
+
+const IDLE_THRESHOLD_MS = 30_000;
+
+function resolveLiveStatus(
+  runStatus: RunStatus,
+  live: {
+    pendingSinceMs: number;
+    thinkingSinceMs: number;
+    lastActivityMs: number;
+  } | null,
+  detected: boolean,
+  now = Date.now(),
+  idleThresholdMs = IDLE_THRESHOLD_MS
+): LiveStatus {
+  if (!detected) {
+    if (runStatus === "completed" || runStatus === "errored" || runStatus === "crashed") return "done";
+    if (runStatus === "running") return "thinking"; // optimistic — process went away between ticks
+    return "unknown"; // stale / unknown
+  }
+  if (live) {
+    if (live.pendingSinceMs > 0) return "executing";
+    if (live.thinkingSinceMs > 0) {
+      return now - live.thinkingSinceMs < idleThresholdMs ? "thinking" : "waiting";
+    }
+    return now - live.lastActivityMs < idleThresholdMs ? "executing" : "waiting";
+  }
+  return "thinking"; // detected but unreadable transcript — give benefit of the doubt
+}
+
+function liveBadge(status: LiveStatus): string {
+  return LIVE_COLOR[status](LIVE_GLYPH[status]);
+}
+
+/** Active states (model or tools doing work) for sort + active count. */
+function isActiveLiveStatus(s: LiveStatus): boolean {
+  return s === "thinking" || s === "executing" || s === "rate_limited";
+}
+
 export interface MonitorRow {
   session_id: string;
   pinned: boolean;
@@ -34,7 +107,7 @@ export interface MonitorRow {
   title: string;
   provider: string;
   model: string;
-  status: RunStatus;
+  status: LiveStatus;
   pid?: number;
   cpu_pct?: number;
   mem_kb?: number;
@@ -47,6 +120,17 @@ export interface MonitorRow {
   project_path: string;
   file_path?: string;
   last_activity_ms: number;
+  // --- Tier 1 enrichment ---
+  started_at_ms: number;
+  elapsed_secs: number;
+  pending_since_ms: number;
+  thinking_since_ms: number;
+  token_history: number[];
+  context_history: number[];
+  compaction_count: number;
+  current_task: string;
+  tool_calls_tail: ToolCallEntry[];
+  chat_tail: ChatMessageEntry[];
 }
 
 interface Snapshot {
@@ -58,27 +142,32 @@ interface Snapshot {
   error?: string;
 }
 
+/**
+ * Mutable cache populated by `buildSnapshot` on the first load and reused on
+ * subsequent calls when the underlying file's mtime hasn't advanced. Watch mode
+ * passes one in so a 3s tick skips re-parsing the 12MB+ session index and the
+ * runs file when nothing changed.
+ */
+interface SnapshotCaches {
+  index?: SessionIndex | null;
+  indexMtimeMs?: number;
+  runs?: RunRecord[];
+  runsMtimeMs?: number;
+}
+
 const PINNED_DISPLAY_LIMIT = 30;
 const RECENT_LIMIT = 8;
-
-function resolveStatus(
-  sessionId: string,
-  latest: ReturnType<typeof getLatestRunForSession>,
-  detected: Map<string, DetectedSession>
-): RunStatus {
-  if (detected.has(sessionId)) return "running";
-  if (latest && latest.status === "running") return "running";
-  return latest?.status ?? "unknown";
-}
 
 async function buildRow(
   spec: RowSpec,
   detected: Map<string, DetectedSession>,
-  indexBySid: Map<string, { file_path: string; modified_at: string }>
+  indexBySid: Map<string, { file_path: string; modified_at: string }>,
+  latestRunBySid: Map<string, RunRecord>
 ): Promise<MonitorRow> {
   const det = detected.get(spec.session_id);
-  const latest = getLatestRunForSession(spec.session_id);
-  const status = resolveStatus(spec.session_id, latest, detected);
+  const latest = latestRunBySid.get(spec.session_id);
+  const detectedFlag = !!det || latest?.status === "running";
+  const runStatus: RunStatus = latest?.status ?? "unknown";
 
   const indexEntry = indexBySid.get(spec.session_id);
   const filePath = det?.file_path ?? indexEntry?.file_path;
@@ -89,6 +178,16 @@ async function buildRow(
   let lastTool: string | null = null;
   let toolCount = 0;
   let lastActivityMs = indexEntry ? Date.parse(indexEntry.modified_at) || 0 : 0;
+  // Live fields default to empty / zero.
+  let startedAtMs = 0;
+  let pendingSinceMs = 0;
+  let thinkingSinceMs = 0;
+  let tokenHistory: number[] = [];
+  let contextHistory: number[] = [];
+  let compactionCount = 0;
+  let currentTask = "";
+  let toolCallsTail: ToolCallEntry[] = [];
+  let chatTail: ChatMessageEntry[] = [];
 
   if (filePath) {
     try {
@@ -99,10 +198,24 @@ async function buildRow(
       lastTool = live.lastTool;
       toolCount = live.toolCount;
       lastActivityMs = live.lastActivityMs;
+      startedAtMs = live.startedAtMs;
+      pendingSinceMs = live.pendingSinceMs;
+      thinkingSinceMs = live.thinkingSinceMs;
+      tokenHistory = live.tokenHistory;
+      contextHistory = live.contextHistory;
+      compactionCount = live.compactionCount;
+      currentTask = live.currentTask;
+      toolCallsTail = live.toolCallsTail;
+      chatTail = live.chatTail;
     } catch {
       /* unreadable session file — metrics stay empty */
     }
   }
+
+  const liveForStatus = filePath
+    ? { pendingSinceMs, thinkingSinceMs, lastActivityMs }
+    : null;
+  const status = resolveLiveStatus(runStatus, liveForStatus, detectedFlag);
 
   let pid = det?.pid;
   let cpuPct: number | undefined;
@@ -112,6 +225,9 @@ async function buildRow(
     cpuPct = m.cpuPct;
     memKb = m.memKb;
   }
+
+  const now = Date.now();
+  const elapsedSecs = startedAtMs > 0 ? Math.max(0, Math.floor((now - startedAtMs) / 1000)) : 0;
 
   return {
     session_id: spec.session_id,
@@ -133,19 +249,76 @@ async function buildRow(
     project_path: spec.project_path || (det?.project_path ?? ""),
     file_path: filePath,
     last_activity_ms: lastActivityMs,
+    started_at_ms: startedAtMs,
+    elapsed_secs: elapsedSecs,
+    pending_since_ms: pendingSinceMs,
+    thinking_since_ms: thinkingSinceMs,
+    token_history: tokenHistory,
+    context_history: contextHistory,
+    compaction_count: compactionCount,
+    current_task: currentTask,
+    tool_calls_tail: toolCallsTail,
+    chat_tail: chatTail,
   };
 }
 
-async function buildSnapshot(opts: {
-  catalogFilter?: string;
-  pinnedLimit?: number;
-  includeRecent?: boolean;
-}): Promise<Snapshot> {
+export async function buildSnapshot(
+  opts: {
+    catalogFilter?: string;
+    pinnedLimit?: number;
+    includeRecent?: boolean;
+  },
+  caches?: SnapshotCaches
+): Promise<Snapshot> {
   const catalogFilter = opts.catalogFilter;
   const pinnedLimit = opts.pinnedLimit && opts.pinnedLimit > 0 ? opts.pinnedLimit : PINNED_DISPLAY_LIMIT;
   reconcileStaleRuns();
   const detected = await detectRunningSessions();
-  const index = loadSessionIndex();
+  // Load runs.json once (cached by mtime when a caches object is passed in).
+  // Index by session_id with most-recent first so each row lookup is O(1).
+  let runs = caches?.runs;
+  if (caches) {
+    try {
+      const st = statSync(runsPath());
+      if (caches.runsMtimeMs !== st.mtimeMs) {
+        caches.runsMtimeMs = st.mtimeMs;
+        caches.runs = undefined;
+      }
+    } catch {
+      caches.runs = undefined;
+    }
+    runs = caches.runs;
+  }
+  if (!runs) {
+    runs = loadRuns().runs;
+    if (caches) caches.runs = runs;
+  }
+  const latestRunBySid = new Map<string, RunRecord>();
+  for (const r of runs) {
+    if (!r.session_id) continue;
+    const existing = latestRunBySid.get(r.session_id);
+    if (!existing || r.started_at > existing.started_at) {
+      latestRunBySid.set(r.session_id, r);
+    }
+  }
+  // Same for the session index — it's the dominant cost on large fleets.
+  let index: SessionIndex | null | undefined = caches?.index;
+  if (caches) {
+    try {
+      const st = statSync(SESSION_INDEX_PATH);
+      if (caches.indexMtimeMs !== st.mtimeMs) {
+        caches.indexMtimeMs = st.mtimeMs;
+        caches.index = undefined;
+      }
+    } catch {
+      caches.index = undefined;
+    }
+    index = caches.index;
+  }
+  if (index === undefined) {
+    index = loadSessionIndex();
+    if (caches) caches.index = index;
+  }
   const indexBySid = new Map<string, { file_path: string; modified_at: string }>();
   const metaBySid = new Map<string, { provider: string; project_path: string; first_prompt: string; custom_title?: string }>();
   if (index && Array.isArray(index.sessions)) {
@@ -226,10 +399,12 @@ async function buildSnapshot(opts: {
   }
   const displayPinned = [...running, ...idle].map((e) => e.spec);
 
-  const pinnedRows = await Promise.all(displayPinned.map((s) => buildRow(s, detected, indexBySid)));
+  const pinnedRows = await Promise.all(displayPinned.map((s) => buildRow(s, detected, indexBySid, latestRunBySid)));
   pinnedRows.sort((a, b) => {
-    if (a.status === "running" && b.status !== "running") return -1;
-    if (b.status === "running" && a.status !== "running") return 1;
+    const aActive = isActiveLiveStatus(a.status);
+    const bActive = isActiveLiveStatus(b.status);
+    if (aActive && !bActive) return -1;
+    if (bActive && !aActive) return 1;
     return b.last_activity_ms - a.last_activity_ms;
   });
 
@@ -263,15 +438,17 @@ async function buildSnapshot(opts: {
         pinned: false,
       };
     });
-    recentRows = await Promise.all(recentSpecs.map((s) => buildRow(s, detected, indexBySid)));
+    recentRows = await Promise.all(recentSpecs.map((s) => buildRow(s, detected, indexBySid, latestRunBySid)));
     recentRows.sort((a, b) => {
-      if (a.status === "running" && b.status !== "running") return -1;
-      if (b.status === "running" && a.status !== "running") return 1;
+      const aActive = isActiveLiveStatus(a.status);
+      const bActive = isActiveLiveStatus(b.status);
+      if (aActive && !bActive) return -1;
+      if (bActive && !aActive) return 1;
       return b.last_activity_ms - a.last_activity_ms;
     });
   }
 
-  const activeCount = [...pinnedRows, ...recentRows].filter((r) => r.status === "running").length;
+  const activeCount = [...pinnedRows, ...recentRows].filter((r) => isActiveLiveStatus(r.status)).length;
   return { pinned: pinnedRows, recent: recentRows, pinnedTotal, recentTotal, activeCount };
 }
 
@@ -328,7 +505,7 @@ function renderSection(rows: MonitorRow[]): string {
       chalk.cyan("Mem"),
       chalk.cyan("CTX"),
       chalk.cyan("Tokens in/out/ch"),
-      chalk.cyan("Last tool"),
+      chalk.cyan("Task"),
     ],
     colWidths: [15, 11, 16, 6, 7, 6, 18, 14],
     style: { head: [] },
@@ -337,16 +514,18 @@ function renderSection(rows: MonitorRow[]): string {
     const proj = r.project_path ? basename(r.project_path) || r.project_path : "-";
     // in/out in plain text, cached shown gray so the three fields stay legible.
     const tok = `${compact(r.tokens_in)}/${compact(r.tokens_out)}/${chalk.gray(compact(r.tokens_cache))}`;
-    const last = r.last_tool ? `${r.last_tool}×${r.tool_count}` : "-";
+    // Task column: prefer current_task (file path / command), fall back to "<tool>×<count>".
+    let task = r.current_task;
+    if (!task) task = r.last_tool ? `${r.last_tool}×${r.tool_count}` : "-";
     table.push([
-      `${statusBadge(r.status)} ${shortSessionId(r.session_id)}`,
+      `${liveBadge(r.status)} ${shortSessionId(r.session_id)}`,
       shortModel(r.model),
       proj.length > 15 ? proj.slice(0, 14) + "…" : proj,
       cpuColor(r.cpu_pct),
       formatMem(r.mem_kb),
       ctxColor(r.ctx_pct),
       tok,
-      last.length > 13 ? last.slice(0, 12) + "…" : last,
+      task.length > 13 ? task.slice(0, 12) + "…" : task,
     ]);
   }
   return table.toString();
@@ -429,9 +608,15 @@ export function registerMonitorCommand(program: Command): void {
 
       // Watch mode.
       resetCpuSampler();
-      let previous = new Map<string, { status: RunStatus; tool: string | null }>();
+      // Track status with the tick it was first seen at, so we can suppress
+      // chatty transitions (thinking ↔ executing) until they hold for ≥2 ticks.
+      let previous = new Map<string, { status: LiveStatus; since: number; tool: string | null }>();
       let tick = 0;
       let stopped = false;
+      // Re-read state files only when their mtime advances. The session index
+      // is the dominant cost on large fleets (12MB+ JSON parse) and changes
+      // rarely, so mtime-checking it avoids re-parsing on every 3s tick.
+      const caches: SnapshotCaches = {};
       const stop = () => {
         if (stopped) return;
         stopped = true;
@@ -440,28 +625,41 @@ export function registerMonitorCommand(program: Command): void {
       };
       process.on("SIGINT", stop);
 
+      const TERMINAL_STATES: ReadonlySet<LiveStatus> = new Set(["done", "rate_limited"]);
+
       const renderOnce = async () => {
         tick++;
-        const snap = await buildSnapshot(snapshotOpts);
+        const snap = await buildSnapshot(snapshotOpts, caches);
         const all = [...snap.pinned, ...snap.recent];
-        const current = new Map<string, { status: RunStatus; tool: string | null }>(
+        const current = new Map<string, { status: LiveStatus; tool: string | null }>(
           all.map((r) => [r.session_id, { status: r.status, tool: r.last_tool }])
         );
 
         const events: string[] = [];
+        const next = new Map<string, { status: LiveStatus; since: number; tool: string | null }>();
         for (const [sid, cur] of current) {
           const prev = previous.get(sid);
+          // Carry forward the "since" tick when the status hasn't changed; otherwise reset.
+          const since = prev && prev.status === cur.status ? prev.since : tick;
+          next.set(sid, { status: cur.status, since, tool: cur.tool });
+
           if (!prev) continue;
           if (prev.status !== cur.status) {
-            events.push(
-              `[${new Date().toISOString().slice(11, 19)}] ${shortSessionId(sid)} ${prev.status} → ${cur.status}`
-            );
+            // Suppress churn: only emit on terminal transitions or after the new
+            // state has held for ≥ 2 ticks.
+            const isTerminal = TERMINAL_STATES.has(cur.status);
+            const stable = tick - since >= 1; // since===tick means first observation; ≥1 means seen at least twice
+            if (isTerminal || stable) {
+              events.push(
+                `[${new Date().toISOString().slice(11, 19)}] ${shortSessionId(sid)} ${prev.status} → ${cur.status}`
+              );
+            }
           }
           if (prev.tool !== cur.tool && cur.tool) {
             events.push(`[${new Date().toISOString().slice(11, 19)}] ${shortSessionId(sid)} tool ${prev.tool ?? "-"} → ${cur.tool}`);
           }
         }
-        previous = current;
+        previous = next;
 
         clearScreen();
         const filterLine = catalogFilter ? chalk.gray(`catalog: ${catalogFilter}\n`) : "";
@@ -472,9 +670,24 @@ export function registerMonitorCommand(program: Command): void {
       };
 
       await renderOnce();
+      // Coalesce ticks: never start a new render while one is in flight, and
+      // never schedule a fresh one closer than TICK_MS from the previous start.
+      // This prevents pile-up on slow systems (large fleets, slow disks) where
+      // a single render can take longer than the tick interval.
+      const TICK_MS = 3000;
+      let renderInFlight = false;
+      let lastStart = 0;
       const interval = setInterval(() => {
-        renderOnce().catch(() => undefined);
-      }, 3000);
+        if (renderInFlight) return;
+        if (Date.now() - lastStart < TICK_MS) return;
+        renderInFlight = true;
+        lastStart = Date.now();
+        renderOnce()
+          .catch(() => undefined)
+          .finally(() => {
+            renderInFlight = false;
+          });
+      }, 500);
       interval.unref?.();
     });
 

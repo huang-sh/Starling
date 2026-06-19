@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from "fs";
 import { dirname, join } from "path";
-import { CLAUDE_SESSIONS_DIR, CODEX_SESSIONS_DIR, DEFAULT_STARLING_HOME } from "../constants.js";
+import { DEFAULT_STARLING_HOME, claudeSessionRoots, codexSessionRoots } from "../constants.js";
 import { atomicWriteJSON } from "../utils/fs.js";
 import { streamSessions } from "./discovery.js";
 import { extractClaudeSessionMeta, extractCodexSessionMeta, parseJsonlFile, parseJsonlHead } from "./session.js";
@@ -269,8 +269,8 @@ export function isSessionIndexFresh(provider?: Provider, now: number = Date.now(
   if (now - builtAt < LOOKUP_FRESH_TTL_MS) return true;
 
   const roots: string[] = [];
-  if (!provider || provider === "claude") roots.push(CLAUDE_SESSIONS_DIR);
-  if (!provider || provider === "codex") roots.push(CODEX_SESSIONS_DIR);
+  if (!provider || provider === "claude") roots.push(...claudeSessionRoots());
+  if (!provider || provider === "codex") roots.push(...codexSessionRoots());
 
   for (const root of roots) {
     try {
@@ -462,8 +462,12 @@ function indexedFilesFromSessions(sessions: SessionMeta[]): IndexedSessionFile[]
 
 function collectSessionDirectoryEntries(provider?: Provider): IndexedSessionDirectory[] {
   const roots: Array<{ provider: Provider; path: string }> = [];
-  if (!provider || provider === "claude") roots.push({ provider: "claude", path: CLAUDE_SESSIONS_DIR });
-  if (!provider || provider === "codex") roots.push({ provider: "codex", path: CODEX_SESSIONS_DIR });
+  if (!provider || provider === "claude") {
+    for (const path of claudeSessionRoots()) roots.push({ provider: "claude", path });
+  }
+  if (!provider || provider === "codex") {
+    for (const path of codexSessionRoots()) roots.push({ provider: "codex", path });
+  }
 
   const directories: IndexedSessionDirectory[] = [];
   for (const root of roots) {
@@ -509,8 +513,12 @@ function collectNewSessionFileEntries(
   indexedPaths: Set<string>
 ): { newFiles: SessionFileEntry[]; directories: IndexedSessionDirectory[] } {
   const roots: Array<{ provider: Provider; path: string }> = [];
-  if (!provider || provider === "claude") roots.push({ provider: "claude", path: CLAUDE_SESSIONS_DIR });
-  if (!provider || provider === "codex") roots.push({ provider: "codex", path: CODEX_SESSIONS_DIR });
+  if (!provider || provider === "claude") {
+    for (const path of claudeSessionRoots()) roots.push({ provider: "claude", path });
+  }
+  if (!provider || provider === "codex") {
+    for (const path of codexSessionRoots()) roots.push({ provider: "codex", path });
+  }
 
   const previousDirectories = index.directories ?? [];
   const previousDirMtimes = new Map(previousDirectories.map((entry) => [entry.path, entry.mtimeMs]));
@@ -598,8 +606,8 @@ function collectNewSessionFileEntriesInDir(
 
 function newestSessionRootMtime(provider?: "claude" | "codex"): number {
   const dirs: string[] = [];
-  if (!provider || provider === "claude") dirs.push(CLAUDE_SESSIONS_DIR);
-  if (!provider || provider === "codex") dirs.push(CODEX_SESSIONS_DIR);
+  if (!provider || provider === "claude") dirs.push(...claudeSessionRoots());
+  if (!provider || provider === "codex") dirs.push(...codexSessionRoots());
 
   let newest = 0;
   for (const dir of dirs) {
