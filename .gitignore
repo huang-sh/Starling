@@ -1,42 +1,6 @@
-# Dependencies
 node_modules/
-
-# Build output
-dist/
-!dist/
-!dist/index.js
-out/
-*.tsbuildinfo
-
-# Test and tooling caches
-coverage/
-.vite/
-node_modules/.vite/
-.vitest/
-
-# Local Starling / agent state
-.starling/
-.claude/
-
-# Environment files
-.env
-.env.*
-
-# VS Code extension packages
-*.vsix
-*.tgz
-
-# Logs
+npm/vendor/
+rust/target/
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# OS/editor noise
 .DS_Store
-Thumbs.db
-
-Starling.png
-starling_logo.svg
-note.md
+.claude/
