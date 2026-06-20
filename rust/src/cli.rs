@@ -75,7 +75,7 @@ pub enum Command {
 
     /// Live top-style view of agent sessions
     #[command(alias = "monitor")]
-    Top(#[command(flatten)] MonitorCommand),
+    Top(#[command(flatten)] TopCommand),
 
     /// Resume an agent session directly
     Resume {
@@ -634,6 +634,15 @@ pub enum StatusCommand {
 }
 
 #[derive(Args)]
+pub struct TopCommand {
+    #[command(subcommand)]
+    pub action: Option<TopAction>,
+
+    #[command(flatten)]
+    pub monitor: MonitorCommand,
+}
+
+#[derive(Args)]
 pub struct MonitorCommand {
     /// Filter to a catalog's pinned sessions (name, path, or id)
     #[arg(num_args = 0..=1)]
@@ -651,13 +660,61 @@ pub struct MonitorCommand {
     #[arg(long, visible_alias = "unpin", visible_alias = "unpinned")]
     pub recent: bool,
 
-    /// Live monitoring mode (re-render every 3s)
+    /// Live monitoring mode (re-render every 1s)
     #[arg(long)]
     pub watch: bool,
 
     /// Output the current snapshot as JSON
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Subcommand)]
+pub enum TopAction {
+    /// Record runtime terminal state for a session
+    Record {
+        /// Session ID to update
+        session_id: String,
+        /// Status: busy | waiting | permission | idle | running | stopped
+        #[arg(long)]
+        status: Option<String>,
+        /// Parse an OSC 0/2 title payload
+        #[arg(long)]
+        title: Option<String>,
+        /// Parse a raw OSC escape sequence payload or full escape sequence
+        #[arg(long)]
+        sequence: Option<String>,
+        /// Parse an OSC 9;4 progress level
+        #[arg(long)]
+        progress: Option<u8>,
+        /// Live agent process pid
+        #[arg(long)]
+        pid: Option<u32>,
+        /// Starling run id, when known
+        #[arg(long)]
+        run_id: Option<String>,
+        /// Human-readable message or notification body
+        #[arg(long)]
+        message: Option<String>,
+        /// State source label
+        #[arg(long, default_value = "manual")]
+        source: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Clear cached runtime terminal state for a session
+    Clear {
+        /// Session ID to clear
+        session_id: String,
+        /// Only clear this pid
+        #[arg(long)]
+        pid: Option<u32>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 impl Cli {

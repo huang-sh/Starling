@@ -30,6 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.parse.outputs.version }}
+      npm_tag: ${{ steps.parse.outputs.npm_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,12 +48,18 @@ jobs:
             # workflow_dispatch: read from Cargo.toml
             version="$(grep -m1 '^version' rust/Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')"
           fi
+          if [[ "${version}" == *-* ]]; then
+            npm_tag="preview"
+          else
+            npm_tag="latest"
+          fi
           # Cross-check with Cargo.toml
           cargo_ver="$(grep -m1 '^version' rust/Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')"
           [[ "${version}" == "${cargo_ver}" ]] \
             || { echo "❌ Tag ${version} ≠ Cargo.toml ${cargo_ver}"; exit 1; }
           echo "version=${version}" >> $GITHUB_OUTPUT
-          echo "✅ Releasing version ${version}"
+          echo "npm_tag=${npm_tag}" >> $GITHUB_OUTPUT
+          echo "✅ Releasing version ${version} with npm dist-tag ${npm_tag}"
 
   build:
     needs: tag-check
@@ -67,10 +74,6 @@ jobs:
             target: x86_64-unknown-linux-musl
             platform: linux
             arch: x64
-          - runner: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            platform: linux
-            arch: arm64
           - runner: macos-15-intel
             target: x86_64-apple-darwin
             platform: darwin
@@ -159,9 +162,10 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ needs.tag-check.outputs.version }}
+          NPM_TAG: ${{ needs.tag-check.outputs.npm_tag }}
         run: |
           set -euo pipefail
-          for triple in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+          for triple in linux-x64 darwin-x64 darwin-arm64; do
             pkg="starling-${triple}"
             src="artifacts/${pkg}"
             [[ -d "${src}" ]] || { echo "❌ Missing artifact for ${pkg}"; exit 1; }
@@ -169,8 +173,8 @@ jobs:
             tar -xzf "${src}/${pkg}-${VERSION}.tar.gz" -C "publish/${pkg}"
             # Verify checksum
             (cd "${src}" && sha256sum -c "${pkg}-${VERSION}.tar.gz.sha256sum")
-            (cd "publish/${pkg}" && npm publish --access public --provenance)
-            echo "✅ Published ${pkg}@${VERSION}"
+            (cd "publish/${pkg}" && npm publish --access public --provenance --tag "${NPM_TAG}")
+            echo "✅ Published ${pkg}@${VERSION} (${NPM_TAG})"
           done
 
       - name: Publish meta-package
@@ -178,6 +182,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ needs.tag-check.outputs.version }}
+          NPM_TAG: ${{ needs.tag-check.outputs.npm_tag }}
         run: |
           set -euo pipefail
           cd npm
@@ -195,5 +200,5 @@ jobs:
           mkdir -p scripts
           cp ../scripts/install-agent-skills.js scripts/
           cp -R ../skills .
-          npm publish --access public --provenance
-          echo "✅ Published starling-ai@${VERSION}"
+          npm publish --access public --provenance --tag "${NPM_TAG}"
+          echo "✅ Published starling-ai@${VERSION} (${NPM_TAG})"

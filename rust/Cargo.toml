@@ -1,6 +1,6 @@
 [package]
 name = "starling"
-version = "0.1.0"
+version = "0.1.0-preview.0"
 edition = "2021"
 description = "Agent session manager — discover, pin, and organize AI coding sessions"
 license = "MIT"

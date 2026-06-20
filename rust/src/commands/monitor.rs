@@ -2,25 +2,61 @@
 
 use std::collections::HashSet;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use colored::*;
 
-use crate::cli::MonitorCommand;
+use crate::cli::{MonitorCommand, TopAction, TopCommand};
 use crate::core::catalog_resolver::{catalog_path, resolve_catalog_reference};
 use crate::core::discovery::match_session_id;
+use crate::core::osc_state::{
+    clear_osc_state, normalize_status, prune_stale_osc_state, recent_osc_state,
+    status_from_osc0_title, status_from_osc94_progress, status_from_osc_sequence,
+    upsert_osc_state, OscSessionState,
+};
 use crate::core::process_metrics::{get_process_tree_metrics, reset_cpu_sampler};
 use crate::core::runs::{detect_running_sessions, reconcile_stale_runs};
 use crate::core::session_display::short_session_id;
 use crate::core::session_index::load_session_index;
-use crate::core::session_metrics::{clear_session_metrics_cache, get_session_live_metrics, ChatRole, SessionLive};
+use crate::core::session_metrics::{
+    clear_session_metrics_cache, get_session_live_metrics, ChatRole, SessionLive,
+};
 use crate::core::store::{list_bookmarks, list_spaces, BookmarkFilter};
 use crate::types::{Bookmark, SessionMeta};
 
-pub fn handle(cmd: MonitorCommand) -> Result<()> {
+const WATCH_INTERVAL_MS: u64 = 1000;
+const STALE_PENDING_MS: u64 = 5 * 60 * 1000;
+const REALTIME_SUPERSEDE_GRACE_MS: u64 = 500;
+
+pub fn handle(cmd: TopCommand) -> Result<()> {
+    match cmd.action {
+        Some(TopAction::Record {
+            session_id,
+            status,
+            title,
+            sequence,
+            progress,
+            pid,
+            run_id,
+            message,
+            source,
+            json,
+        }) => record_runtime_state(
+            session_id, status, title, sequence, progress, pid, run_id, message, source, json,
+        ),
+        Some(TopAction::Clear {
+            session_id,
+            pid,
+            json,
+        }) => clear_runtime_state(session_id, pid, json),
+        None => render_monitor(cmd.monitor),
+    }
+}
+
+fn render_monitor(cmd: MonitorCommand) -> Result<()> {
     let catalog_filter = cmd.catalog_filter.or(cmd.catalog);
     let limit = cmd.limit.unwrap_or(30);
 
@@ -49,6 +85,102 @@ pub fn handle(cmd: MonitorCommand) -> Result<()> {
     Ok(())
 }
 
+fn record_runtime_state(
+    session_id: String,
+    status: Option<String>,
+    title: Option<String>,
+    sequence: Option<String>,
+    progress: Option<u8>,
+    pid: Option<u32>,
+    run_id: Option<String>,
+    mut message: Option<String>,
+    source: String,
+    json: bool,
+) -> Result<()> {
+    let (resolved_status, parsed_source, parsed_message) =
+        resolve_recorded_status(status.as_deref(), title.as_deref(), sequence.as_deref(), progress)?;
+    if message.is_none() {
+        message = parsed_message;
+    }
+    let state = OscSessionState {
+        session_id,
+        pid,
+        run_id,
+        status: resolved_status,
+        message,
+        source: if source == "manual" {
+            parsed_source
+        } else {
+            source
+        },
+        updated_at_ms: now_ms(),
+    };
+    let store = upsert_osc_state(state.clone())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "action": "top.record",
+                "data": {
+                    "state": state,
+                    "count": store.sessions.len(),
+                }
+            }))?
+        );
+    } else {
+        println!(
+            "{} {} {}",
+            "recorded".green(),
+            state.session_id.cyan(),
+            state.status.bold()
+        );
+    }
+    Ok(())
+}
+
+fn clear_runtime_state(session_id: String, pid: Option<u32>, json: bool) -> Result<()> {
+    let store = clear_osc_state(&session_id, pid)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "action": "top.clear",
+                "data": {
+                    "session_id": session_id,
+                    "pid": pid,
+                    "count": store.sessions.len(),
+                }
+            }))?
+        );
+    } else {
+        println!("{} {}", "cleared".green(), session_id.cyan());
+    }
+    Ok(())
+}
+
+fn resolve_recorded_status(
+    status: Option<&str>,
+    title: Option<&str>,
+    sequence: Option<&str>,
+    progress: Option<u8>,
+) -> Result<(String, String, Option<String>)> {
+    if let Some(status) = status.and_then(normalize_status) {
+        return Ok((status, "manual".to_string(), None));
+    }
+    if let Some((status, source, message)) = sequence.and_then(status_from_osc_sequence) {
+        return Ok((status, source, message));
+    }
+    if let Some(status) = title.and_then(status_from_osc0_title) {
+        return Ok((status, "osc0".to_string(), title.map(|s| s.to_string())));
+    }
+    if let Some(status) = progress.and_then(status_from_osc94_progress) {
+        return Ok((status, "osc9;4".to_string(), None));
+    }
+    bail!("status is required unless --sequence, --title, or --progress contains a known OSC state")
+}
+
 /// A single row in the monitor table — combines a bookmark (pinned session)
 /// or a discovered session with live runtime metrics.
 #[derive(Clone)]
@@ -73,6 +205,11 @@ struct RowJson {
     provider: String,
     model: String,
     status: String,
+    status_source: String,
+    status_realtime: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status_signal: Option<String>,
+    status_updated_at_ms: u64,
     pid: Option<u32>,
     cpu_pct: f64,
     mem_kb: u64,
@@ -114,9 +251,27 @@ struct MonitorSnapshot {
 impl From<&Row> for RowJson {
     fn from(r: &Row) -> Self {
         let live = live_for(&r.file_path);
-        let (cpu, mem_kb) = process_for(r.pid);
-        let status = infer_status(r.pid.is_some(), &live, &r.title);
+        let (cpu, mem_kb, process_count) = process_for(r.pid);
         let now_ms = now_ms();
+        let osc = recent_osc_state(&r.session_id, r.pid, now_ms);
+        let effective_osc = effective_realtime_state(osc.as_ref(), &live);
+        let inferred = infer_status(
+            r.pid.is_some(),
+            &live,
+            &r.title,
+            effective_osc,
+            now_ms,
+            process_count,
+        );
+        let status_realtime = inferred.realtime;
+        let status_source = if status_realtime {
+            "realtime".to_string()
+        } else {
+            "transcript".to_string()
+        };
+        let status_updated_at_ms = effective_osc
+            .map(|s| s.updated_at_ms)
+            .unwrap_or(live.last_activity_ms);
         let started_at_ms = live.started_at_ms;
         let elapsed_secs = if started_at_ms > 0 && now_ms > started_at_ms {
             (now_ms - started_at_ms) / 1000
@@ -129,8 +284,16 @@ impl From<&Row> for RowJson {
             catalog: r.catalog.clone(),
             title: r.title.clone(),
             provider: r.provider.clone(),
-            model: if live.model.is_empty() { r.model.clone() } else { live.model.clone() },
-            status,
+            model: if live.model.is_empty() {
+                r.model.clone()
+            } else {
+                live.model.clone()
+            },
+            status: inferred.status,
+            status_source,
+            status_realtime,
+            status_signal: inferred.signal,
+            status_updated_at_ms,
             pid: r.pid,
             cpu_pct: cpu,
             mem_kb,
@@ -177,51 +340,152 @@ impl MonitorSnapshot {
     }
 }
 
-fn process_for(pid: Option<u32>) -> (f64, u64) {
+fn process_for(pid: Option<u32>) -> (f64, u64, usize) {
     if let Some(p) = pid.filter(|&p| p > 0) {
         let m = get_process_tree_metrics(p);
-        (m.cpu_pct, m.mem_kb)
+        (m.cpu_pct, m.mem_kb, m.pids.len())
     } else {
-        (0.0, 0)
+        (0.0, 0, 0)
     }
 }
 
 fn live_for(file_path: &Option<String>) -> SessionLive {
     match file_path.as_deref() {
-        Some(path) => get_session_live_metrics(Path::new(path)),
+        Some(path) => {
+            let path = Path::new(path);
+            let mut live = get_session_live_metrics(path);
+            merge_latest_subagent_live(path, &mut live);
+            live
+        }
         None => SessionLive { ctx_pct: -1, ..Default::default() },
     }
+}
+
+fn merge_latest_subagent_live(parent_path: &Path, live: &mut SessionLive) {
+    let Some(subagent_path) = latest_subagent_jsonl(parent_path) else {
+        return;
+    };
+    let sub_live = get_session_live_metrics(&subagent_path);
+    if sub_live.last_activity_ms <= live.last_activity_ms {
+        return;
+    }
+
+    if live.model.is_empty() && !sub_live.model.is_empty() {
+        live.model = sub_live.model.clone();
+    }
+    live.last_activity_ms = sub_live.last_activity_ms;
+    live.pending_since_ms = sub_live.pending_since_ms;
+    live.thinking_since_ms = sub_live.thinking_since_ms;
+    live.current_task = sub_live.current_task.clone();
+    live.last_tool = sub_live.last_tool.clone().or_else(|| live.last_tool.clone());
+    live.tool_count = live.tool_count.saturating_add(sub_live.tool_count);
+    live.tool_calls_tail = sub_live.tool_calls_tail.clone();
+    live.chat_tail = sub_live.chat_tail.clone();
+}
+
+fn latest_subagent_jsonl(parent_path: &Path) -> Option<PathBuf> {
+    let subagents_dir = parent_path.with_extension("").join("subagents");
+    let entries = std::fs::read_dir(subagents_dir).ok()?;
+    entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                return None;
+            }
+            let mtime = entry.metadata().ok()?.modified().ok()?;
+            let ms = mtime
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_millis() as u64;
+            Some((ms, path))
+        })
+        .max_by_key(|(ms, _)| *ms)
+        .map(|(_, path)| path)
 }
 
 fn now_ms() -> u64 {
     chrono::Utc::now().timestamp_millis().max(0) as u64
 }
 
-fn infer_status(running: bool, live: &SessionLive, title: &str) -> String {
+fn effective_realtime_state<'a>(
+    osc: Option<&'a OscSessionState>,
+    live: &SessionLive,
+) -> Option<&'a OscSessionState> {
+    let state = osc?;
+    if live.last_activity_ms > state.updated_at_ms.saturating_add(REALTIME_SUPERSEDE_GRACE_MS) {
+        return None;
+    }
+    Some(state)
+}
+
+#[derive(Clone)]
+struct StatusGuess {
+    status: String,
+    signal: Option<String>,
+    realtime: bool,
+}
+
+fn infer_status(
+    running: bool,
+    live: &SessionLive,
+    title: &str,
+    osc: Option<&OscSessionState>,
+    now_ms: u64,
+    process_count: usize,
+) -> StatusGuess {
     if !running {
-        return "stopped".to_string();
+        return status_guess("stopped", None, false);
+    }
+    if let Some(state) = osc {
+        return status_guess(&state.status, Some(&state.source), true);
     }
     if looks_like_permission(title)
         || looks_like_permission(&live.current_task)
         || live.chat_tail.iter().any(|m| looks_like_permission(&m.text))
     {
-        return "permission".to_string();
+        return status_guess("permission", Some("permission_text"), false);
+    }
+    if live.pending_since_ms > 0 {
+        let last_signal_ms = live.last_activity_ms.max(live.pending_since_ms);
+        if now_ms.saturating_sub(last_signal_ms) > STALE_PENDING_MS {
+            if process_count <= 1 {
+                return status_guess("permission", Some("attention_pending_tool"), false);
+            }
+            return status_guess("idle", Some("stale_pending_tool"), false);
+        }
+        return status_guess("busy", Some("pending_tool"), false);
+    }
+    if live.thinking_since_ms > 0 {
+        if now_ms.saturating_sub(live.thinking_since_ms) > STALE_PENDING_MS {
+            return status_guess("idle", Some("stale_thinking"), false);
+        }
+        return status_guess("running", Some("thinking"), false);
     }
     let last_role = live.chat_tail.last().map(|m| m.role);
-    if live.current_task.is_empty()
-        && live.pending_since_ms == 0
-        && matches!(last_role, Some(ChatRole::Assistant))
-    {
-        return "waiting".to_string();
+    if live.pending_since_ms == 0 && matches!(last_role, Some(ChatRole::Assistant)) {
+        return status_guess("idle", Some("assistant_ready"), false);
     }
-    if live.pending_since_ms > 0 || live.thinking_since_ms > 0 || !live.current_task.is_empty() {
-        return "busy".to_string();
+    if !live.current_task.is_empty() {
+        let last_signal_ms = live.last_activity_ms.max(live.thinking_since_ms);
+        if now_ms.saturating_sub(last_signal_ms) > STALE_PENDING_MS {
+            return status_guess("idle", Some("stale_task"), false);
+        }
+        return status_guess("busy", Some("current_task"), false);
     }
-    "idle".to_string()
+    status_guess("idle", Some("process_alive"), false)
+}
+
+fn status_guess(status: &str, signal: Option<&str>, realtime: bool) -> StatusGuess {
+    StatusGuess {
+        status: status.to_string(),
+        signal: signal.map(|s| s.to_string()),
+        realtime,
+    }
 }
 
 fn is_active_status(status: &str) -> bool {
-    matches!(status, "permission" | "waiting" | "busy" | "running" | "idle")
+    matches!(status, "permission" | "busy" | "running")
 }
 
 fn looks_like_permission(s: &str) -> bool {
@@ -230,6 +494,10 @@ fn looks_like_permission(s: &str) -> bool {
         || s.contains("approval")
         || s.contains("needs your")
         || s.contains("wants to enter")
+        || s.contains("requires approval")
+        || s.contains("do you want to proceed")
+        || s.contains("awaiting approval")
+        || s.contains("permission prompt")
 }
 
 fn render_table(rows: &[Row]) -> String {
@@ -251,11 +519,31 @@ fn render_table(rows: &[Row]) -> String {
 
 fn render_compact_row(row: &Row, width: usize) -> Vec<String> {
     let live = live_for(&row.file_path);
-    let (cpu, mem_kb) = process_for(row.pid);
-    let status = infer_status(row.pid.is_some(), &live, &row.title);
+    let (cpu, mem_kb, process_count) = process_for(row.pid);
+    let now_ms = now_ms();
+    let osc = recent_osc_state(&row.session_id, row.pid, now_ms);
+    let effective_osc = effective_realtime_state(osc.as_ref(), &live);
+    let inferred = infer_status(
+        row.pid.is_some(),
+        &live,
+        &row.title,
+        effective_osc,
+        now_ms,
+        process_count,
+    );
+    let status = inferred.status;
     let status_padding = " ".repeat(10usize.saturating_sub(status.chars().count()));
-    let status_cell = format!("{} {}{}", status_symbol(&status), style_status(&status), status_padding);
-    let agent = if row.provider.is_empty() { "-" } else { row.provider.as_str() };
+    let status_cell = format!(
+        "{} {}{}",
+        status_symbol(&status),
+        style_status(&status),
+        status_padding
+    );
+    let agent = if row.provider.is_empty() {
+        "-"
+    } else {
+        row.provider.as_str()
+    };
     let model = if !live.model.is_empty() {
         live.model.as_str()
     } else if !row.model.is_empty() {
@@ -264,7 +552,11 @@ fn render_compact_row(row: &Row, width: usize) -> Vec<String> {
         "-"
     };
     let session = short_session_id(&row.session_id);
-    let title = if row.title.trim().is_empty() { "-" } else { row.title.trim() };
+    let title = if row.title.trim().is_empty() {
+        "-"
+    } else {
+        row.title.trim()
+    };
 
     let fixed = format!(
         "{} {:<7} {:<15} {:<14} ",
@@ -276,7 +568,15 @@ fn render_compact_row(row: &Row, width: usize) -> Vec<String> {
     let title_width = width.saturating_sub(54).max(18);
     let line1 = format!("{}{}", fixed, truncate_chars(title, title_width));
 
-    let metrics = render_metrics(&status, &live, cpu, mem_kb, row);
+    let metrics = render_metrics(
+        &status,
+        &live,
+        cpu,
+        mem_kb,
+        row,
+        effective_osc,
+        inferred.signal.as_deref(),
+    );
     if metrics.is_empty() {
         vec![line1]
     } else {
@@ -285,7 +585,15 @@ fn render_compact_row(row: &Row, width: usize) -> Vec<String> {
     }
 }
 
-fn render_metrics(_status: &str, live: &SessionLive, cpu: f64, mem_kb: u64, row: &Row) -> String {
+fn render_metrics(
+    _status: &str,
+    live: &SessionLive,
+    cpu: f64,
+    mem_kb: u64,
+    row: &Row,
+    osc: Option<&OscSessionState>,
+    signal: Option<&str>,
+) -> String {
     let mut parts = Vec::new();
     if !row.pinned {
         parts.push("unpinned".to_string());
@@ -311,6 +619,11 @@ fn render_metrics(_status: &str, live: &SessionLive, cpu: f64, mem_kb: u64, row:
     if let Some(catalog) = row.catalog.as_deref().filter(|s| !s.is_empty()) {
         parts.push(format!("catalog {}", truncate_left(catalog, 34)));
     }
+    if let Some(state) = osc {
+        parts.push(format!("osc {}", state.source));
+    } else if let Some(signal) = signal {
+        parts.push(format!("signal {signal}"));
+    }
     parts.join("  ")
 }
 
@@ -321,8 +634,19 @@ fn render_summary(rows: &[Row]) -> String {
         .iter()
         .filter(|row| {
             let live = live_for(&row.file_path);
-            let status = infer_status(row.pid.is_some(), &live, &row.title);
-            is_active_status(&status)
+            let now_ms = now_ms();
+            let osc = recent_osc_state(&row.session_id, row.pid, now_ms);
+            let effective_osc = effective_realtime_state(osc.as_ref(), &live);
+            let (_cpu, _mem_kb, process_count) = process_for(row.pid);
+            let inferred = infer_status(
+                row.pid.is_some(),
+                &live,
+                &row.title,
+                effective_osc,
+                now_ms,
+                process_count,
+            );
+            is_active_status(&inferred.status)
         })
         .count();
     if unpinned > 0 {
@@ -391,6 +715,7 @@ fn style_status(status: &str) -> ColoredString {
 /// detection to attach pid + live metrics where available.
 fn build_snapshot(catalog_filter: Option<&str>, include_recent: bool, pinned_limit: usize) -> Result<Vec<Row>> {
     reconcile_stale_runs();
+    let _ = prune_stale_osc_state(now_ms());
 
     // Resolve catalog filter (if any) → space id
     let target_space_id = if let Some(c) = catalog_filter {
@@ -549,7 +874,7 @@ fn dedupe_rows_by_session_id(rows: &mut Vec<Row>) {
 }
 
 fn watch_json(catalog_filter: Option<&str>, include_recent: bool, pinned_limit: usize) -> Result<()> {
-    let interval_ms: u64 = 3000;
+    let interval_ms: u64 = WATCH_INTERVAL_MS;
     install_ctrlc_handler();
     reset_cpu_sampler();
 
@@ -582,7 +907,7 @@ fn write_stdout_line(line: &str) -> Result<bool> {
 }
 
 fn watch(catalog_filter: Option<&str>, include_recent: bool, pinned_limit: usize) -> Result<()> {
-    let interval_ms: u64 = 3000;
+    let interval_ms: u64 = WATCH_INTERVAL_MS;
     install_ctrlc_handler();
     reset_cpu_sampler();
 
@@ -599,11 +924,13 @@ fn watch(catalog_filter: Option<&str>, include_recent: bool, pinned_limit: usize
         // Clear screen + render
         print!("\x1b[2J\x1b[H");
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        let refresh_secs = interval_ms as f64 / 1000.0;
         let _ = io::stdout().write_all(format!(
-            "{} {}  ({} sessions · refresh 3.0s · Ctrl-C to exit)\n\n",
+            "{} {}  ({} sessions · refresh {:.1}s · Ctrl-C to exit)\n\n",
             "starling top".cyan().bold(),
             now.to_string().normal(),
             rows.len(),
+            refresh_secs,
         ).as_bytes());
         let _ = io::stdout().flush();
         if rows.is_empty() {

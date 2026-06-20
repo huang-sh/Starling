@@ -37,17 +37,14 @@ function renderSummary(snapshot) {
 }
 function renderDashboard(snapshot, rows, width, nowMs) {
     const statusCounts = countStatuses(rows);
-    const active = rows.filter((row) => activeRank(row.status) < 5);
-    const totalCpu = active.reduce((sum, row) => sum + Math.max(0, row.cpu_pct), 0);
-    const totalMemKb = rows.reduce((sum, row) => sum + Math.max(0, row.mem_kb), 0);
-    const maxCtx = rows.reduce((max, row) => Math.max(max, row.ctx_pct), -1);
     const tokenIn = rows.reduce((sum, row) => sum + row.tokens_in, 0);
     const tokenOut = rows.reduce((sum, row) => sum + row.tokens_out, 0);
     const tokenCache = rows.reduce((sum, row) => sum + row.tokens_cache, 0);
     const newest = rows.reduce((max, row) => Math.max(max, row.last_activity_ms), 0);
     const busy = statusCounts.get("busy") ?? 0;
     const running = statusCounts.get("running") ?? 0;
-    const waiting = (statusCounts.get("waiting") ?? 0) + (statusCounts.get("permission") ?? 0);
+    const idle = (statusCounts.get("idle") ?? 0) + (statusCounts.get("waiting") ?? 0);
+    const attention = statusCounts.get("permission") ?? 0;
     const stopped = statusCounts.get("stopped") ?? 0;
     const title = `${ansi.bold("Starling top")} ${ansi.gray(renderSummary(snapshot))}`;
     const clock = ansi.gray(formatClock(new Date(nowMs)));
@@ -55,11 +52,8 @@ function renderDashboard(snapshot, rows, width, nowMs) {
     const statusLine = statusChips(statusCounts);
     return [
         `${title}${" ".repeat(gap)}${clock}`,
-        dashboardLine("CPU", totalCpu, 100, `${totalCpu.toFixed(totalCpu < 10 ? 1 : 0)}%`, width),
-        dashboardLine("MEM", totalMemKb, maxMemScale(totalMemKb), formatMem(totalMemKb), width),
-        dashboardLine("CTX", Math.max(0, maxCtx), 100, maxCtx >= 0 ? `${maxCtx.toFixed(0)}% max` : "-", width),
         meta([
-            `tasks ${rows.length} total, ${snapshot.active} active, ${running} running, ${busy} busy, ${waiting} waiting, ${stopped} stopped`,
+            `tasks ${rows.length} total, ${snapshot.active} active, ${running} running, ${busy} busy, ${attention} attention, ${idle} idle, ${stopped} stopped`,
             `tokens ${compactNumber(tokenIn)}/${compactNumber(tokenOut)}/${compactNumber(tokenCache)}`,
             `last ${relativeTime(newest, nowMs) || "-"}`,
             statusLine || false,
@@ -78,7 +72,7 @@ function renderMonitorList(rows, width, nowMs) {
         ["S", columns.status],
         ["AGT", columns.agent],
         ["MODEL", columns.model],
-        ["PROJ", columns.project],
+        ["PID", columns.pid],
         ["CPU", columns.cpu],
         ["MEM", columns.mem],
         ["CTX", columns.ctx],
@@ -95,14 +89,13 @@ function renderMonitorList(rows, width, nowMs) {
     return lines.join("\n");
 }
 function formatMonitorRow(row, columns, nowMs, index) {
-    const project = basename(row.project_path || row.project || "-");
     const task = row.current_task.trim() || (row.last_tool ? `${row.last_tool}×${row.tool_count}` : row.title || "-");
     const cells = [
         padVisible(sessionCell(row), columns.session),
         padVisible(statusLetter(row.status), columns.status),
         padVisible(agentCell(row.provider), columns.agent),
         padVisible(shortModel(row.model), columns.model),
-        padVisible(project || "-", columns.project),
+        padVisible(pidCell(row.pid), columns.pid),
         padVisible(cpuCell(row.cpu_pct, columns.cpu), columns.cpu),
         padVisible(memCell(row.mem_kb), columns.mem),
         padVisible(ctxCell(row.ctx_pct, columns.ctx), columns.ctx),
@@ -132,11 +125,11 @@ function statusRank(status) {
     switch (status) {
         case "permission":
             return 0;
-        case "waiting":
+        case "running":
             return 1;
         case "busy":
             return 2;
-        case "running":
+        case "waiting":
             return 3;
         case "idle":
             return 4;
@@ -151,10 +144,8 @@ function statusRank(status) {
 function activeRank(status) {
     switch (status) {
         case "permission":
-        case "waiting":
         case "busy":
         case "running":
-        case "idle":
             return 0;
         default:
             return 9;
@@ -171,10 +162,10 @@ function compactNumber(value) {
 }
 function topColumns(width) {
     const fixed = width >= 126
-        ? { session: 14, status: 1, agent: 6, model: 13, project: 16, cpu: 12, mem: 8, ctx: 12, tokens: 16, age: 8 }
+        ? { session: 14, status: 1, agent: 6, model: 13, pid: 7, cpu: 12, mem: 8, ctx: 12, tokens: 16, age: 8 }
         : width >= 104
-            ? { session: 13, status: 1, agent: 5, model: 11, project: 13, cpu: 10, mem: 7, ctx: 10, tokens: 13, age: 7 }
-            : { session: 12, status: 1, agent: 6, model: 9, project: 10, cpu: 7, mem: 6, ctx: 6, tokens: 11, age: 6 };
+            ? { session: 13, status: 1, agent: 5, model: 11, pid: 7, cpu: 10, mem: 7, ctx: 10, tokens: 13, age: 7 }
+            : { session: 12, status: 1, agent: 6, model: 9, pid: 7, cpu: 7, mem: 6, ctx: 6, tokens: 11, age: 6 };
     const used = Object.values(fixed).reduce((sum, col) => sum + col, 0) + Object.keys(fixed).length;
     return { ...fixed, task: Math.max(12, width - used - 1) };
 }
@@ -184,13 +175,6 @@ function padVisible(value, width) {
 }
 function stripAnsi(value) {
     return value.replace(/\x1b\[[0-9;]*m/g, "");
-}
-function basename(value) {
-    if (!value || value === "-")
-        return "-";
-    const clean = value.replace(/\/+$/, "");
-    const idx = clean.lastIndexOf("/");
-    return idx >= 0 ? clean.slice(idx + 1) || clean : clean;
 }
 function shortModel(model) {
     if (!model)
@@ -205,6 +189,11 @@ function shortModel(model) {
     if (low.includes("gpt-5"))
         return model.length > 10 ? model.replace("gpt-", "g") : model;
     return model.length > 11 ? `${model.slice(0, 10)}…` : model;
+}
+function pidCell(pid) {
+    if (!pid || pid <= 0)
+        return "-";
+    return String(pid);
 }
 function sessionCell(row) {
     const id = shortSessionId(row.session_id);
@@ -278,24 +267,6 @@ function taskCell(task, row) {
         return ansi.yellow(task);
     return task;
 }
-function dashboardLine(label, value, max, text, width) {
-    const labelText = ansi.cyan(label.padStart(3));
-    const barWidth = Math.max(12, Math.min(42, width - visible(label) - visible(text) - 7));
-    const pct = max > 0 ? (value / max) * 100 : 0;
-    return `${labelText} ${wideBar(pct, barWidth)} ${text}`;
-}
-function wideBar(value, width) {
-    const clamped = Math.max(0, Math.min(100, value));
-    const filled = Math.round((clamped / 100) * width);
-    const bar = `${"█".repeat(filled)}${"░".repeat(Math.max(0, width - filled))}`;
-    if (clamped >= 90)
-        return ansi.red(bar);
-    if (clamped >= 70)
-        return ansi.yellow(bar);
-    if (clamped > 0)
-        return ansi.green(bar);
-    return ansi.gray(bar);
-}
 function tinyBar(value, width) {
     const clamped = Math.max(0, Math.min(100, value));
     const filled = Math.round((clamped / 100) * width);
@@ -309,16 +280,6 @@ function formatMem(kb) {
         return `${mb.toFixed(mb < 10 ? 1 : 0)}M`;
     return `${(mb / 1024).toFixed(2)}G`;
 }
-function maxMemScale(kb) {
-    if (kb <= 0)
-        return 1;
-    const mb = kb / 1024;
-    if (mb <= 1024)
-        return 1024 * 1024;
-    if (mb <= 4096)
-        return 4096 * 1024;
-    return 16384 * 1024;
-}
 function countStatuses(rows) {
     const counts = new Map();
     for (const row of rows)
@@ -326,7 +287,7 @@ function countStatuses(rows) {
     return counts;
 }
 function statusChips(counts) {
-    const statuses = ["busy", "permission", "waiting", "running", "idle", "unknown"];
+    const statuses = ["running", "busy", "permission", "idle", "waiting", "unknown"];
     return statuses
         .filter((status) => (counts.get(status) ?? 0) > 0)
         .map((status) => `${statusDot(status)} ${colorStatus(status)} ${counts.get(status)}`)

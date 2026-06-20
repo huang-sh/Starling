@@ -102,8 +102,16 @@ pub fn default_runs_path() -> PathBuf {
     }
 }
 
+pub fn default_osc_state_path() -> PathBuf {
+    match starling_home_value() {
+        (Some(_), _) => default_starling_home().join("osc-state.json"),
+        (None, _) => default_config_dir().join("osc-state.json"),
+    }
+}
+
 pub const STORE_VERSION: u32 = 1;
 pub const RUNS_VERSION: u32 = 1;
+pub const OSC_STATE_VERSION: u32 = 1;
 
 pub fn default_starling_settings_dir() -> PathBuf {
     default_starling_home().join("settings")

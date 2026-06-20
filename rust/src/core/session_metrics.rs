@@ -261,6 +261,9 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
                 thinking_since_ms = 0;
                 if !tool_uses.is_empty() {
                     pending_since_ms = if ts > 0 { ts } else { last_activity_ms };
+                } else if !blocks.text.is_empty() {
+                    pending_since_ms = 0;
+                    current_task.clear();
                 }
                 for t in blocks.text {
                     let t = t.trim();
@@ -271,6 +274,7 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
                 }
             } else if is_user {
                 pending_since_ms = 0;
+                current_task.clear();
                 thinking_since_ms = if ts > 0 { ts } else { last_activity_ms };
                 if !blocks.tool_result {
                     for t in blocks.text {
@@ -485,6 +489,24 @@ mod tests {
         assert_eq!(live.last_tool.as_deref(), Some("Bash"));
         assert_eq!(live.current_task, "ls -la");
         assert!(!live.chat_tail.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tool_result_clears_current_task() {
+        clear_session_metrics_cache();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("starling-metrics-{}-tool-result.jsonl",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        write_jsonl(&path, &[
+            r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"content":[{"type":"tool_use","id":"call_1","name":"Read","input":{"file_path":"/tmp/a"}}]}}"#,
+            r#"{"type":"user","timestamp":"2026-01-01T00:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call_1","content":"done"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","message":{"content":[{"type":"text","text":"Done."}]}}"#,
+        ]);
+        let live = get_session_live_metrics(&path);
+        assert_eq!(live.pending_since_ms, 0);
+        assert_eq!(live.current_task, "");
+        assert_eq!(live.last_tool.as_deref(), Some("Read"));
         let _ = std::fs::remove_file(&path);
     }
 

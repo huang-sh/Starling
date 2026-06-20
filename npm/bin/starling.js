@@ -64,19 +64,31 @@ if (!targetTriple) {
 
 const platformPackage = PLATFORM_PACKAGE_BY_TARGET[targetTriple];
 
+function compatibleTargetTriples(primary) {
+  const triples = [primary];
+  if (primary === "x86_64-unknown-linux-musl") {
+    triples.push("x86_64-unknown-linux-gnu");
+  } else if (primary === "aarch64-unknown-linux-musl") {
+    triples.push("aarch64-unknown-linux-gnu");
+  }
+  return triples;
+}
+
 function findStarlingExecutable() {
   // 1. Installed platform package (production install)
   try {
     const packageJsonPath = require.resolve(`${platformPackage}/package.json`);
     const vendorRoot = path.join(path.dirname(packageJsonPath), "vendor");
-    const candidate = path.join(
-      vendorRoot,
-      targetTriple,
-      "bin",
-      "starling",
-    );
-    if (existsSync(candidate)) {
-      return candidate;
+    for (const triple of compatibleTargetTriples(targetTriple)) {
+      const candidate = path.join(
+        vendorRoot,
+        triple,
+        "bin",
+        "starling",
+      );
+      if (existsSync(candidate)) {
+        return candidate;
+      }
     }
   } catch {
     // platform package not installed; fall through to dev path
@@ -85,12 +97,7 @@ function findStarlingExecutable() {
   // 2. Dev fallback — look for local cargo build output. scripts/build.sh
   // stages host builds under rustc's host triple, which is usually GNU on
   // Linux even though the published optional package uses the musl target.
-  const devTargetTriples = [targetTriple];
-  if (targetTriple === "x86_64-unknown-linux-musl") {
-    devTargetTriples.push("x86_64-unknown-linux-gnu");
-  } else if (targetTriple === "aarch64-unknown-linux-musl") {
-    devTargetTriples.push("aarch64-unknown-linux-gnu");
-  }
+  const devTargetTriples = compatibleTargetTriples(targetTriple);
   const devCandidates = [
     ...devTargetTriples.map((triple) =>
       path.join(__dirname, "..", "vendor", triple, "bin", "starling"),
