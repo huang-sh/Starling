@@ -60,6 +60,10 @@ PKG_NAME="${PKG_NAME}" VERSION="${VERSION}" PLATFORM="${PLATFORM}" ARCH="${ARCH}
     version: process.env.VERSION,
     description: "Pre-built starling binary for " + process.env.PLATFORM + "-" + process.env.ARCH,
     license: "MIT",
+    repository: {
+      type: "git",
+      url: "https://github.com/huang-sh/Starling",
+    },
     os: [process.env.PLATFORM],
     cpu: [process.env.ARCH],
     files: ["vendor/"],

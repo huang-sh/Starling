@@ -119,6 +119,10 @@ jobs:
             "version": "${{ needs.tag-check.outputs.version }}",
             "description": "Pre-built starling binary for ${{ matrix.platform }}-${{ matrix.arch }}",
             "license": "MIT",
+            "repository": {
+              "type": "git",
+              "url": "https://github.com/huang-sh/Starling"
+            },
             "os": ["${{ matrix.platform == 'linux' && 'linux' || 'darwin' }}"],
             "cpu": ["${{ matrix.arch == 'x64' && 'x64' || 'arm64' }}"],
             "files": ["vendor/"]
