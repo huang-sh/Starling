@@ -22,6 +22,9 @@ concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
 jobs:
   tag-check:
     runs-on: ubuntu-latest
@@ -29,6 +32,8 @@ jobs:
       version: ${{ steps.parse.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Parse version from tag
         id: parse
         shell: bash
@@ -77,6 +82,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -116,8 +123,9 @@ jobs:
           EOF
 
           # tar + checksum
-          tar -C "staging/${pkg_name}" -czf "${pkg_name}-${{ needs.tag-check.outputs.version }}.tar.gz" .
-          sha256sum "${pkg_name}-${{ needs.tag-check.outputs.version }}.tar.gz" > "${pkg_name}-${{ needs.tag-check.outputs.version }}.tar.gz.sha256sum"
+          tarball="staging/${pkg_name}-${{ needs.tag-check.outputs.version }}.tar.gz"
+          tar -C "staging/${pkg_name}" -czf "${tarball}" .
+          (cd staging && sha256sum "${pkg_name}-${{ needs.tag-check.outputs.version }}.tar.gz" > "${pkg_name}-${{ needs.tag-check.outputs.version }}.tar.gz.sha256sum")
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -133,6 +141,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:

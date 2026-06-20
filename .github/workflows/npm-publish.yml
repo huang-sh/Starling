@@ -1,42 +1,58 @@
-name: Publish npm package
+name: NPM package smoke
 
 on:
+  pull_request:
+    branches: [main, dev, rust]
   push:
-    tags:
-      - "v[0-9]*"
+    branches: [main, dev, rust]
   workflow_dispatch:
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: npm-package-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  publish:
+  pack:
+    name: Pack starling-ai
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
+          node-version: "22"
           cache: npm
 
-      - name: Install dependencies
+      - name: Install npm dependencies
         run: npm ci
 
-      - name: Check types
-        run: npm run lint
+      - name: Build TypeScript renderer
+        run: npm run build:ts
 
-      - name: Run tests
-        run: npm test
+      - name: Stage npm package assets
+        run: |
+          mkdir -p npm/scripts
+          cp scripts/install-agent-skills.js npm/scripts/
+          rm -rf npm/skills
+          cp -R skills npm/skills
 
-      - name: Build
-        run: npm run build
+      - name: Pack meta-package
+        run: |
+          mkdir -p dist
+          npm pack ./npm --pack-destination dist
 
-      - name: Publish to npm
-        run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Upload meta-package
+        uses: actions/upload-artifact@v4
+        with:
+          name: starling-ai-smoke
+          path: dist/starling-ai-*.tgz
+          if-no-files-found: error

@@ -14,10 +14,14 @@ concurrency:
   group: package-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
 jobs:
   package-native:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -38,6 +42,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -76,10 +82,13 @@ jobs:
   package-js:
     name: starling-ai npm package
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -92,6 +101,13 @@ jobs:
 
       - name: Build TypeScript renderer
         run: npm run build:ts
+
+      - name: Stage npm package assets
+        run: |
+          mkdir -p npm/scripts
+          cp scripts/install-agent-skills.js npm/scripts/
+          rm -rf npm/skills
+          cp -R skills npm/skills
 
       - name: Pack main npm package
         run: |
