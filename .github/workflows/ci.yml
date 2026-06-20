@@ -50,10 +50,15 @@ jobs:
       - name: Run Rust tests
         working-directory: rust
         shell: bash
+        env:
+          STARLING_HOME: ${{ runner.temp }}/starling-home
+          STARLING_CONFIG: ${{ runner.temp }}/starling-store.json
+          STARLING_RUNS: ${{ runner.temp }}/starling-runs.json
         run: |
           set +e
           mkdir -p ../ci-logs
-          cargo test > ../ci-logs/cargo-test.log 2>&1
+          mkdir -p "$STARLING_HOME"
+          cargo test -- --test-threads=1 > ../ci-logs/cargo-test.log 2>&1
           status=$?
           cat ../ci-logs/cargo-test.log
           exit "$status"
