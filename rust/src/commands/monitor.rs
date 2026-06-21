@@ -28,7 +28,6 @@ use crate::core::store::{list_bookmarks, list_spaces, BookmarkFilter};
 use crate::types::{Bookmark, SessionMeta};
 
 const WATCH_INTERVAL_MS: u64 = 1000;
-const SHELL_PENDING_WAIT_MS: u64 = 1500;
 const STALE_PENDING_MS: u64 = 5 * 60 * 1000;
 const STALE_PENDING_IDLE_MS: u64 = 24 * 60 * 60 * 1000;
 const REALTIME_SUPERSEDE_GRACE_MS: u64 = 500;
@@ -457,7 +456,7 @@ struct StatusGuess {
 fn infer_status(
     running: bool,
     live: &SessionLive,
-    title: &str,
+    _title: &str,
     osc: Option<&OscSessionState>,
     now_ms: u64,
     process_count: usize,
@@ -472,12 +471,6 @@ fn infer_status(
         let signal = live.activity_signal.as_deref().unwrap_or("codex_activity");
         return status_guess(activity_status, Some(signal), false);
     }
-    if looks_like_permission(title)
-        || looks_like_permission(&live.current_task)
-        || live.chat_tail.iter().any(|m| looks_like_permission(&m.text))
-    {
-        return status_guess("waiting", Some("permission_text"), false);
-    }
     if live.pending_since_ms > 0 {
         let last_signal_ms = live.last_activity_ms.max(live.pending_since_ms);
         let pending_age_ms = now_ms.saturating_sub(last_signal_ms);
@@ -487,13 +480,7 @@ fn infer_status(
         if pending_age_ms >= STALE_PENDING_IDLE_MS {
             return status_guess("idle", Some("stale_pending_tool"), false);
         }
-        if pending_age_ms >= SHELL_PENDING_WAIT_MS && is_shell_tool(live.last_tool.as_deref()) {
-            return status_guess("waiting", Some("pending_shell_no_process"), false);
-        }
-        if pending_age_ms >= STALE_PENDING_MS {
-            return status_guess("waiting", Some("pending_tool_no_process"), false);
-        }
-        return status_guess("running", Some("pending_tool"), false);
+        return status_guess("idle", Some("pending_tool_no_process"), false);
     }
     if live.thinking_since_ms > 0 {
         if now_ms.saturating_sub(live.thinking_since_ms) > STALE_PENDING_MS {
@@ -510,7 +497,7 @@ fn infer_status(
         if now_ms.saturating_sub(last_signal_ms) > STALE_PENDING_MS {
             return status_guess("idle", Some("stale_task"), false);
         }
-        return status_guess("running", Some("current_task"), false);
+        return status_guess("idle", Some("current_task_no_process"), false);
     }
     status_guess("idle", Some("process_alive"), false)
 }
@@ -525,25 +512,6 @@ fn status_guess(status: &str, signal: Option<&str>, realtime: bool) -> StatusGue
 
 fn is_active_status(status: &str) -> bool {
     matches!(status, "waiting" | "running")
-}
-
-fn is_shell_tool(tool: Option<&str>) -> bool {
-    matches!(
-        tool.map(|s| s.to_ascii_lowercase()),
-        Some(name) if matches!(name.as_str(), "bash" | "shell" | "exec_command")
-    )
-}
-
-fn looks_like_permission(s: &str) -> bool {
-    let s = s.to_lowercase();
-    s.contains("permission")
-        || s.contains("approval")
-        || s.contains("needs your")
-        || s.contains("wants to enter")
-        || s.contains("requires approval")
-        || s.contains("do you want to proceed")
-        || s.contains("awaiting approval")
-        || s.contains("permission prompt")
 }
 
 fn render_table(rows: &[Row]) -> String {
@@ -1042,37 +1010,37 @@ mod tests {
     }
 
     #[test]
-    fn pending_tool_without_child_stays_running_while_fresh() {
+    fn pending_tool_without_child_is_idle_without_runtime_activity() {
         let now_ms = STALE_PENDING_MS + 10_000;
         let live = pending_live(now_ms, STALE_PENDING_MS - 1);
 
         let guess = infer_status(true, &live, "", None, now_ms, 1);
 
-        assert_eq!(guess.status, "running");
-        assert_eq!(guess.signal.as_deref(), Some("pending_tool"));
+        assert_eq!(guess.status, "idle");
+        assert_eq!(guess.signal.as_deref(), Some("pending_tool_no_process"));
     }
 
     #[test]
-    fn stale_pending_tool_without_child_becomes_waiting() {
+    fn stale_pending_tool_without_child_stays_idle() {
         let now_ms = STALE_PENDING_MS + 10_000;
         let live = pending_live(now_ms, STALE_PENDING_MS);
 
         let guess = infer_status(true, &live, "", None, now_ms, 1);
 
-        assert_eq!(guess.status, "waiting");
+        assert_eq!(guess.status, "idle");
         assert_eq!(guess.signal.as_deref(), Some("pending_tool_no_process"));
     }
 
     #[test]
-    fn pending_shell_without_child_becomes_waiting_quickly() {
-        let now_ms = SHELL_PENDING_WAIT_MS + 10_000;
-        let mut live = pending_live(now_ms, SHELL_PENDING_WAIT_MS);
+    fn pending_shell_without_child_is_idle_without_runtime_activity() {
+        let now_ms = 10_000;
+        let mut live = pending_live(now_ms, 2_000);
         live.last_tool = Some("Bash".to_string());
 
         let guess = infer_status(true, &live, "", None, now_ms, 1);
 
-        assert_eq!(guess.status, "waiting");
-        assert_eq!(guess.signal.as_deref(), Some("pending_shell_no_process"));
+        assert_eq!(guess.status, "idle");
+        assert_eq!(guess.signal.as_deref(), Some("pending_tool_no_process"));
     }
 
     #[test]
@@ -1100,8 +1068,8 @@ mod tests {
 
     #[test]
     fn codex_activity_hint_takes_priority_over_pending_tool() {
-        let now_ms = SHELL_PENDING_WAIT_MS + 10_000;
-        let mut live = pending_live(now_ms, SHELL_PENDING_WAIT_MS);
+        let now_ms = 10_000;
+        let mut live = pending_live(now_ms, 2_000);
         live.last_tool = Some("exec_command".to_string());
         live.activity_status = Some("idle".to_string());
         live.activity_signal = Some("codex_task_complete".to_string());
