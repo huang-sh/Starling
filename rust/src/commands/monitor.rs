@@ -484,11 +484,11 @@ fn infer_status(
         if process_count > 1 {
             return status_guess("running", Some("pending_tool_process"), false);
         }
-        if pending_age_ms >= SHELL_PENDING_WAIT_MS && is_shell_tool(live.last_tool.as_deref()) {
-            return status_guess("waiting", Some("pending_shell_no_process"), false);
-        }
         if pending_age_ms >= STALE_PENDING_IDLE_MS {
             return status_guess("idle", Some("stale_pending_tool"), false);
+        }
+        if pending_age_ms >= SHELL_PENDING_WAIT_MS && is_shell_tool(live.last_tool.as_deref()) {
+            return status_guess("waiting", Some("pending_shell_no_process"), false);
         }
         if pending_age_ms >= STALE_PENDING_MS {
             return status_guess("waiting", Some("pending_tool_no_process"), false);
@@ -1073,6 +1073,18 @@ mod tests {
 
         assert_eq!(guess.status, "waiting");
         assert_eq!(guess.signal.as_deref(), Some("pending_shell_no_process"));
+    }
+
+    #[test]
+    fn very_old_pending_shell_without_child_becomes_idle() {
+        let now_ms = STALE_PENDING_IDLE_MS + 10_000;
+        let mut live = pending_live(now_ms, STALE_PENDING_IDLE_MS);
+        live.last_tool = Some("Bash".to_string());
+
+        let guess = infer_status(true, &live, "", None, now_ms, 1);
+
+        assert_eq!(guess.status, "idle");
+        assert_eq!(guess.signal.as_deref(), Some("stale_pending_tool"));
     }
 
     #[test]
