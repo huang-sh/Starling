@@ -4,7 +4,13 @@
   <img src="assets/starling.png" alt="Starling logo" width="160">
 </p>
 
-Agent session manager for Claude Code and OpenAI Codex. Starling discovers local agent sessions, groups them by project, organizes them into hierarchical catalogs, and exposes fast CLI workflows for browsing, resuming, and managing sessions.
+Agent session manager for Claude Code and OpenAI Codex. Starling discovers local agent sessions, groups them by project, organizes them into hierarchical catalogs, monitors live agent state, and exposes fast CLI workflows for browsing, resuming, launching, and managing sessions.
+
+Current release: **0.1.0**
+
+- npm: [`starling-ai`](https://www.npmjs.com/package/starling-ai)
+- GitHub Release: [`rust-v0.1.0`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.0)
+- VS Code extension: [`huangsh.starling-ai`](https://marketplace.visualstudio.com/items?itemName=huangsh.starling-ai)
 
 ## Features
 
@@ -17,7 +23,9 @@ Agent session manager for Claude Code and OpenAI Codex. Starling discovers local
 - Maintain a local session index at `~/.starling/session-index.json` for faster project and catalog views.
 - Launch Claude Code or Codex through `starling run` and automatically assign the created session to a catalog.
 - Manage Claude and Codex model profiles under `~/.starling/settings`.
-- Use the separate VS Code extension for Catalog, Projects, Models, and Sessions.
+- Monitor pinned sessions with a top-style terminal view that separates `running`, `waiting`, `idle`, and `stopped` states.
+- Use JSON output as the stable data contract for terminal rendering and the VS Code extension.
+- Use the separate VS Code extension for Catalog, Projects, Models, and Monitor.
 
 ## Installation
 
@@ -29,6 +37,18 @@ The npm package is named `starling-ai`, but the installed command is:
 
 ```bash
 starling --help
+```
+
+On Linux and macOS, npm installs the small JavaScript launcher plus the matching native package for your platform:
+
+- `starling-linux-x64`
+- `starling-darwin-x64`
+- `starling-darwin-arm64`
+
+The same native archives and sha256 files are attached to the GitHub release:
+
+```text
+https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.0
 ```
 
 The npm install step also installs the bundled Starling skill to:
@@ -44,7 +64,7 @@ If npm lifecycle scripts were disabled with `--ignore-scripts`, install the skil
 npm explore -g starling-ai -- npm run install:skill
 ```
 
-Starling requires Node.js 20 or newer.
+Starling requires Node.js 16 or newer. Claude Code and/or Codex must be installed separately if you want Starling to discover, launch, or resume those agents.
 
 ## Quick Start
 
@@ -66,6 +86,15 @@ Resume a session:
 starling resume <session-id>
 ```
 
+Monitor pinned sessions:
+
+```bash
+starling top
+starling top --watch
+starling top --recent
+starling top --json
+```
+
 Create a catalog and add a session:
 
 ```bash
@@ -85,11 +114,17 @@ Launch Claude Code with a Starling config profile:
 starling run --setting ds -c paper-review claude
 ```
 
-Starling options must be placed before the agent name. `-c` is the short alias for `--catalog`. Everything after `claude` or `codex` is passed directly to that agent:
+Starling options must be placed before the agent name. `-s` is the short alias for `--setting`; `-c` is the short alias for `--catalog`. Everything after `claude` or `codex` is passed directly to that agent:
 
 ```bash
 starling run --catalog paper-review codex exec "summarize this repo"
 starling run --catalog paper-review claude --dangerously-skip-permissions
+```
+
+Show Starling run records:
+
+```bash
+starling run status
 ```
 
 ## Commands
@@ -109,6 +144,8 @@ starling session note <session-id> "Follow up on benchmark results"
 starling session unpin <session-id>
 starling session delete <session-id> --yes
 ```
+
+`starling ses` is an alias for `starling session`.
 
 Catalog assignment can also be managed from the session namespace:
 
@@ -166,6 +203,39 @@ starling session index clear
 starling project ls --refresh-index
 starling project ls --no-index
 ```
+
+### Top
+
+`starling top` is the live session monitor. By default it shows pinned sessions and sorts them by session state:
+
+1. `running`: the agent is actively processing work.
+2. `waiting`: the agent is waiting for user input or approval.
+3. `idle`: the agent process exists, but the model is not currently processing.
+4. `stopped`: no active process is associated with the session.
+
+```bash
+starling top
+starling top --watch
+starling top --recent
+starling top --catalog paper-review
+starling top paper-review
+starling top --json
+```
+
+The default terminal view is rendered by the npm CLI wrapper from JSON emitted by the Rust core. `--json` returns the raw monitor snapshot for scripts, the VS Code extension, or other frontends.
+
+### Run Records
+
+`starling run` launches agents under Starling tracking. The run record is separate from session state:
+
+```bash
+starling run --setting glm-5.2 --catalog research/paper claude
+starling run --setting gpt-5.5 --catalog research/paper codex
+starling run status
+starling run stop <run-id>
+```
+
+Use `starling top` for current session state, and `starling run status` for launch/run history.
 
 ### Model Profiles
 
@@ -258,6 +328,21 @@ Project and catalog views refresh this index incrementally by default. The hot p
 
 See [docs/data-path-design.md](docs/data-path-design.md) for the full data path and index refresh design.
 
+## Machine-Readable Output
+
+Most Starling read commands support `--json`. The Rust core is responsible for discovery, indexing, metadata, live state, and JSON output. The npm wrapper renders terminal tables and top-style displays from the same JSON that the VS Code extension consumes.
+
+Useful JSON entry points:
+
+```bash
+starling session ls --json
+starling catalog list --json --pins
+starling project ls --json
+starling model ls --json
+starling top --json
+starling run status --json
+```
+
 Claude profiles are JSON files that Starling passes to Claude Code as settings.
 
 Codex profiles are Codex-style TOML files. Starling copies them into a temporary Codex profile for the run, so `starling run --setting <name> codex` does not overwrite the user's default `~/.codex/config.toml`.
@@ -293,7 +378,7 @@ The Starling sidebar contains four views:
 - Catalog: hierarchical catalog tree, with sessions shown on request.
 - Projects: project directory tree with session counts.
 - Models: Claude and Codex model profile settings.
-- Sessions: recent sessions with incremental loading.
+- Monitor: pinned, active, and recent sessions with live status, context, token, CPU, memory, task, and PID details.
 
 The extension supports common right-click actions:
 
@@ -315,10 +400,14 @@ Useful extension settings:
   "starling.cliPath": "starling",
   "starling.homePath": "",
   "starling.cacheTtlSeconds": 30,
+  "starling.monitorRefreshSeconds": 3,
+  "starling.monitorCacheTtlSeconds": 2,
   "starling.projectSessionLimit": 30,
   "starling.sessionTreeLimit": 50
 }
 ```
+
+Extension logs are written to the VS Code **Output** panel under `Starling`. CLI and monitor refresh failures are also surfaced through VS Code **Problems** diagnostics when applicable.
 
 ## Development
 
