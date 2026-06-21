@@ -4,6 +4,7 @@ use anyhow::Result;
 use colored::*;
 
 use crate::core::catalog_resolver::resolve_catalog_reference;
+use crate::core::discovery::canonical_session_id;
 use crate::core::discovery::find_sessions;
 use crate::core::format::format_bookmark_detail;
 use crate::core::id::generate_bookmark_id;
@@ -51,6 +52,21 @@ pub fn run(session_id: Option<String>, title: Option<String>, tags: Option<Strin
         } else {
             b
         }
+    } else if let Some(b) = list_bookmarks(BookmarkFilter::default())
+        .into_iter()
+        .find(|b| canonical_session_id(&b.session_id) == meta.session_id)
+    {
+        let mut patch = BookmarkPatch {
+            session_id: Some(meta.session_id.clone()),
+            ..Default::default()
+        };
+        if let Some(t) = title.as_deref() {
+            patch.title = Some(t.to_string());
+        }
+        if let Some(t) = tags.as_deref() {
+            patch.tags = Some(t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect());
+        }
+        update_bookmark(&b.id, patch).unwrap_or(b)
     } else {
         let store = crate::core::store::load_store();
         let bookmark = Bookmark {

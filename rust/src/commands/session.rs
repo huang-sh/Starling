@@ -7,6 +7,7 @@ use colored::*;
 
 use crate::cli::*;
 use crate::core::catalog_resolver::{catalog_path, resolve_catalog_reference};
+use crate::core::discovery::canonical_session_id;
 use crate::core::discovery::{find_session_by_id, find_session_candidates, find_sessions, Provider};
 use crate::core::format::format_session_table;
 use crate::core::id::{generate_bookmark_id, generate_note_id};
@@ -232,6 +233,15 @@ pub fn resolve_session_meta(session_id: &str) -> Option<SessionMeta> {
 
 fn ensure_session_bookmark(meta: &SessionMeta, title: Option<&str>, tags: Option<Vec<String>>) -> Bookmark {
     if let Some(existing) = find_bookmark(&meta.session_id) { return existing; }
+    if let Some(existing) = list_bookmarks(crate::core::store::BookmarkFilter::default())
+        .into_iter()
+        .find(|b| canonical_session_id(&b.session_id) == meta.session_id)
+    {
+        return update_bookmark(&existing.id, BookmarkPatch {
+            session_id: Some(meta.session_id.clone()),
+            ..Default::default()
+        }).unwrap_or(existing);
+    }
     let store = crate::core::store::load_store();
     let id = generate_bookmark_id(&store.bookmarks);
     let bookmark = Bookmark {

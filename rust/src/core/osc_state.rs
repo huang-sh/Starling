@@ -103,11 +103,10 @@ pub fn recent_osc_state(
 pub fn normalize_status(value: &str) -> Option<String> {
     let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
     let status = match normalized.as_str() {
-        "busy" | "executing" => "busy",
-        "running" | "thinking" | "generating" => "running",
+        "busy" | "executing" | "running" | "thinking" | "generating" => "running",
         "idle" => "idle",
-        "wait" | "waiting" | "waiting-input" | "waiting-for-input" => "idle",
-        "permission" | "approval" | "needs-attention" | "attention" => "permission",
+        "wait" | "waiting" | "waiting-input" | "waiting-for-input" => "waiting",
+        "permission" | "approval" | "needs-attention" | "attention" => "waiting",
         "stopped" => "stopped",
         _ => return None,
     };
@@ -118,7 +117,7 @@ pub fn status_from_osc0_title(title: &str) -> Option<String> {
     let first = title.chars().next()?;
     let code = first as u32;
     if (0x2800..=0x28ff).contains(&code) {
-        return Some("busy".to_string());
+        return Some("running".to_string());
     }
     if first == '\u{2733}' {
         return Some("idle".to_string());
@@ -150,14 +149,14 @@ pub fn status_from_osc_sequence(sequence: &str) -> Option<(String, String, Optio
             || lower.contains("needs your")
         {
             return Some((
-                "permission".to_string(),
+                "waiting".to_string(),
                 "osc9".to_string(),
                 Some(message.to_string()),
             ));
         }
         if lower.contains("waiting for your input") {
             return Some((
-                "idle".to_string(),
+                "waiting".to_string(),
                 "osc9".to_string(),
                 Some(message.to_string()),
             ));
@@ -169,7 +168,7 @@ pub fn status_from_osc_sequence(sequence: &str) -> Option<(String, String, Optio
 
 pub fn status_from_osc94_progress(level: u8) -> Option<String> {
     match level {
-        1 | 2 | 3 => Some("busy".to_string()),
+        1 | 2 | 3 => Some("running".to_string()),
         0 => Some("idle".to_string()),
         _ => None,
     }
@@ -212,7 +211,7 @@ fn is_fresh_at(state: &OscSessionState, now_ms: u64) -> bool {
         return false;
     }
     let ttl = match state.status.as_str() {
-        "busy" | "running" => BUSY_STALE_MS,
+        "running" => BUSY_STALE_MS,
         _ => DEFAULT_STALE_MS,
     };
     now_ms.saturating_sub(state.updated_at_ms) <= ttl
@@ -223,10 +222,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_switchboard_osc0_busy_and_waiting() {
+    fn parses_switchboard_osc0_running_and_waiting() {
         assert_eq!(
             status_from_osc0_title("\u{2801} working").as_deref(),
-            Some("busy")
+            Some("running")
         );
         assert_eq!(
             status_from_osc0_title("\u{2733} ready").as_deref(),
@@ -239,11 +238,11 @@ mod tests {
     fn normalizes_attention_aliases() {
         assert_eq!(
             normalize_status("needs_attention").as_deref(),
-            Some("permission")
+            Some("waiting")
         );
         assert_eq!(
             normalize_status("waiting-for-input").as_deref(),
-            Some("idle")
+            Some("waiting")
         );
         assert_eq!(normalize_status("unknown"), None);
     }
@@ -254,13 +253,13 @@ mod tests {
             status_from_osc_sequence("\u{1b}]0;\u{2801} running\u{7}")
                 .map(|s| s.0)
                 .as_deref(),
-            Some("busy")
+            Some("running")
         );
         assert_eq!(
             status_from_osc_sequence("\u{1b}]9;4;1;0\u{7}")
                 .map(|s| s.0)
                 .as_deref(),
-            Some("busy")
+            Some("running")
         );
     }
 }

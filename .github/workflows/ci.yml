@@ -47,6 +47,9 @@ jobs:
       - name: Check npm launcher syntax
         run: node --check npm/bin/starling.js
 
+      - name: Run JavaScript renderer tests
+        run: npm run test:js
+
       - name: Run Rust tests
         working-directory: rust
         shell: bash

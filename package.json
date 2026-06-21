@@ -1,6 +1,6 @@
 {
   "name": "starling-root",
-  "version": "0.1.0-preview.0",
+  "version": "0.1.0",
   "private": true,
   "description": "Starling CLI — Rust development orchestration root",
   "type": "module",
@@ -9,7 +9,9 @@
     "build": "scripts/build.sh",
     "build:debug": "scripts/build.sh --debug",
     "dev": "scripts/build.sh --debug && node npm/bin/starling.js",
-    "test": "cd rust && cargo test",
+    "test": "npm run test:js && npm run test:rust",
+    "test:js": "npm run build:ts && node --test npm/test/*.test.mjs",
+    "test:rust": "cd rust && cargo test",
     "run": "node npm/bin/starling.js",
     "install:skill": "node scripts/install-agent-skills.js"
   },

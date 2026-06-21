@@ -7,6 +7,7 @@ use crate::cli::*;
 use crate::core::catalog_resolver::{catalog_path, resolve_catalog_reference, CatalogResolution};
 use crate::core::format::{format_bookmark_detail, format_space_tree};
 use crate::core::id::generate_space_id;
+use crate::core::discovery::canonical_session_id;
 use crate::core::session_display::short_session_id;
 use crate::core::store::{
     add_space, find_space, has_sibling_space_name, list_bookmarks, list_spaces, remove_space,
@@ -179,9 +180,10 @@ fn show(name: &str) -> Result<()> {
     println!("  Created:     {}", space.created_at);
     println!("  Sessions:    {}", bookmarks.len());
     for b in &bookmarks {
+        let session_id = canonical_session_id(&b.session_id);
         println!("    {} {} {}",
             b.id.cyan(),
-            short_session_id(&b.session_id).normal(),
+            short_session_id(&session_id).normal(),
             b.title);
     }
     Ok(())

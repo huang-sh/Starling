@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::Result;
 use colored::*;
+use serde_json::Value;
 
 use crate::cli::*;
 use crate::constants::{
@@ -12,15 +13,19 @@ use crate::constants::{
     default_starling_home, now_iso,
 };
 use crate::core::catalog_resolver::{resolve_catalog_reference, CatalogResolution};
-use crate::core::discovery::{find_sessions, Provider as DiscoveryProvider};
+use crate::core::discovery::{canonical_session_id, find_sessions, Provider as DiscoveryProvider};
 use crate::core::id::generate_bookmark_id;
 use crate::core::process_map::map_process_tree_to_session_since;
 use crate::core::runs::{
     create_run, finalize_run, find_run, list_runs, mark_run_crashed, remove_run, FinalizePatch,
     RunStatus,
 };
+use crate::core::session::{
+    extract_claude_session_meta, extract_codex_session_meta, parse_jsonl_head,
+};
+use crate::core::session_display::short_session_id;
 use crate::core::store::{add_bookmark, find_bookmark, update_bookmark, BookmarkPatch};
-use crate::types::{Bookmark, RunProvider, RunRecord, RunSource};
+use crate::types::{Bookmark, RunProvider, RunRecord, RunSource, SessionMeta};
 
 pub fn handle(cmd: RunCommand) -> Result<()> {
     match &cmd.command {
@@ -35,6 +40,7 @@ struct PreparedLaunch {
     args: Vec<String>,
     envs: Vec<(String, String)>,
     temp_dir: Option<PathBuf>,
+    hook_file: Option<PathBuf>,
 }
 
 fn launch(provider: RunProvider, bin: &str, cmd_args: &RunCommand, passthrough_args: &[String]) -> Result<()> {
@@ -46,7 +52,13 @@ fn launch(provider: RunProvider, bin: &str, cmd_args: &RunCommand, passthrough_a
         .or_else(|| std::env::current_dir().ok())
         .map(|p| p.to_string_lossy().to_string());
     let catalog_id = resolve_catalog_id(cmd_args.catalog.as_deref());
-    let prepared = prepare_launch(provider, &run_id, cmd_args.setting.as_deref(), passthrough_args)?;
+    let prepared = prepare_launch(
+        provider,
+        &run_id,
+        cmd_args.setting.as_deref(),
+        passthrough_args,
+        catalog_id.is_some(),
+    )?;
 
     // Pre-spawn record (pid unknown yet).
     let record = RunRecord {
@@ -89,6 +101,7 @@ fn launch(provider: RunProvider, bin: &str, cmd_args: &RunCommand, passthrough_a
                 cmd_args.title.clone(),
                 project_path.clone(),
                 start_ms,
+                prepared.hook_file.clone(),
             );
 
             // Install SIGINT/SIGTERM handler so Ctrl-C marks the run crashed.
@@ -144,29 +157,82 @@ fn maybe_start_catalog_assignment_watcher(
     title: Option<String>,
     project_path: Option<String>,
     start_ms: u64,
+    hook_file: Option<PathBuf>,
 ) {
     let Some(catalog_id) = catalog_id else { return; };
     std::thread::spawn(move || {
         while crate::core::runs::is_pid_alive(pid) {
-            if let Some(mapped) = map_process_tree_to_session_since(pid, start_ms) {
-                if let Some(session_id) = mapped.session_id {
-                    let file_path = mapped.file_path.clone();
-                    let project = mapped.project_path.or_else(|| project_path.clone()).unwrap_or_default();
-                    assign_session_to_catalog(
-                        &run_id,
-                        provider,
-                        &session_id,
-                        file_path.as_deref(),
-                        &project,
-                        title.as_deref(),
-                        &catalog_id,
-                    );
-                    return;
+            if let Some(hook) = hook_file.as_deref().and_then(read_hook_session) {
+                let project = hook.cwd.or_else(|| project_path.clone()).unwrap_or_default();
+                assign_session_to_catalog(
+                    &run_id,
+                    provider,
+                    &hook.session_id,
+                    hook.transcript_path.as_deref(),
+                    &project,
+                    title.as_deref(),
+                    &catalog_id,
+                );
+                return;
+            }
+            if hook_file.is_none() {
+                if let Some(mapped) = map_process_tree_to_session_since(pid, start_ms) {
+                    if let Some(session_id) = mapped.session_id {
+                        let file_path = mapped.file_path.clone();
+                        let project = mapped.project_path.or_else(|| project_path.clone()).unwrap_or_default();
+                        assign_session_to_catalog(
+                            &run_id,
+                            provider,
+                            &session_id,
+                            file_path.as_deref(),
+                            &project,
+                            title.as_deref(),
+                            &catalog_id,
+                        );
+                        return;
+                    }
                 }
             }
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            std::thread::sleep(std::time::Duration::from_millis(500));
         }
     });
+}
+
+struct HookSession {
+    session_id: String,
+    transcript_path: Option<String>,
+    cwd: Option<String>,
+}
+
+fn read_hook_session(path: &Path) -> Option<HookSession> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    for line in raw.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(trimmed).ok()?;
+        let session_id = value
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?
+            .to_string();
+        let transcript_path = value
+            .get("transcript_path")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let cwd = value
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        return Some(HookSession { session_id, transcript_path, cwd });
+    }
+    None
 }
 
 fn assign_recent_session_fallback(
@@ -207,23 +273,41 @@ fn assign_session_to_catalog(
     title: Option<&str>,
     catalog_id: &str,
 ) {
-    update_run_session_id(run_id, session_id);
+    let canonical_id = canonical_session_id(session_id);
+    update_run_session_id(run_id, &canonical_id);
 
-    let bookmark = if let Some(existing) = find_bookmark(session_id) {
-        existing
+    let meta = file_path.and_then(|path| session_meta_from_path(provider, path));
+    let inferred_title = bookmark_title(title, meta.as_ref(), &canonical_id);
+    let first_prompt = meta
+        .as_ref()
+        .map(|m| m.first_prompt.clone())
+        .unwrap_or_default();
+    let effective_project_path = meta
+        .as_ref()
+        .map(|m| m.project_path.as_str())
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or(project_path);
+
+    let bookmark = if let Some(existing) = find_bookmark(&canonical_id) {
+        maybe_update_placeholder_title(existing, title, &inferred_title)
+    } else if let Some(existing) = find_bookmark(session_id) {
+        update_bookmark(&existing.id, BookmarkPatch {
+            session_id: Some(canonical_id.clone()),
+            ..Default::default()
+        })
+        .map(|updated| maybe_update_placeholder_title(updated, title, &inferred_title))
+        .unwrap_or(existing)
     } else {
         let store = crate::core::store::load_store();
         let bookmark = Bookmark {
             id: generate_bookmark_id(&store.bookmarks),
             provider: provider_name(provider).into(),
-            session_id: session_id.into(),
-            title: title.filter(|t| !t.trim().is_empty())
-                .map(String::from)
-                .unwrap_or_else(|| "running session".into()),
+            session_id: canonical_id.clone(),
+            title: inferred_title,
             category: String::new(),
             tags: vec![],
-            project_path: project_path.into(),
-            first_prompt: String::new(),
+            project_path: effective_project_path.into(),
+            first_prompt,
             notes: vec![],
             space_ids: vec![],
             created_at: now_iso(),
@@ -240,6 +324,54 @@ fn assign_session_to_catalog(
             ..Default::default()
         });
         let _ = file_path;
+    }
+}
+
+fn session_meta_from_path(provider: RunProvider, file_path: &str) -> Option<SessionMeta> {
+    let path = Path::new(file_path);
+    if !path.exists() {
+        return None;
+    }
+    let entries = parse_jsonl_head(path, 1000);
+    let modified_at = now_iso();
+    Some(match provider {
+        RunProvider::Claude => extract_claude_session_meta(&entries, path, &modified_at),
+        RunProvider::Codex => extract_codex_session_meta(&entries, path, &modified_at),
+    })
+}
+
+fn bookmark_title(explicit: Option<&str>, meta: Option<&SessionMeta>, canonical_id: &str) -> String {
+    if let Some(title) = explicit.map(str::trim).filter(|t| !t.is_empty()) {
+        return title.to_string();
+    }
+    if let Some(title) = meta
+        .and_then(|m| m.custom_title.as_deref())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        return title.to_string();
+    }
+    if let Some(prompt) = meta
+        .map(|m| m.first_prompt.as_str())
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        return prompt.chars().take(80).collect();
+    }
+    short_session_id(canonical_id).to_string()
+}
+
+fn maybe_update_placeholder_title(bookmark: Bookmark, explicit_title: Option<&str>, inferred_title: &str) -> Bookmark {
+    if explicit_title.map(str::trim).filter(|t| !t.is_empty()).is_some()
+        || (bookmark.title.trim() == "running session" && inferred_title.trim() != "running session")
+    {
+        update_bookmark(&bookmark.id, BookmarkPatch {
+            title: Some(inferred_title.to_string()),
+            ..Default::default()
+        })
+        .unwrap_or(bookmark)
+    } else {
+        bookmark
     }
 }
 
@@ -286,25 +418,120 @@ fn resolve_catalog_id(catalog: Option<&str>) -> Option<String> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use crate::types::TokenUsage;
+
+    fn meta(first_prompt: &str, custom_title: Option<&str>) -> SessionMeta {
+        SessionMeta {
+            session_id: "019edf66-d8f0-71d0-9283-e75d6da02af4".into(),
+            provider: "codex".into(),
+            model: "gpt-5.5".into(),
+            project_path: "/tmp/project".into(),
+            first_prompt: first_prompt.into(),
+            custom_title: custom_title.map(String::from),
+            file_path: "/tmp/session.jsonl".into(),
+            created_at: "now".into(),
+            modified_at: "now".into(),
+            token_usage: Some(TokenUsage {
+                input_tokens: Some(1),
+                output_tokens: Some(2),
+                total_tokens: Some(3),
+                cache_tokens: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn bookmark_title_prefers_explicit_title() {
+        let m = meta("first prompt", Some("custom"));
+        assert_eq!(bookmark_title(Some("manual"), Some(&m), &m.session_id), "manual");
+    }
+
+    #[test]
+    fn bookmark_title_uses_custom_title_then_prompt() {
+        let with_custom = meta("first prompt", Some("custom"));
+        assert_eq!(bookmark_title(None, Some(&with_custom), &with_custom.session_id), "custom");
+
+        let without_custom = meta("first prompt", None);
+        assert_eq!(bookmark_title(None, Some(&without_custom), &without_custom.session_id), "first prompt");
+    }
+
+    #[test]
+    fn bookmark_title_falls_back_to_short_session_id() {
+        let m = meta("", None);
+        assert_eq!(bookmark_title(None, Some(&m), &m.session_id), "019edf66-d8f0");
+        assert_eq!(bookmark_title(None, None, &m.session_id), "019edf66-d8f0");
+    }
+
+    #[test]
+    fn reads_session_from_run_hook_file() {
+        let path = std::env::temp_dir().join(format!(
+            "starling-run-hook-{}.jsonl",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "{{\"hook_event_name\":\"SessionStart\"}}").unwrap();
+            writeln!(
+                f,
+                "{}",
+                serde_json::json!({
+                    "session_id": "73f64f49-9fa0-4bbe-b434-2ec7d0c670a9",
+                    "transcript_path": "/tmp/session.jsonl",
+                    "cwd": "/tmp/project"
+                })
+            )
+            .unwrap();
+        }
+        let hook = read_hook_session(&path).expect("hook session");
+        assert_eq!(hook.session_id, "73f64f49-9fa0-4bbe-b434-2ec7d0c670a9");
+        assert_eq!(hook.transcript_path.as_deref(), Some("/tmp/session.jsonl"));
+        assert_eq!(hook.cwd.as_deref(), Some("/tmp/project"));
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn prepare_launch(
     provider: RunProvider,
     run_id: &str,
     setting: Option<&str>,
     passthrough_args: &[String],
+    attach_hook: bool,
 ) -> Result<PreparedLaunch> {
     let mut args = Vec::new();
     let mut envs = Vec::new();
     let mut temp_dir = None;
+    let mut hook_file = None;
 
-    if let Some(profile) = setting {
-        match provider {
-            RunProvider::Claude => {
+    match provider {
+        RunProvider::Claude => {
+            if attach_hook {
+                let base_settings = if let Some(profile) = setting {
+                    let path = default_claude_settings_dir().join(format!("{profile}.json"));
+                    ensure_file(&path, "Claude profile")?;
+                    Some(path)
+                } else {
+                    None
+                };
+                let hook = create_claude_hook_settings(run_id, base_settings.as_deref())?;
+                args.push("--settings".into());
+                args.push(hook.settings_path.to_string_lossy().to_string());
+                hook_file = Some(hook.hook_file);
+            } else if let Some(profile) = setting {
                 let path = default_claude_settings_dir().join(format!("{profile}.json"));
                 ensure_file(&path, "Claude profile")?;
                 args.push("--settings".into());
                 args.push(path.to_string_lossy().to_string());
             }
-            RunProvider::Codex => {
+        }
+        RunProvider::Codex => {
+            if let Some(profile) = setting {
                 let path = default_codex_settings_dir().join(format!("{profile}.toml"));
                 ensure_file(&path, "Codex profile")?;
                 let dir = default_starling_home()
@@ -320,7 +547,67 @@ fn prepare_launch(
     }
 
     args.extend(passthrough_args.iter().cloned());
-    Ok(PreparedLaunch { args, envs, temp_dir })
+    Ok(PreparedLaunch { args, envs, temp_dir, hook_file })
+}
+
+struct ClaudeHookSettings {
+    settings_path: PathBuf,
+    hook_file: PathBuf,
+}
+
+fn create_claude_hook_settings(run_id: &str, base_settings: Option<&Path>) -> Result<ClaudeHookSettings> {
+    let dir = default_starling_home().join("run-hooks");
+    std::fs::create_dir_all(&dir)?;
+    let hook_file = dir.join(format!("{run_id}.jsonl"));
+    let settings_path = dir.join(format!("{run_id}.settings.json"));
+    let mut settings = if let Some(path) = base_settings {
+        let raw = std::fs::read_to_string(path)?;
+        serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    install_claude_session_start_hook(&mut settings, &hook_file);
+    std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+    Ok(ClaudeHookSettings { settings_path, hook_file })
+}
+
+fn install_claude_session_start_hook(settings: &mut Value, hook_file: &Path) {
+    if !settings.is_object() {
+        *settings = serde_json::json!({});
+    }
+    let command = format!(
+        "bash -c 'cat >> \"$1\"; printf \"\\n\" >> \"$1\"' _ '{}'",
+        shell_single_quote_arg(&hook_file.to_string_lossy())
+    );
+    let hook = serde_json::json!({
+        "hooks": [
+            {
+                "type": "command",
+                "command": command
+            }
+        ]
+    });
+
+    let root = settings.as_object_mut().expect("settings object");
+    let hooks = root
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+    if !hooks.is_object() {
+        *hooks = serde_json::json!({});
+    }
+    let hooks_obj = hooks.as_object_mut().expect("hooks object");
+    let session_start = hooks_obj
+        .entry("SessionStart")
+        .or_insert_with(|| serde_json::json!([]));
+    if let Some(arr) = session_start.as_array_mut() {
+        arr.push(hook);
+    } else {
+        *session_start = serde_json::json!([hook]);
+    }
+}
+
+fn shell_single_quote_arg(value: &str) -> String {
+    value.replace('\'', "'\\''")
 }
 
 fn ensure_file(path: &Path, label: &str) -> Result<()> {

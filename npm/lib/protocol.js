@@ -68,16 +68,16 @@ export function monitorRows(snapshot) {
     return [...snapshot.pinned, ...snapshot.recent];
 }
 export function isActiveLiveStatus(status) {
-    return status === "permission" || status === "busy" || status === "running";
+    return status === "waiting" || status === "running";
 }
 function normalizeLiveStatus(value) {
     const status = String(value ?? "").toLowerCase();
-    if (status === "permission" || status === "permission_approval")
-        return "permission";
+    if (status === "permission" || status === "permission_approval" || status === "approval" || status === "needs_attention")
+        return "waiting";
     if (status === "waiting" || status === "waiting_input" || status === "waiting_for_input")
-        return "idle";
+        return "waiting";
     if (status === "busy" || status === "thinking" || status === "executing" || status === "rate_limited")
-        return "busy";
+        return "running";
     if (status === "idle")
         return "idle";
     if (status === "running")

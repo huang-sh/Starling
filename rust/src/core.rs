@@ -6,6 +6,7 @@ pub mod store;
 pub mod catalog_resolver;
 pub mod session;
 pub mod session_display;
+pub mod model_config;
 pub mod session_metrics;
 pub mod discovery;
 pub mod session_index;

@@ -122,9 +122,40 @@ pub fn match_session_id(candidate: &str, session_id: &str) -> bool {
         || ls.starts_with(&lc)
 }
 
+pub fn canonical_session_id(session_id: &str) -> String {
+    let lower = session_id.trim().to_lowercase();
+    let parts: Vec<&str> = lower.split('-').collect();
+    if parts.len() >= 5 {
+        let candidate = parts[parts.len() - 5..].join("-");
+        if looks_like_uuid(&candidate) {
+            return candidate;
+        }
+    }
+    lower
+}
+
+fn looks_like_uuid(value: &str) -> bool {
+    let mut parts = value.split('-');
+    let lens = [8usize, 4, 4, 4, 12];
+    for expected in lens {
+        let Some(part) = parts.next() else {
+            return false;
+        };
+        if part.len() != expected || !part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    parts.next().is_none()
+}
+
 pub fn looks_like_session_id_query(input: &str) -> bool {
     let normalized = input.trim().to_lowercase();
     if normalized.len() < 8 { return false; }
+    if normalized.starts_with("rollout-") {
+        return normalized
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-');
+    }
     if !normalized.chars().all(|c| c.is_ascii_hexdigit() || c == '-') { return false; }
     let compact: String = normalized.chars().filter(|c| *c != '-').collect();
     if compact.len() < 8 || compact.len() > 32 { return false; }
@@ -171,7 +202,11 @@ fn collect_session_candidates_by_filename(session_id: &str) -> Vec<SessionMeta> 
         let entries = parse_jsonl_head(&path, 500);
         let meta = extract_meta(provider, &entries, &path, &modified_at);
         let by_id = meta.session_id.to_lowercase();
-        if match_session_id(&by_id, &normalized_id) {
+        let by_file_stem = path
+            .file_stem()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if match_session_id(&by_id, &normalized_id) || match_session_id(&by_file_stem, &normalized_id) {
             match matches.get(&meta.session_id) {
                 Some(existing) if existing.modified_at >= meta.modified_at => {}
                 _ => { matches.insert(meta.session_id.clone(), meta); }
@@ -224,6 +259,7 @@ mod tests {
         assert!(!looks_like_session_id_query("abc"));
         assert!(looks_like_session_id_query("a1b2c3d4e5f6"));
         assert!(looks_like_session_id_query("a1b2c3d4-e5f6-7890-abcd-ef1234567890"));
+        assert!(looks_like_session_id_query("rollout-2026-06-21t06-53-27-019ee8f4-a336-7f63-8f7e-ce2b308efcc2"));
         assert!(!looks_like_session_id_query("not a session id"));
     }
 
@@ -231,6 +267,14 @@ mod tests {
     fn match_session_id_prefix() {
         assert!(match_session_id("abcdef0123456789", "abcdef"));
         assert!(match_session_id("abcdef", "abcdef0123456789"));
+        assert!(match_session_id(
+            "rollout-2026-06-21t06-53-27-019ee8f4-a336-7f63-8f7e-ce2b308efcc2",
+            "rollout-2026-06-21T06-53-27-019ee8f4-a336-7f63-8f7e-ce2b308efcc2",
+        ));
+        assert_eq!(
+            canonical_session_id("rollout-2026-06-21T06-53-27-019ee8f4-a336-7f63-8f7e-ce2b308efcc2"),
+            "019ee8f4-a336-7f63-8f7e-ce2b308efcc2",
+        );
         assert!(!match_session_id("", "abc"));
         assert!(!match_session_id("abc", ""));
     }

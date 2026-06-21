@@ -1,7 +1,5 @@
 export type LiveStatus =
   | "waiting"
-  | "permission"
-  | "busy"
   | "idle"
   | "running"
   | "stopped"
@@ -136,14 +134,14 @@ export function monitorRows(snapshot: MonitorSnapshot): MonitorRow[] {
 }
 
 export function isActiveLiveStatus(status: LiveStatus): boolean {
-  return status === "permission" || status === "busy" || status === "running";
+  return status === "waiting" || status === "running";
 }
 
 function normalizeLiveStatus(value: unknown): LiveStatus {
   const status = String(value ?? "").toLowerCase();
-  if (status === "permission" || status === "permission_approval") return "permission";
-  if (status === "waiting" || status === "waiting_input" || status === "waiting_for_input") return "idle";
-  if (status === "busy" || status === "thinking" || status === "executing" || status === "rate_limited") return "busy";
+  if (status === "permission" || status === "permission_approval" || status === "approval" || status === "needs_attention") return "waiting";
+  if (status === "waiting" || status === "waiting_input" || status === "waiting_for_input") return "waiting";
+  if (status === "busy" || status === "thinking" || status === "executing" || status === "rate_limited") return "running";
   if (status === "idle") return "idle";
   if (status === "running") return "running";
   if (status === "stopped" || status === "done") return "stopped";

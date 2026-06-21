@@ -1,4 +1,6 @@
 node_modules/
+npm/scripts/
+npm/skills/
 npm/vendor/
 rust/target/
 dist/

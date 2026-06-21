@@ -7,7 +7,6 @@ pub mod pin;
 pub mod catalog;
 pub mod project;
 pub mod config_cmd;
-pub mod status;
 pub mod monitor;
 pub mod resume;
 pub mod run;
@@ -26,7 +25,6 @@ pub fn dispatch(command: Command) -> Result<()> {
         Command::Model(c) => model::handle(c),
         Command::Config(c) => config_cmd::handle(c),
         Command::Diagnose(c) => diagnose::handle(c),
-        Command::Status(c) => status::handle(c),
         Command::Top(c) => monitor::handle(c),
         Command::Resume { session_id } => resume::run(&session_id),
     }

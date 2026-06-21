@@ -18,7 +18,7 @@ export function getRenderPlan(args) {
         case "config":
             return planConfig(rest);
         case "status":
-            return planStatus(rest);
+            return null;
         case "run":
             return planRun(rest);
         default:
@@ -137,16 +137,6 @@ function planConfig(rest) {
     }
     return null;
 }
-function planStatus(rest) {
-    const sub = normalizeSub(rest[0], "show");
-    if (sub === "show" || sub === "list") {
-        return { kind: "statusShow", rustArgs: withJson(["status", "show", ...rest.slice(rest[0] ? 1 : 0)]) };
-    }
-    if (sub === "prune" || sub === "clear") {
-        return { kind: "mutationResult", rustArgs: withJson(["status", sub, ...rest.slice(1)]) };
-    }
-    return null;
-}
 function planRun(rest) {
     const sub = normalizeSub(rest[0], "");
     if (sub === "status") {
@@ -248,8 +238,9 @@ function renderCatalogTree(rows, includeSessions) {
                 pins.forEach((pin, pinIndex) => {
                     const pinLast = pinIndex === pins.length - 1 && (byParent.get(str(space.id)) ?? []).length === 0;
                     const pinBranch = pinLast ? "└── " : "├── ";
-                    const title = truncate(str(pin.title) || str(pin.first_prompt) || shortId(str(pin.session_id)), 72);
-                    lines.push(`${childPrefix}${pinBranch}${title} ${ansi.gray(`[${shortId(str(pin.session_id))}]`)}`);
+                    const sessionId = canonicalSessionId(str(pin.session_id));
+                    const title = truncate(str(pin.title) || str(pin.first_prompt) || shortId(sessionId), 72);
+                    lines.push(`${childPrefix}${pinBranch}${title} ${ansi.gray(`[${shortId(sessionId)}]`)}`);
                 });
             }
             walk(str(space.id), childPrefix);
@@ -275,8 +266,9 @@ function renderCatalogShow(rows, query) {
         detailLine("Updated", formatDate(str(found.updated_at))),
     ];
     for (const pin of pins) {
+        const sessionId = canonicalSessionId(str(pin.session_id));
         const title = truncate(str(pin.title) || str(pin.first_prompt), 86) || "-";
-        lines.push(`  ${ansi.cyan(shortId(str(pin.session_id)))}  ${title} ${ansi.gray(str(pin.provider) || "")}`);
+        lines.push(`  ${ansi.cyan(shortId(sessionId))}  ${title} ${ansi.gray(str(pin.provider) || "")}`);
     }
     return lines.join("\n");
 }
@@ -575,6 +567,17 @@ function configEntries(row) {
 }
 function shortId(id) {
     return id.length > 13 ? id.slice(0, 13) : id || "-";
+}
+function canonicalSessionId(id) {
+    const lower = String(id || "").trim().toLowerCase();
+    const parts = lower.split("-");
+    if (parts.length >= 5) {
+        const candidate = parts.slice(-5).join("-");
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(candidate)) {
+            return candidate;
+        }
+    }
+    return lower;
 }
 function compactPath(value, max) {
     if (value.length <= max)

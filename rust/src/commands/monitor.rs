@@ -11,7 +11,7 @@ use colored::*;
 
 use crate::cli::{MonitorCommand, TopAction, TopCommand};
 use crate::core::catalog_resolver::{catalog_path, resolve_catalog_reference};
-use crate::core::discovery::match_session_id;
+use crate::core::discovery::{canonical_session_id, match_session_id};
 use crate::core::osc_state::{
     clear_osc_state, normalize_status, prune_stale_osc_state, recent_osc_state,
     status_from_osc0_title, status_from_osc94_progress, status_from_osc_sequence,
@@ -28,7 +28,9 @@ use crate::core::store::{list_bookmarks, list_spaces, BookmarkFilter};
 use crate::types::{Bookmark, SessionMeta};
 
 const WATCH_INTERVAL_MS: u64 = 1000;
+const SHELL_PENDING_WAIT_MS: u64 = 1500;
 const STALE_PENDING_MS: u64 = 5 * 60 * 1000;
+const STALE_PENDING_IDLE_MS: u64 = 24 * 60 * 60 * 1000;
 const REALTIME_SUPERSEDE_GRACE_MS: u64 = 500;
 
 pub fn handle(cmd: TopCommand) -> Result<()> {
@@ -199,6 +201,7 @@ struct Row {
 #[derive(Clone, serde::Serialize)]
 struct RowJson {
     session_id: String,
+    canonical_session_id: String,
     pinned: bool,
     catalog: Option<String>,
     title: String,
@@ -280,6 +283,7 @@ impl From<&Row> for RowJson {
         };
         RowJson {
             session_id: r.session_id.clone(),
+            canonical_session_id: canonical_session_id(&r.session_id),
             pinned: r.pinned,
             catalog: r.catalog.clone(),
             title: r.title.clone(),
@@ -373,14 +377,26 @@ fn merge_latest_subagent_live(parent_path: &Path, live: &mut SessionLive) {
     if live.model.is_empty() && !sub_live.model.is_empty() {
         live.model = sub_live.model.clone();
     }
+    let parent_active = live.pending_since_ms > 0
+        || live.thinking_since_ms > 0
+        || !live.current_task.is_empty();
+    let sub_active = sub_live.pending_since_ms > 0
+        || sub_live.thinking_since_ms > 0
+        || !sub_live.current_task.is_empty();
     live.last_activity_ms = sub_live.last_activity_ms;
-    live.pending_since_ms = sub_live.pending_since_ms;
-    live.thinking_since_ms = sub_live.thinking_since_ms;
-    live.current_task = sub_live.current_task.clone();
-    live.last_tool = sub_live.last_tool.clone().or_else(|| live.last_tool.clone());
+    if sub_active || !parent_active {
+        live.pending_since_ms = sub_live.pending_since_ms;
+        live.thinking_since_ms = sub_live.thinking_since_ms;
+        live.current_task = sub_live.current_task.clone();
+        live.last_tool = sub_live.last_tool.clone().or_else(|| live.last_tool.clone());
+    }
     live.tool_count = live.tool_count.saturating_add(sub_live.tool_count);
-    live.tool_calls_tail = sub_live.tool_calls_tail.clone();
-    live.chat_tail = sub_live.chat_tail.clone();
+    if sub_active || live.tool_calls_tail.is_empty() {
+        live.tool_calls_tail = sub_live.tool_calls_tail.clone();
+    }
+    if sub_active || live.chat_tail.is_empty() {
+        live.chat_tail = sub_live.chat_tail.clone();
+    }
 }
 
 fn latest_subagent_jsonl(parent_path: &Path) -> Option<PathBuf> {
@@ -444,17 +460,24 @@ fn infer_status(
         || looks_like_permission(&live.current_task)
         || live.chat_tail.iter().any(|m| looks_like_permission(&m.text))
     {
-        return status_guess("permission", Some("permission_text"), false);
+        return status_guess("waiting", Some("permission_text"), false);
     }
     if live.pending_since_ms > 0 {
         let last_signal_ms = live.last_activity_ms.max(live.pending_since_ms);
-        if now_ms.saturating_sub(last_signal_ms) > STALE_PENDING_MS {
-            if process_count <= 1 {
-                return status_guess("permission", Some("attention_pending_tool"), false);
-            }
+        let pending_age_ms = now_ms.saturating_sub(last_signal_ms);
+        if process_count > 1 {
+            return status_guess("running", Some("pending_tool_process"), false);
+        }
+        if pending_age_ms >= SHELL_PENDING_WAIT_MS && is_shell_tool(live.last_tool.as_deref()) {
+            return status_guess("waiting", Some("pending_shell_no_process"), false);
+        }
+        if pending_age_ms >= STALE_PENDING_IDLE_MS {
             return status_guess("idle", Some("stale_pending_tool"), false);
         }
-        return status_guess("busy", Some("pending_tool"), false);
+        if pending_age_ms >= STALE_PENDING_MS {
+            return status_guess("waiting", Some("pending_tool_no_process"), false);
+        }
+        return status_guess("running", Some("pending_tool"), false);
     }
     if live.thinking_since_ms > 0 {
         if now_ms.saturating_sub(live.thinking_since_ms) > STALE_PENDING_MS {
@@ -471,7 +494,7 @@ fn infer_status(
         if now_ms.saturating_sub(last_signal_ms) > STALE_PENDING_MS {
             return status_guess("idle", Some("stale_task"), false);
         }
-        return status_guess("busy", Some("current_task"), false);
+        return status_guess("running", Some("current_task"), false);
     }
     status_guess("idle", Some("process_alive"), false)
 }
@@ -485,7 +508,14 @@ fn status_guess(status: &str, signal: Option<&str>, realtime: bool) -> StatusGue
 }
 
 fn is_active_status(status: &str) -> bool {
-    matches!(status, "permission" | "busy" | "running")
+    matches!(status, "waiting" | "running")
+}
+
+fn is_shell_tool(tool: Option<&str>) -> bool {
+    matches!(
+        tool.map(|s| s.to_ascii_lowercase()),
+        Some(name) if matches!(name.as_str(), "bash" | "shell" | "exec_command")
+    )
 }
 
 fn looks_like_permission(s: &str) -> bool {
@@ -688,8 +718,6 @@ fn truncate_left(value: &str, max: usize) -> String {
 
 fn status_symbol(status: &str) -> ColoredString {
     match status {
-        "busy" => "●".yellow().bold(),
-        "permission" => "!".red().bold(),
         "waiting" => "○".blue().bold(),
         "idle" => "●".green().bold(),
         "running" => "●".cyan().bold(),
@@ -700,8 +728,6 @@ fn status_symbol(status: &str) -> ColoredString {
 
 fn style_status(status: &str) -> ColoredString {
     match status {
-        "busy" => status.yellow().bold(),
-        "permission" => status.red().bold(),
         "waiting" => status.blue().bold(),
         "idle" => status.green(),
         "running" => status.cyan(),
@@ -736,14 +762,16 @@ fn build_snapshot(catalog_filter: Option<&str>, include_recent: bool, pinned_lim
     };
 
     // 1) Pinned bookmarks
-    let bookmarks: Vec<Bookmark> = list_bookmarks(BookmarkFilter::default());
     let spaces = list_spaces();
-    let mut pinned_rows: Vec<Row> = bookmarks.iter()
+    let mut bookmarks: Vec<Bookmark> = list_bookmarks(BookmarkFilter::default()).into_iter()
         .filter(|b| {
             target_space_id.as_ref()
                 .map(|id| b.space_ids.contains(id))
                 .unwrap_or(true)
         })
+        .collect();
+    bookmarks.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let mut pinned_rows: Vec<Row> = bookmarks.iter()
         .take(pinned_limit)
         .map(|b| {
             let catalog = b.space_ids.iter()
@@ -776,9 +804,9 @@ fn build_snapshot(catalog_filter: Option<&str>, include_recent: bool, pinned_lim
     if include_recent {
         if let Some(idx) = load_session_index() {
             let pinned_ids: std::collections::HashSet<String> = rows.iter()
-                .map(|r| r.session_id.clone()).collect();
+                .map(|r| canonical_session_id(&r.session_id)).collect();
             let mut recent: Vec<Row> = idx.sessions.iter()
-                .filter(|s| !pinned_ids.contains(&s.session_id))
+                .filter(|s| !pinned_ids.contains(&canonical_session_id(&s.session_id)))
                 .take(50)
                 .map(|s| Row {
                     session_id: s.session_id.clone(),
@@ -799,7 +827,16 @@ fn build_snapshot(catalog_filter: Option<&str>, include_recent: bool, pinned_lim
     // 3) Attach pid from running-agent detection
     let detected = detect_running_sessions();
     for row in rows.iter_mut() {
-        if let Some(info) = detected.get(&row.session_id) {
+        let row_key = canonical_session_id(&row.session_id);
+        let info = detected
+            .get(&row.session_id)
+            .or_else(|| {
+                detected
+                    .iter()
+                    .find(|(sid, _)| canonical_session_id(sid) == row_key)
+                    .map(|(_, info)| info)
+            });
+        if let Some(info) = info {
             row.pid = info.pid;
             if row.file_path.is_none() {
                 row.file_path = info.file_path.clone();
@@ -813,12 +850,13 @@ fn build_snapshot(catalog_filter: Option<&str>, include_recent: bool, pinned_lim
     if include_recent {
         // Include running sessions that are not pinned and not in the recent
         // slice only when unpinned sessions were explicitly requested.
-        let mut seen: HashSet<String> = rows.iter().map(|r| r.session_id.clone()).collect();
+        let mut seen: HashSet<String> = rows.iter().map(|r| canonical_session_id(&r.session_id)).collect();
         for (sid, info) in detected {
-            if seen.contains(&sid) {
+            let sid_key = canonical_session_id(&sid);
+            if seen.contains(&sid_key) {
                 continue;
             }
-            seen.insert(sid.clone());
+            seen.insert(sid_key);
             rows.push(Row {
                 session_id: sid,
                 provider: info.provider,
@@ -971,5 +1009,75 @@ pub fn install_ctrlc_handler() {
             CTRL_C.store(true, Ordering::SeqCst);
         }
         signal(2 /* SIGINT */, handle_sigint as usize);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pending_live(now_ms: u64, age_ms: u64) -> SessionLive {
+        let at = now_ms.saturating_sub(age_ms);
+        SessionLive {
+            last_activity_ms: at,
+            pending_since_ms: at,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pending_tool_without_child_stays_running_while_fresh() {
+        let now_ms = STALE_PENDING_MS + 10_000;
+        let live = pending_live(now_ms, STALE_PENDING_MS - 1);
+
+        let guess = infer_status(true, &live, "", None, now_ms, 1);
+
+        assert_eq!(guess.status, "running");
+        assert_eq!(guess.signal.as_deref(), Some("pending_tool"));
+    }
+
+    #[test]
+    fn stale_pending_tool_without_child_becomes_waiting() {
+        let now_ms = STALE_PENDING_MS + 10_000;
+        let live = pending_live(now_ms, STALE_PENDING_MS);
+
+        let guess = infer_status(true, &live, "", None, now_ms, 1);
+
+        assert_eq!(guess.status, "waiting");
+        assert_eq!(guess.signal.as_deref(), Some("pending_tool_no_process"));
+    }
+
+    #[test]
+    fn pending_shell_without_child_becomes_waiting_quickly() {
+        let now_ms = SHELL_PENDING_WAIT_MS + 10_000;
+        let mut live = pending_live(now_ms, SHELL_PENDING_WAIT_MS);
+        live.last_tool = Some("Bash".to_string());
+
+        let guess = infer_status(true, &live, "", None, now_ms, 1);
+
+        assert_eq!(guess.status, "waiting");
+        assert_eq!(guess.signal.as_deref(), Some("pending_shell_no_process"));
+    }
+
+    #[test]
+    fn pending_tool_with_child_process_stays_running() {
+        let now_ms = 10_000 + STALE_PENDING_MS;
+        let live = pending_live(now_ms, STALE_PENDING_MS + 1);
+
+        let guess = infer_status(true, &live, "", None, now_ms, 2);
+
+        assert_eq!(guess.status, "running");
+        assert_eq!(guess.signal.as_deref(), Some("pending_tool_process"));
+    }
+
+    #[test]
+    fn very_old_pending_tool_becomes_idle() {
+        let now_ms = STALE_PENDING_IDLE_MS + 10_000;
+        let live = pending_live(now_ms, STALE_PENDING_IDLE_MS);
+
+        let guess = infer_status(true, &live, "", None, now_ms, 1);
+
+        assert_eq!(guess.status, "idle");
+        assert_eq!(guess.signal.as_deref(), Some("stale_pending_tool"));
     }
 }

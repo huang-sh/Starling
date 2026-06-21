@@ -174,6 +174,7 @@ pub fn update_bookmark(id: &str, patch: BookmarkPatch) -> Option<Bookmark> {
 /// unchanged".
 #[derive(Default, Clone)]
 pub struct BookmarkPatch {
+    pub session_id: Option<String>,
     pub title: Option<String>,
     pub category: Option<String>,
     pub tags: Option<Vec<String>>,
@@ -188,7 +189,7 @@ fn apply_patch(source: &Bookmark, patch: BookmarkPatch) -> Bookmark {
     Bookmark {
         id: source.id.clone(),
         provider: source.provider.clone(),
-        session_id: source.session_id.clone(),
+        session_id: patch.session_id.unwrap_or_else(|| source.session_id.clone()),
         title: patch.title.unwrap_or_else(|| source.title.clone()),
         category: patch.category.unwrap_or_else(|| source.category.clone()),
         tags: patch.tags.unwrap_or_else(|| source.tags.clone()),

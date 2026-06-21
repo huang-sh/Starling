@@ -57,9 +57,6 @@ export function pill(value: string, tone: Tone = "neutral"): string {
 
 export function statusDot(status: string): string {
   switch (status) {
-    case "busy":
-      return ansi.yellow("●");
-    case "permission":
     case "failed":
     case "crashed":
       return ansi.red("!");
@@ -81,9 +78,6 @@ export function statusDot(status: string): string {
 
 export function colorStatus(status: string): string {
   switch (status) {
-    case "busy":
-      return ansi.yellow(ansi.bold(status));
-    case "permission":
     case "failed":
     case "crashed":
       return ansi.red(ansi.bold(status));

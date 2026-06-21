@@ -1,6 +1,6 @@
 {
   "name": "starling-ai",
-  "version": "0.1.0-preview.0",
+  "version": "0.1.0",
   "description": "Agent session manager — discover, bookmark, and organize AI coding sessions",
   "license": "MIT",
   "bin": {
@@ -17,9 +17,9 @@
     "skills/"
   ],
   "optionalDependencies": {
-    "starling-linux-x64": "0.1.0-preview.0",
-    "starling-darwin-x64": "0.1.0-preview.0",
-    "starling-darwin-arm64": "0.1.0-preview.0"
+    "starling-linux-x64": "0.1.0",
+    "starling-darwin-x64": "0.1.0",
+    "starling-darwin-arm64": "0.1.0"
   },
   "scripts": {
     "postinstall": "node scripts/install-agent-skills.js"

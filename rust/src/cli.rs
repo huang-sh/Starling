@@ -1,10 +1,18 @@
 //! Clap command/arg definitions.
 
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "starling", version, about = "Agent session manager — discover, pin, and organize AI coding sessions")]
+#[command(
+    name = "starling",
+    version,
+    disable_version_flag = true,
+    about = "Agent session manager — discover, pin, and organize AI coding sessions"
+)]
 pub struct Cli {
+    #[arg(short = 'v', long = "version", action = ArgAction::Version, help = "Print version")]
+    pub version: Option<bool>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -68,10 +76,6 @@ pub enum Command {
     /// Run a benchmark task against one or more agents and have a judge agent assess them
     #[command(alias = "diag")]
     Diagnose(#[command(flatten)] DiagnoseCommand),
-
-    /// Show pinned sessions and their run status
-    #[command(subcommand)]
-    Status(StatusCommand),
 
     /// Live top-style view of agent sessions
     #[command(alias = "monitor")]
@@ -601,38 +605,6 @@ pub struct DiagnoseCommand {
     pub out: Option<String>,
 }
 
-#[derive(Subcommand)]
-pub enum StatusCommand {
-    /// Show status
-    #[command(name = "show", alias = "ls")]
-    Show {
-        /// Filter to a catalog (name, path, or id)
-        #[arg(short = 'c', long)]
-        catalog: Option<String>,
-        /// Detect live agent processes and show CPU/memory
-        #[arg(long)]
-        live: bool,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-    /// Mark running records with dead pids as crashed
-    Prune {
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-    /// Clear all run records
-    Clear {
-        /// Confirm clearing all run records
-        #[arg(short = 'y', long)]
-        yes: bool,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-}
-
 #[derive(Args)]
 pub struct TopCommand {
     #[command(subcommand)]
@@ -675,7 +647,7 @@ pub enum TopAction {
     Record {
         /// Session ID to update
         session_id: String,
-        /// Status: busy | waiting | permission | idle | running | stopped
+        /// Status: waiting | idle | running | stopped
         #[arg(long)]
         status: Option<String>,
         /// Parse an OSC 0/2 title payload

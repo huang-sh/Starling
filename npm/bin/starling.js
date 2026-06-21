@@ -75,7 +75,26 @@ function compatibleTargetTriples(primary) {
 }
 
 function findStarlingExecutable() {
-  // 1. Installed platform package (production install)
+  // 1. Dev/local package fallback. In `npm link` development, a globally
+  // installed optional dependency may still exist next to the symlinked root
+  // package; prefer the local staged binary so changes from scripts/build.sh
+  // are picked up immediately.
+  const devTargetTriples = compatibleTargetTriples(targetTriple);
+  const devCandidates = [
+    ...devTargetTriples.map((triple) =>
+      path.join(__dirname, "..", "vendor", triple, "bin", "starling"),
+    ),
+    // direct cargo target dir (in-tree development)
+    path.join(__dirname, "..", "..", "rust", "target", "release", "starling"),
+    path.join(__dirname, "..", "..", "rust", "target", "debug", "starling"),
+  ];
+  for (const candidate of devCandidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  // 2. Installed platform package (production install)
   try {
     const packageJsonPath = require.resolve(`${platformPackage}/package.json`);
     const vendorRoot = path.join(path.dirname(packageJsonPath), "vendor");
@@ -92,24 +111,6 @@ function findStarlingExecutable() {
     }
   } catch {
     // platform package not installed; fall through to dev path
-  }
-
-  // 2. Dev fallback — look for local cargo build output. scripts/build.sh
-  // stages host builds under rustc's host triple, which is usually GNU on
-  // Linux even though the published optional package uses the musl target.
-  const devTargetTriples = compatibleTargetTriples(targetTriple);
-  const devCandidates = [
-    ...devTargetTriples.map((triple) =>
-      path.join(__dirname, "..", "vendor", triple, "bin", "starling"),
-    ),
-    // direct cargo target dir (in-tree development)
-    path.join(__dirname, "..", "..", "rust", "target", "release", "starling"),
-    path.join(__dirname, "..", "..", "rust", "target", "debug", "starling"),
-  ];
-  for (const candidate of devCandidates) {
-    if (existsSync(candidate)) {
-      return candidate;
-    }
   }
 
   const packageManager = detectPackageManager();
