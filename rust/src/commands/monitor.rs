@@ -232,6 +232,9 @@ struct RowJson {
     elapsed_secs: u64,
     pending_since_ms: u64,
     thinking_since_ms: u64,
+    activity_status: Option<String>,
+    activity_signal: Option<String>,
+    activity_since_ms: u64,
     token_history: Vec<u64>,
     context_history: Vec<u64>,
     compaction_count: u32,
@@ -274,7 +277,13 @@ impl From<&Row> for RowJson {
         };
         let status_updated_at_ms = effective_osc
             .map(|s| s.updated_at_ms)
-            .unwrap_or(live.last_activity_ms);
+            .unwrap_or_else(|| {
+                if live.activity_since_ms > 0 {
+                    live.activity_since_ms
+                } else {
+                    live.last_activity_ms
+                }
+            });
         let started_at_ms = live.started_at_ms;
         let elapsed_secs = if started_at_ms > 0 && now_ms > started_at_ms {
             (now_ms - started_at_ms) / 1000
@@ -316,6 +325,9 @@ impl From<&Row> for RowJson {
             elapsed_secs,
             pending_since_ms: live.pending_since_ms,
             thinking_since_ms: live.thinking_since_ms,
+            activity_status: live.activity_status.clone(),
+            activity_signal: live.activity_signal.clone(),
+            activity_since_ms: live.activity_since_ms,
             token_history: live.token_history.clone(),
             context_history: live.context_history.clone(),
             compaction_count: live.compaction_count,
@@ -455,6 +467,10 @@ fn infer_status(
     }
     if let Some(state) = osc {
         return status_guess(&state.status, Some(&state.source), true);
+    }
+    if let Some(activity_status) = live.activity_status.as_deref() {
+        let signal = live.activity_signal.as_deref().unwrap_or("codex_activity");
+        return status_guess(activity_status, Some(signal), false);
     }
     if looks_like_permission(title)
         || looks_like_permission(&live.current_task)
@@ -1068,6 +1084,38 @@ mod tests {
 
         assert_eq!(guess.status, "running");
         assert_eq!(guess.signal.as_deref(), Some("pending_tool_process"));
+    }
+
+    #[test]
+    fn codex_activity_hint_takes_priority_over_pending_tool() {
+        let now_ms = SHELL_PENDING_WAIT_MS + 10_000;
+        let mut live = pending_live(now_ms, SHELL_PENDING_WAIT_MS);
+        live.last_tool = Some("exec_command".to_string());
+        live.activity_status = Some("idle".to_string());
+        live.activity_signal = Some("codex_task_complete".to_string());
+        live.activity_since_ms = now_ms - 1_000;
+
+        let guess = infer_status(true, &live, "", None, now_ms, 1);
+
+        assert_eq!(guess.status, "idle");
+        assert_eq!(guess.signal.as_deref(), Some("codex_task_complete"));
+    }
+
+    #[test]
+    fn codex_activity_running_takes_priority_over_stale_permission_text() {
+        let now_ms = 10_000;
+        let live = SessionLive {
+            last_activity_ms: now_ms,
+            activity_status: Some("running".to_string()),
+            activity_signal: Some("codex_task_started".to_string()),
+            current_task: "Would you like to run the following command?".to_string(),
+            ..Default::default()
+        };
+
+        let guess = infer_status(true, &live, "", None, now_ms, 1);
+
+        assert_eq!(guess.status, "running");
+        assert_eq!(guess.signal.as_deref(), Some("codex_task_started"));
     }
 
     #[test]

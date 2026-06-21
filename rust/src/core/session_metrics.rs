@@ -69,6 +69,9 @@ pub struct SessionLive {
     pub started_at_ms: u64,
     pub pending_since_ms: u64,
     pub thinking_since_ms: u64,
+    pub activity_status: Option<String>,
+    pub activity_signal: Option<String>,
+    pub activity_since_ms: u64,
     pub token_history: Vec<u64>,
     pub context_history: Vec<u64>,
     pub compaction_count: u32,
@@ -386,6 +389,9 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
     let mut started_at_ms: u64 = 0;
     let mut pending_since_ms: u64 = 0;
     let mut thinking_since_ms: u64 = 0;
+    let mut activity_status: Option<String> = None;
+    let mut activity_signal: Option<String> = None;
+    let mut activity_since_ms: u64 = 0;
     let mut latest_entry_ms: u64 = 0;
     let mut current_task = String::new();
     let mut context_window_override: Option<u64> = None;
@@ -429,6 +435,7 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
         let entry_type = entry.type_str();
         let codex_payload_type = payload_type(entry);
         let is_codex_response_item = entry_type == Some("response_item");
+        let is_codex_event = entry_type == Some("event_msg");
         let is_codex_function_call = is_codex_response_item && codex_payload_type == Some("function_call");
         let is_codex_function_output = is_codex_response_item && codex_payload_type == Some("function_call_output");
         let is_codex_message = is_codex_response_item && codex_payload_type == Some("message");
@@ -438,6 +445,41 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
             || entry_type == Some("function_call_output") || is_codex_function_output;
 
         let mut tool_uses: Vec<(Option<String>, String, Value)> = Vec::new();
+        if is_codex_event {
+            let activity_ms = if ts > 0 { ts } else { last_activity_ms };
+            match codex_payload_type {
+                Some("task_started") => {
+                    pending_tools.clear();
+                    pending_since_ms = 0;
+                    current_task.clear();
+                    thinking_since_ms = 0;
+                    activity_status = Some("running".to_string());
+                    activity_signal = Some("codex_task_started".to_string());
+                    activity_since_ms = activity_ms;
+                }
+                Some("task_complete") | Some("turn_aborted") => {
+                    pending_tools.clear();
+                    pending_since_ms = 0;
+                    thinking_since_ms = 0;
+                    current_task.clear();
+                    activity_status = Some("idle".to_string());
+                    activity_signal = Some(format!("codex_{}", codex_payload_type.unwrap()));
+                    activity_since_ms = activity_ms;
+                }
+                Some("exec_approval_request")
+                | Some("apply_patch_approval_request")
+                | Some("request_user_input")
+                | Some("elicitation_request") => {
+                    pending_tools.clear();
+                    pending_since_ms = activity_ms;
+                    thinking_since_ms = 0;
+                    activity_status = Some("waiting".to_string());
+                    activity_signal = Some(format!("codex_{}", codex_payload_type.unwrap()));
+                    activity_since_ms = activity_ms;
+                }
+                _ => {}
+            }
+        }
         if is_codex_reasoning {
             thinking_since_ms = if ts > 0 { ts } else { last_activity_ms };
         }
@@ -630,6 +672,9 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
         started_at_ms,
         pending_since_ms,
         thinking_since_ms,
+        activity_status,
+        activity_signal,
+        activity_since_ms,
         token_history,
         context_history,
         compaction_count,
@@ -834,6 +879,65 @@ mod tests {
         assert_eq!(live.pending_since_ms, 0);
         assert_eq!(live.current_task, "");
         assert_eq!(live.last_tool.as_deref(), Some("exec_command"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn codex_task_complete_clears_stale_pending_tool() {
+        clear_session_metrics_cache();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("starling-metrics-{}-codex-task-complete.jsonl",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        write_jsonl(&path, &[
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"head -20 results.csv\"}","call_id":"call_1"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"ok"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"task_complete"}}"#,
+        ]);
+        let live = get_session_live_metrics(&path);
+        assert_eq!(live.pending_since_ms, 0);
+        assert_eq!(live.thinking_since_ms, 0);
+        assert_eq!(live.activity_status.as_deref(), Some("idle"));
+        assert_eq!(live.activity_signal.as_deref(), Some("codex_task_complete"));
+        assert_eq!(live.current_task, "");
+        assert_eq!(live.last_tool.as_deref(), Some("exec_command"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn codex_task_started_marks_running_until_complete() {
+        clear_session_metrics_cache();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("starling-metrics-{}-codex-task-started.jsonl",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        write_jsonl(&path, &[
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+        ]);
+        let live = get_session_live_metrics(&path);
+        assert_eq!(live.pending_since_ms, 0);
+        assert_eq!(live.thinking_since_ms, 0);
+        assert_eq!(live.activity_status.as_deref(), Some("running"));
+        assert_eq!(live.activity_signal.as_deref(), Some("codex_task_started"));
+        assert_eq!(live.activity_since_ms, 1_767_225_600_000);
+        assert_eq!(live.current_task, "");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn codex_approval_request_marks_waiting() {
+        clear_session_metrics_cache();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("starling-metrics-{}-codex-approval.jsonl",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        write_jsonl(&path, &[
+            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"exec_approval_request"}}"#,
+        ]);
+        let live = get_session_live_metrics(&path);
+        assert_eq!(live.activity_status.as_deref(), Some("waiting"));
+        assert_eq!(live.activity_signal.as_deref(), Some("codex_exec_approval_request"));
+        assert_eq!(live.pending_since_ms, 1_767_225_601_000);
+        assert_eq!(live.thinking_since_ms, 0);
         let _ = std::fs::remove_file(&path);
     }
 
