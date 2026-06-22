@@ -483,9 +483,6 @@ fn infer_status(
         return status_guess("idle", Some("pending_tool_no_process"), false);
     }
     if live.thinking_since_ms > 0 {
-        if now_ms.saturating_sub(live.thinking_since_ms) > STALE_PENDING_MS {
-            return status_guess("idle", Some("stale_thinking"), false);
-        }
         return status_guess("running", Some("thinking"), false);
     }
     let last_role = live.chat_tail.last().map(|m| m.role);
@@ -1064,6 +1061,21 @@ mod tests {
 
         assert_eq!(guess.status, "running");
         assert_eq!(guess.signal.as_deref(), Some("pending_tool_process"));
+    }
+
+    #[test]
+    fn assistant_thinking_stays_running_without_new_transcript_chunks() {
+        let now_ms = STALE_PENDING_MS * 3;
+        let live = SessionLive {
+            last_activity_ms: 1_000,
+            thinking_since_ms: 1_000,
+            ..Default::default()
+        };
+
+        let guess = infer_status(true, &live, "", None, now_ms, 1);
+
+        assert_eq!(guess.status, "running");
+        assert_eq!(guess.signal.as_deref(), Some("thinking"));
     }
 
     #[test]
