@@ -73,14 +73,29 @@ fn show(json: bool) -> Result<()> {
         return Ok(());
     }
     println!("{}", "Starling config".green());
-    println!("  Config:   {}", payload["configPath"].as_str().unwrap_or_default());
-    println!("  Home:     {}", payload["effectiveHomePath"].as_str().unwrap_or_default());
-    println!("  Source:   {}", payload["homeSource"].as_str().unwrap_or_default());
+    println!(
+        "  Config:   {}",
+        payload["configPath"].as_str().unwrap_or_default()
+    );
+    println!(
+        "  Home:     {}",
+        payload["effectiveHomePath"].as_str().unwrap_or_default()
+    );
+    println!(
+        "  Source:   {}",
+        payload["homeSource"].as_str().unwrap_or_default()
+    );
     if let Some(saved) = cfg.home_path.as_deref() {
         println!("  Saved:    {}", saved);
     }
-    println!("  Store:    {}", payload["storePath"].as_str().unwrap_or_default());
-    println!("  Runs:     {}", payload["runsPath"].as_str().unwrap_or_default());
+    println!(
+        "  Store:    {}",
+        payload["storePath"].as_str().unwrap_or_default()
+    );
+    println!(
+        "  Runs:     {}",
+        payload["runsPath"].as_str().unwrap_or_default()
+    );
     Ok(())
 }
 
@@ -145,4 +160,6 @@ fn unset(key: &str, json: bool) -> Result<()> {
 
 // Silence unused
 #[allow(dead_code)]
-fn _anchor_pb() -> PathBuf { PathBuf::new() }
+fn _anchor_pb() -> PathBuf {
+    PathBuf::new()
+}

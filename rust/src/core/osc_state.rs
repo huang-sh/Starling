@@ -13,6 +13,7 @@ use crate::core::fs_utils::{atomic_write_json, read_json};
 
 const DEFAULT_STALE_MS: u64 = 10 * 60 * 1000;
 const BUSY_STALE_MS: u64 = 30 * 1000;
+const HOOK_STALE_MS: u64 = 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OscStateStore {
@@ -96,6 +97,7 @@ pub fn recent_osc_state(
         .into_iter()
         .filter(|s| session_matches(&s.session_id, session_id))
         .filter(|s| pid_match(s.pid, pid))
+        .filter(|s| is_runtime_status_source(&s.source))
         .filter(|s| is_fresh_at(s, now_ms))
         .max_by_key(|s| s.updated_at_ms)
 }
@@ -104,9 +106,12 @@ pub fn normalize_status(value: &str) -> Option<String> {
     let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
     let status = match normalized.as_str() {
         "busy" | "executing" | "running" | "thinking" | "generating" => "running",
+        "stale-running" | "stale-running?" | "running-stale" => "stale_running",
         "idle" => "idle",
         "wait" | "waiting" | "waiting-input" | "waiting-for-input" => "waiting",
         "permission" | "approval" | "needs-attention" | "attention" => "waiting",
+        "aborted" | "abort" | "interrupted" | "interrupt" | "cancelled" | "canceled"
+        | "terminated" => "aborted",
         "stopped" => "stopped",
         _ => return None,
     };
@@ -143,18 +148,18 @@ pub fn status_from_osc_sequence(sequence: &str) -> Option<(String, String, Optio
 
     if let Some(message) = payload.strip_prefix("9;") {
         let lower = message.to_ascii_lowercase();
+        if lower.contains("waiting for your input") {
+            return Some((
+                "idle".to_string(),
+                "osc9".to_string(),
+                Some(message.to_string()),
+            ));
+        }
         if lower.contains("permission")
             || lower.contains("approval")
             || lower.contains("attention")
             || lower.contains("needs your")
         {
-            return Some((
-                "waiting".to_string(),
-                "osc9".to_string(),
-                Some(message.to_string()),
-            ));
-        }
-        if lower.contains("waiting for your input") {
             return Some((
                 "waiting".to_string(),
                 "osc9".to_string(),
@@ -194,8 +199,12 @@ fn same_entry(a: &OscSessionState, b: &OscSessionState) -> bool {
 
 fn session_matches(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
-        || left.to_ascii_lowercase().starts_with(&right.to_ascii_lowercase())
-        || right.to_ascii_lowercase().starts_with(&left.to_ascii_lowercase())
+        || left
+            .to_ascii_lowercase()
+            .starts_with(&right.to_ascii_lowercase())
+        || right
+            .to_ascii_lowercase()
+            .starts_with(&left.to_ascii_lowercase())
 }
 
 fn pid_match(state_pid: Option<u32>, live_pid: Option<u32>) -> bool {
@@ -210,11 +219,23 @@ fn is_fresh_at(state: &OscSessionState, now_ms: u64) -> bool {
     if state.updated_at_ms == 0 || state.updated_at_ms > now_ms.saturating_add(1000) {
         return false;
     }
-    let ttl = match state.status.as_str() {
-        "running" => BUSY_STALE_MS,
-        _ => DEFAULT_STALE_MS,
+    let ttl = if is_agent_hook_source(&state.source) {
+        HOOK_STALE_MS
+    } else {
+        match state.status.as_str() {
+            "running" => BUSY_STALE_MS,
+            _ => DEFAULT_STALE_MS,
+        }
     };
     now_ms.saturating_sub(state.updated_at_ms) <= ttl
+}
+
+fn is_agent_hook_source(source: &str) -> bool {
+    source.contains("-hook:")
+}
+
+fn is_runtime_status_source(source: &str) -> bool {
+    is_agent_hook_source(source) || source.contains("-pty:")
 }
 
 #[cfg(test)]
@@ -244,6 +265,11 @@ mod tests {
             normalize_status("waiting-for-input").as_deref(),
             Some("waiting")
         );
+        assert_eq!(
+            normalize_status("stale-running").as_deref(),
+            Some("stale_running")
+        );
+        assert_eq!(normalize_status("interrupted").as_deref(), Some("aborted"));
         assert_eq!(normalize_status("unknown"), None);
     }
 
@@ -261,5 +287,67 @@ mod tests {
                 .as_deref(),
             Some("running")
         );
+    }
+
+    #[test]
+    fn osc9_waiting_for_input_is_idle_prompt() {
+        assert_eq!(
+            status_from_osc_sequence("\u{1b}]9;Claude is waiting for your input\u{7}")
+                .map(|s| s.0)
+                .as_deref(),
+            Some("idle")
+        );
+    }
+
+    #[test]
+    fn hook_running_state_uses_hook_ttl_not_osc_busy_ttl() {
+        let hook_state = OscSessionState {
+            session_id: "s".to_string(),
+            pid: None,
+            run_id: None,
+            status: "running".to_string(),
+            message: None,
+            source: "claude-hook:UserPromptSubmit".to_string(),
+            updated_at_ms: 1_000,
+        };
+        let osc_state = OscSessionState {
+            source: "osc0".to_string(),
+            ..hook_state.clone()
+        };
+
+        assert!(is_fresh_at(&hook_state, 1_000 + BUSY_STALE_MS + 1));
+        assert!(!is_fresh_at(&osc_state, 1_000 + BUSY_STALE_MS + 1));
+    }
+
+    #[test]
+    fn user_prompt_submit_running_hook_is_retained_for_workflow_state() {
+        let state = OscSessionState {
+            session_id: "s".to_string(),
+            pid: None,
+            run_id: None,
+            status: "running".to_string(),
+            message: None,
+            source: "claude-hook:UserPromptSubmit".to_string(),
+            updated_at_ms: 1_000,
+        };
+
+        assert!(is_fresh_at(&state, 1_000 + 60 * 1000 + 1));
+        assert!(is_fresh_at(&state, 1_000 + 30 * 60 * 1000));
+    }
+
+    #[test]
+    fn hook_state_is_pruned_after_hook_retention_window() {
+        let state = OscSessionState {
+            session_id: "s".to_string(),
+            pid: None,
+            run_id: None,
+            status: "running".to_string(),
+            message: None,
+            source: "claude-hook:PreToolUse".to_string(),
+            updated_at_ms: 1_000,
+        };
+
+        assert!(is_fresh_at(&state, 1_000 + HOOK_STALE_MS));
+        assert!(!is_fresh_at(&state, 1_000 + HOOK_STALE_MS + 1));
     }
 }

@@ -20,7 +20,12 @@ pub fn run(session_id: &str) -> Result<()> {
 }
 
 fn launch_resume(provider: &str, session_id: &str, _file_path: &str) -> Result<()> {
-    eprintln!("{}: resuming {} {}", "starling".cyan(), provider, short_session_id(session_id));
+    eprintln!(
+        "{}: resuming {} {}",
+        "starling".cyan(),
+        provider,
+        short_session_id(session_id)
+    );
     let mut cmd = match provider {
         "codex" => {
             let mut c = Command::new("codex");

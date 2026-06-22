@@ -2,23 +2,30 @@
 
 use anyhow::Result;
 
-pub mod session;
-pub mod pin;
 pub mod catalog;
-pub mod project;
 pub mod config_cmd;
+pub mod diagnose;
+pub mod model;
 pub mod monitor;
+pub mod pin;
+pub mod project;
 pub mod resume;
 pub mod run;
-pub mod model;
-pub mod diagnose;
+pub mod session;
 
 use crate::cli::*;
 
 pub fn dispatch(command: Command) -> Result<()> {
     match command {
         Command::Session(c) => session::handle(c),
-        Command::Pin { session_id, title, tags, to, current, json } => pin::run(session_id, title, tags, to, current, json),
+        Command::Pin {
+            session_id,
+            title,
+            tags,
+            to,
+            current,
+            json,
+        } => pin::run(session_id, title, tags, to, current, json),
         Command::Catalog(c) => catalog::handle(c),
         Command::Project(c) => project::handle(c),
         Command::Run(c) => run::handle(c),

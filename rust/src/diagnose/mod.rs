@@ -1,8 +1,8 @@
 //! Diagnose framework — types + agent runner.
 
+pub mod format;
 pub mod prompt;
 pub mod tasks;
-pub mod format;
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -32,7 +32,9 @@ pub struct AgentSpec {
 pub fn parse_agent_spec(spec: &str) -> Result<AgentSpec> {
     let trimmed = spec.trim();
     if trimmed.is_empty() {
-        return Err(anyhow!("Empty agent spec. Use the form `provider:profile`, e.g. `claude:ds`."));
+        return Err(anyhow!(
+            "Empty agent spec. Use the form `provider:profile`, e.g. `claude:ds`."
+        ));
     }
     let (provider_str, profile) = match trimmed.find(':') {
         Some(i) => (&trimmed[..i], &trimmed[i + 1..]),
@@ -41,12 +43,19 @@ pub fn parse_agent_spec(spec: &str) -> Result<AgentSpec> {
     let provider = match provider_str {
         "claude" => Provider::Claude,
         "codex" => Provider::Codex,
-        other => return Err(anyhow!(
-            "Invalid agent spec \"{}\": unknown provider \"{}\". Allowed: claude, codex.",
-            spec, other
-        )),
+        other => {
+            return Err(anyhow!(
+                "Invalid agent spec \"{}\": unknown provider \"{}\". Allowed: claude, codex.",
+                spec,
+                other
+            ))
+        }
     };
-    Ok(AgentSpec { provider, profile: profile.to_string(), raw: spec.to_string() })
+    Ok(AgentSpec {
+        provider,
+        profile: profile.to_string(),
+        raw: spec.to_string(),
+    })
 }
 
 /// A human-readable label for an agent spec.
@@ -213,9 +222,17 @@ pub fn run_agent_capture(
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     while Instant::now() < deadline {
         match child.try_wait() {
-            Ok(Some(status)) => { waited_ok = Some(Ok(status)); break; }
-            Ok(None) => { std::thread::sleep(Duration::from_millis(50)); }
-            Err(e) => { waited_ok = Some(Err(e)); break; }
+            Ok(Some(status)) => {
+                waited_ok = Some(Ok(status));
+                break;
+            }
+            Ok(None) => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                waited_ok = Some(Err(e));
+                break;
+            }
         }
     }
 
@@ -224,7 +241,9 @@ pub fn run_agent_capture(
         terminate_child(&mut child, child_id, false);
         let kill_deadline = Instant::now() + Duration::from_millis(CAPTURE_SIGKILL_GRACE_MS);
         while Instant::now() < kill_deadline {
-            if let Ok(Some(_)) = child.try_wait() { break; }
+            if let Ok(Some(_)) = child.try_wait() {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(50));
         }
         if child.try_wait().ok().flatten().is_none() {
@@ -265,7 +284,11 @@ pub fn run_agent_capture(
         exit_code: output.status.code().unwrap_or(-1),
         duration_ms,
         timed_out,
-        stderr: if stderr_capped.is_empty() { None } else { Some(stderr_capped) },
+        stderr: if stderr_capped.is_empty() {
+            None
+        } else {
+            Some(stderr_capped)
+        },
         spawn_error: None,
     }
 }

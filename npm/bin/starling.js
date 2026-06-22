@@ -188,6 +188,9 @@ function shouldRenderTop(args) {
   if (command !== "top" && command !== "monitor") {
     return false;
   }
+  if (["record", "clear", "hook"].includes(args[1])) {
+    return false;
+  }
   return !args.some((arg) => arg === "--json" || arg === "-h" || arg === "--help" || arg === "help");
 }
 

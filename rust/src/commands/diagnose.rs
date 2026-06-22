@@ -1,7 +1,7 @@
 //! `starling diagnose` — benchmark suite.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
@@ -9,18 +9,22 @@ use colored::*;
 
 use crate::cli::DiagnoseCommand;
 use crate::constants::now_iso;
+use crate::diagnose::format::format_report_human;
+use crate::diagnose::prompt::{build_judge_prompt, parse_judge_verdict};
+use crate::diagnose::tasks::load_task;
 use crate::diagnose::{
     parse_agent_spec, run_agent_capture, spec_label, EvaluateeResult, JudgeVerdict,
     PersonalityAssessment, Provider, QuestionResult,
 };
-use crate::diagnose::format::format_report_human;
-use crate::diagnose::prompt::{build_judge_prompt, parse_judge_verdict};
-use crate::diagnose::tasks::load_task;
 
 pub fn handle(cmd: DiagnoseCommand) -> Result<()> {
-    let timeout_ms: u64 = cmd.timeout.parse()
+    let timeout_ms: u64 = cmd
+        .timeout
+        .parse()
         .map_err(|_| anyhow!("--timeout must be a positive integer ms"))?;
-    let concurrency: usize = cmd.concurrency.parse()
+    let concurrency: usize = cmd
+        .concurrency
+        .parse()
         .map_err(|_| anyhow!("--concurrency must be a non-negative integer (0 = all at once)"))?;
 
     if cmd.agent.is_empty() {
@@ -30,7 +34,9 @@ pub fn handle(cmd: DiagnoseCommand) -> Result<()> {
     let task = load_task(&cmd.task)?;
 
     // Validate all agent specs up front.
-    let evaluatee_specs: Vec<_> = cmd.agent.iter()
+    let evaluatee_specs: Vec<_> = cmd
+        .agent
+        .iter()
         .map(|s| parse_agent_spec(s))
         .collect::<Result<Vec<_>>>()?;
 
@@ -40,15 +46,37 @@ pub fn handle(cmd: DiagnoseCommand) -> Result<()> {
     };
 
     let started_at = now_iso();
-    eprintln!("{}", format!("Diagnosing task: {} ({} agents)", task.id, evaluatee_specs.len()).cyan().bold());
-    eprintln!("{}", format!("Judge: {}", judge_spec.as_ref().map(|s| spec_label(s)).unwrap_or_else(|| "(none — no verdict)".into())).normal());
+    eprintln!(
+        "{}",
+        format!(
+            "Diagnosing task: {} ({} agents)",
+            task.id,
+            evaluatee_specs.len()
+        )
+        .cyan()
+        .bold()
+    );
+    eprintln!(
+        "{}",
+        format!(
+            "Judge: {}",
+            judge_spec
+                .as_ref()
+                .map(|s| spec_label(s))
+                .unwrap_or_else(|| "(none — no verdict)".into())
+        )
+        .normal()
+    );
 
     // Run all evaluatees concurrently (bounded by concurrency).
     let evaluatees = run_evaluatees(&evaluatee_specs, &task, timeout_ms, concurrency);
 
     // Run the judge if specified.
     let verdict = if let Some(j) = judge_spec {
-        eprintln!("{}", format!("\nRunning judge: {}", spec_label(&j)).cyan().bold());
+        eprintln!(
+            "{}",
+            format!("\nRunning judge: {}", spec_label(&j)).cyan().bold()
+        );
         run_judge(&j, &task, &evaluatees, timeout_ms)
     } else {
         JudgeVerdict {
@@ -92,7 +120,11 @@ fn run_evaluatees(
     concurrency: usize,
 ) -> Vec<EvaluateeResult> {
     let n = specs.len();
-    let workers = if concurrency == 0 { n.max(1) } else { concurrency.min(n) };
+    let workers = if concurrency == 0 {
+        n.max(1)
+    } else {
+        concurrency.min(n)
+    };
     let results: Arc<std::sync::Mutex<Vec<Option<EvaluateeResult>>>> =
         Arc::new(std::sync::Mutex::new(vec![None; n]));
     let next_idx: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
@@ -104,31 +136,42 @@ fn run_evaluatees(
         let results_clone = results.clone();
         let next_clone = next_idx.clone();
         let task_clone = task_arc.clone();
-        let handle = std::thread::spawn(move || {
-            loop {
-                let idx = next_clone.fetch_add(1, Ordering::SeqCst);
-                if idx >= specs_arc.len() { break; }
-                let spec = &specs_arc[idx];
-                let label = spec_label(spec);
-                eprintln!("{}", format!("▸ Running {} (Q{}/{})", label, idx + 1, specs_arc.len()).normal());
-                let result = run_one_evaluatee(spec, &task_clone, timeout_ms);
-                if let Ok(mut guard) = results_clone.lock() {
-                    guard[idx] = Some(result);
-                }
+        let handle = std::thread::spawn(move || loop {
+            let idx = next_clone.fetch_add(1, Ordering::SeqCst);
+            if idx >= specs_arc.len() {
+                break;
+            }
+            let spec = &specs_arc[idx];
+            let label = spec_label(spec);
+            eprintln!(
+                "{}",
+                format!("▸ Running {} (Q{}/{})", label, idx + 1, specs_arc.len()).normal()
+            );
+            let result = run_one_evaluatee(spec, &task_clone, timeout_ms);
+            if let Ok(mut guard) = results_clone.lock() {
+                guard[idx] = Some(result);
             }
         });
         handles.push(handle);
     }
-    for h in handles { let _ = h.join(); }
+    for h in handles {
+        let _ = h.join();
+    }
 
     let guard = results.lock().unwrap();
-    guard.iter().cloned().map(|opt| opt.unwrap_or_else(|| EvaluateeResult {
-        spec: String::new(),
-        profile_label: "(unknown)".to_string(),
-        provider: Provider::Claude,
-        results: vec![],
-        error: Some("Internal error: evaluatee result missing".to_string()),
-    })).collect()
+    guard
+        .iter()
+        .cloned()
+        .map(|opt| {
+            opt.unwrap_or_else(|| EvaluateeResult {
+                spec: String::new(),
+                profile_label: "(unknown)".to_string(),
+                provider: Provider::Claude,
+                results: vec![],
+                error: Some("Internal error: evaluatee result missing".to_string()),
+            })
+        })
+        .collect()
 }
 
 fn run_one_evaluatee(
@@ -176,7 +219,11 @@ fn run_one_evaluatee(
         profile_label: label,
         provider: spec.provider.clone(),
         results,
-        error: if had_error { Some("One or more questions failed to capture.".to_string()) } else { None },
+        error: if had_error {
+            Some("One or more questions failed to capture.".to_string())
+        } else {
+            None
+        },
     }
 }
 

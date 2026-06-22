@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::{claude_session_roots, codex_session_roots, default_starling_home, now_iso};
 use crate::core::fs_utils::{atomic_write_json, read_json};
-use crate::core::session::{extract_claude_session_meta, extract_codex_session_meta, parse_jsonl_head};
+use crate::core::session::{
+    extract_claude_session_meta, extract_codex_session_meta, parse_jsonl_head,
+};
 use crate::types::SessionMeta;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,34 +86,48 @@ pub fn load_session_index() -> Option<SessionIndex> {
     let path = session_index_path();
     let raw = std::fs::read_to_string(&path).ok()?;
     let parsed: SessionIndex = serde_json::from_str(&raw).ok()?;
-    if parsed.version != 1 { return None; }
+    if parsed.version != 1 {
+        return None;
+    }
     Some(parsed)
 }
 
 fn provider_roots(filter: Option<Provider>) -> Vec<(Provider, PathBuf)> {
     let mut out = Vec::new();
     if filter.map(|f| f == Provider::Claude).unwrap_or(true) {
-        for r in claude_session_roots() { out.push((Provider::Claude, r)); }
+        for r in claude_session_roots() {
+            out.push((Provider::Claude, r));
+        }
     }
     if filter.map(|f| f == Provider::Codex).unwrap_or(true) {
-        for r in codex_session_roots() { out.push((Provider::Codex, r)); }
+        for r in codex_session_roots() {
+            out.push((Provider::Codex, r));
+        }
     }
     out
 }
 
-fn write_session_index(sessions: Vec<SessionMeta>, directories: Vec<IndexedSessionDirectory>) -> SessionIndex {
+fn write_session_index(
+    sessions: Vec<SessionMeta>,
+    directories: Vec<IndexedSessionDirectory>,
+) -> SessionIndex {
     let mut sessions = sessions;
     sessions.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
 
     let projects = aggregate_project_summaries_from_sessions(&sessions);
-    let files: Vec<IndexedSessionFile> = sessions.iter()
+    let files: Vec<IndexedSessionFile> = sessions
+        .iter()
         .filter(|s| !s.file_path.is_empty())
         .map(|s| {
             let mtime_ms = chrono::DateTime::parse_from_rfc3339(&s.modified_at)
                 .ok()
                 .map(|dt| dt.timestamp_millis() as u64)
                 .unwrap_or(0);
-            let provider = if s.provider == "codex" { Provider::Codex } else { Provider::Claude };
+            let provider = if s.provider == "codex" {
+                Provider::Codex
+            } else {
+                Provider::Claude
+            };
             IndexedSessionFile {
                 session_id: s.session_id.clone(),
                 provider,
@@ -137,7 +153,10 @@ fn write_session_index(sessions: Vec<SessionMeta>, directories: Vec<IndexedSessi
 }
 
 fn upsert_session(sessions: &mut Vec<SessionMeta>, session: SessionMeta) {
-    if let Some(slot) = sessions.iter_mut().find(|s| s.session_id == session.session_id) {
+    if let Some(slot) = sessions
+        .iter_mut()
+        .find(|s| s.session_id == session.session_id)
+    {
         *slot = session;
     } else {
         sessions.push(session);
@@ -163,10 +182,14 @@ pub fn remove_session_from_index(session_id: &str) -> bool {
     };
     let normalized = session_id.to_lowercase();
     let original_len = index.sessions.len();
-    let sessions: Vec<SessionMeta> = index.sessions.into_iter()
+    let sessions: Vec<SessionMeta> = index
+        .sessions
+        .into_iter()
         .filter(|s| s.session_id.to_lowercase() != normalized)
         .collect();
-    if sessions.len() == original_len { return false; }
+    if sessions.len() == original_len {
+        return false;
+    }
     let dirs = index.directories.unwrap_or_default();
     write_session_index(sessions, dirs);
     true
@@ -195,11 +218,19 @@ pub fn rebuild_session_index(provider: Option<Provider>) -> SessionIndex {
 }
 
 fn walk_and_collect(dir: &Path, provider: Provider, out: &mut Vec<SessionMeta>) {
-    let rd = match std::fs::read_dir(dir) { Ok(r) => r, Err(_) => return };
+    let rd = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
     for entry in rd.flatten() {
         let path = entry.path();
-        if path.file_name().map(|n| n == "subagents").unwrap_or(false) { continue; }
-        let md = match entry.metadata() { Ok(m) => m, Err(_) => continue };
+        if path.file_name().map(|n| n == "subagents").unwrap_or(false) {
+            continue;
+        }
+        let md = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
         if md.is_dir() {
             walk_and_collect(&path, provider, out);
         } else if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
@@ -211,11 +242,19 @@ fn walk_and_collect(dir: &Path, provider: Provider, out: &mut Vec<SessionMeta>) 
 }
 
 fn parse_session_file(path: &Path, provider: Provider) -> Option<SessionMeta> {
-    let mtime = std::fs::metadata(path).ok()?.modified().ok()?
-        .duration_since(SystemTime::UNIX_EPOCH).ok()?;
-    let mtime_iso = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(mtime.as_millis() as i64)
-        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true).replace("+00:00", "Z"))
-        .unwrap_or_default();
+    let mtime = std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()?;
+    let mtime_iso =
+        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(mtime.as_millis() as i64)
+            .map(|dt| {
+                dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                    .replace("+00:00", "Z")
+            })
+            .unwrap_or_default();
     let entries = parse_jsonl_head(path, 500);
     let meta = match provider {
         Provider::Claude => extract_claude_session_meta(&entries, path, &mtime_iso),
@@ -233,19 +272,33 @@ fn collect_session_directory_entries(provider: Option<Provider>) -> Vec<IndexedS
 }
 
 fn walk_dirs(dir: &Path, provider: Provider, out: &mut Vec<IndexedSessionDirectory>) {
-    let md = match std::fs::metadata(dir) { Ok(m) => m, Err(_) => return };
-    if !md.is_dir() { return; }
-    let mtime = md.modified().ok()
+    let md = match std::fs::metadata(dir) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    if !md.is_dir() {
+        return;
+    }
+    let mtime = md
+        .modified()
+        .ok()
         .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     out.push(IndexedSessionDirectory {
-        provider, path: dir.to_string_lossy().to_string(), mtime_ms: mtime,
+        provider,
+        path: dir.to_string_lossy().to_string(),
+        mtime_ms: mtime,
     });
-    let rd = match std::fs::read_dir(dir) { Ok(r) => r, Err(_) => return };
+    let rd = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
     for entry in rd.flatten() {
         let path = entry.path();
-        if path.file_name().map(|n| n == "subagents").unwrap_or(false) { continue; }
+        if path.file_name().map(|n| n == "subagents").unwrap_or(false) {
+            continue;
+        }
         if let Ok(child_md) = entry.metadata() {
             if child_md.is_dir() {
                 walk_dirs(&path, provider, out);
@@ -258,7 +311,9 @@ fn walk_dirs(dir: &Path, provider: Provider, out: &mut Vec<IndexedSessionDirecto
 pub fn is_session_index_stale(provider: Option<Provider>) -> bool {
     let path = session_index_path();
     let index_mtime = match std::fs::metadata(&path) {
-        Ok(md) => md.modified().ok()
+        Ok(md) => md
+            .modified()
+            .ok()
             .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
@@ -278,12 +333,22 @@ fn newest_session_root_mtime(provider: Option<Provider>) -> u64 {
 
 fn newest_mtime_in_tree(dir: &Path) -> u64 {
     let mut newest = 0u64;
-    let rd = match std::fs::read_dir(dir) { Ok(r) => r, Err(_) => return 0 };
+    let rd = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return 0,
+    };
     for entry in rd.flatten() {
         let path = entry.path();
-        if path.file_name().map(|n| n == "subagents").unwrap_or(false) { continue; }
-        let md = match entry.metadata() { Ok(m) => m, Err(_) => continue };
-        let mtime = md.modified().ok()
+        if path.file_name().map(|n| n == "subagents").unwrap_or(false) {
+            continue;
+        }
+        let md = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let mtime = md
+            .modified()
+            .ok()
             .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
@@ -303,63 +368,105 @@ pub fn aggregate_projects_from_sessions(
     let mut map: HashMap<String, Vec<SessionMeta>> = HashMap::new();
     for s in sessions {
         if let Some(p) = provider_filter {
-            let sp = if s.provider == "codex" { Provider::Codex } else { Provider::Claude };
-            if sp != p { continue; }
+            let sp = if s.provider == "codex" {
+                Provider::Codex
+            } else {
+                Provider::Claude
+            };
+            if sp != p {
+                continue;
+            }
         }
-        map.entry(s.project_path.clone()).or_default().push(s.clone());
+        map.entry(s.project_path.clone())
+            .or_default()
+            .push(s.clone());
     }
 
-    let mut out: Vec<ProjectStats> = map.into_iter().map(|(project_path, mut sessions)| {
-        sessions.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
-        let mut agents: HashMap<String, u32> = HashMap::new();
-        let mut models: HashMap<String, u32> = HashMap::new();
-        let mut first_active = String::new();
-        let mut last_active = String::new();
-        for s in &sessions {
-            *agents.entry(s.provider.clone()).or_default() += 1;
-            if !s.model.is_empty() {
-                *models.entry(s.model.clone()).or_default() += 1;
+    let mut out: Vec<ProjectStats> = map
+        .into_iter()
+        .map(|(project_path, mut sessions)| {
+            sessions.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+            let mut agents: HashMap<String, u32> = HashMap::new();
+            let mut models: HashMap<String, u32> = HashMap::new();
+            let mut first_active = String::new();
+            let mut last_active = String::new();
+            for s in &sessions {
+                *agents.entry(s.provider.clone()).or_default() += 1;
+                if !s.model.is_empty() {
+                    *models.entry(s.model.clone()).or_default() += 1;
+                }
+                if first_active.is_empty() || s.created_at < first_active {
+                    first_active = s.created_at.clone();
+                }
+                if last_active.is_empty() || s.modified_at > last_active {
+                    last_active = s.modified_at.clone();
+                }
             }
-            if first_active.is_empty() || s.created_at < first_active { first_active = s.created_at.clone(); }
-            if last_active.is_empty() || s.modified_at > last_active { last_active = s.modified_at.clone(); }
-        }
-        let session_count = sessions.len() as u32;
-        ProjectStats { project_path, session_count, agents, models, first_active, last_active, sessions }
-    }).collect();
+            let session_count = sessions.len() as u32;
+            ProjectStats {
+                project_path,
+                session_count,
+                agents,
+                models,
+                first_active,
+                last_active,
+                sessions,
+            }
+        })
+        .collect();
     out.sort_by(|a, b| b.last_active.cmp(&a.last_active));
     out
 }
 
 pub fn aggregate_project_summaries_from_sessions(sessions: &[SessionMeta]) -> Vec<ProjectSummary> {
     let projects = aggregate_projects_from_sessions(sessions, None);
-    projects.into_iter().map(|p| ProjectSummary {
-        project_path: p.project_path,
-        session_count: p.session_count,
-        agents: p.agents,
-        models: p.models,
-        first_active: p.first_active,
-        last_active: p.last_active,
-    }).collect()
+    projects
+        .into_iter()
+        .map(|p| ProjectSummary {
+            project_path: p.project_path,
+            session_count: p.session_count,
+            agents: p.agents,
+            models: p.models,
+            first_active: p.first_active,
+            last_active: p.last_active,
+        })
+        .collect()
 }
 
 /// Cheap freshness check: if built_at is within 60s, trust it; otherwise compare
 /// top-level root mtimes against built_at.
 pub fn is_session_index_fresh(provider: Option<Provider>, now_ms: u64) -> bool {
-    let index = match load_session_index() { Some(i) => i, None => return false };
-    let built_at = chrono::DateTime::parse_from_rfc3339(&index.built_at).ok()
-        .map(|dt| dt.timestamp_millis() as u64).unwrap_or(0);
-    if built_at == 0 { return false; }
-    if now_ms.saturating_sub(built_at) < 60_000 { return true; }
+    let index = match load_session_index() {
+        Some(i) => i,
+        None => return false,
+    };
+    let built_at = chrono::DateTime::parse_from_rfc3339(&index.built_at)
+        .ok()
+        .map(|dt| dt.timestamp_millis() as u64)
+        .unwrap_or(0);
+    if built_at == 0 {
+        return false;
+    }
+    if now_ms.saturating_sub(built_at) < 60_000 {
+        return true;
+    }
 
-    let roots: Vec<PathBuf> = provider_roots(provider).into_iter().map(|(_, r)| r).collect();
+    let roots: Vec<PathBuf> = provider_roots(provider)
+        .into_iter()
+        .map(|(_, r)| r)
+        .collect();
     for root in roots {
         match std::fs::metadata(&root) {
             Ok(md) => {
-                let mtime = md.modified().ok()
+                let mtime = md
+                    .modified()
+                    .ok()
                     .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                if mtime > built_at { return false; }
+                if mtime > built_at {
+                    return false;
+                }
             }
             Err(_) => return false,
         }
@@ -369,36 +476,62 @@ pub fn is_session_index_fresh(provider: Option<Provider>, now_ms: u64) -> bool {
 
 fn matches_session_id(wanted_ids: &std::collections::HashSet<String>, session_id: &str) -> bool {
     let normalized = session_id.to_lowercase();
-    if wanted_ids.contains(&normalized) { return true; }
+    if wanted_ids.contains(&normalized) {
+        return true;
+    }
     for w in wanted_ids {
-        if !w.is_empty() && normalized.starts_with(w) { return true; }
+        if !w.is_empty() && normalized.starts_with(w) {
+            return true;
+        }
     }
     false
 }
 
 /// Find indexed sessions by ID/prefix. Uses the fast path when the index is
 /// fresh; otherwise rebuilds.
-pub fn lookup_indexed_sessions(session_ids: &[String], provider: Option<Provider>) -> HashMap<String, SessionMeta> {
+pub fn lookup_indexed_sessions(
+    session_ids: &[String],
+    provider: Option<Provider>,
+) -> HashMap<String, SessionMeta> {
     let mut result: HashMap<String, SessionMeta> = HashMap::new();
-    if session_ids.is_empty() { return result; }
-    let wanted: std::collections::HashSet<String> = session_ids.iter().map(|s| s.to_lowercase()).collect();
+    if session_ids.is_empty() {
+        return result;
+    }
+    let wanted: std::collections::HashSet<String> =
+        session_ids.iter().map(|s| s.to_lowercase()).collect();
 
-    let now_ms = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let now_ms = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
     let index = if is_session_index_fresh(provider, now_ms) {
         load_session_index()
     } else {
         Some(rebuild_session_index(provider))
     };
-    let index = match index { Some(i) => i, None => return result };
+    let index = match index {
+        Some(i) => i,
+        None => return result,
+    };
 
     for session in index.sessions {
         if let Some(p) = provider {
-            let sp = if session.provider == "codex" { Provider::Codex } else { Provider::Claude };
-            if sp != p { continue; }
+            let sp = if session.provider == "codex" {
+                Provider::Codex
+            } else {
+                Provider::Claude
+            };
+            if sp != p {
+                continue;
+            }
         }
-        if !matches_session_id(&wanted, &session.session_id) { continue; }
+        if !matches_session_id(&wanted, &session.session_id) {
+            continue;
+        }
         // exact id wins over prefix
-        if result.contains_key(&session.session_id) { continue; }
+        if result.contains_key(&session.session_id) {
+            continue;
+        }
         result.insert(session.session_id.clone(), session);
     }
     result
@@ -410,11 +543,16 @@ mod tests {
 
     fn mk_session(id: &str, project: &str, provider: &str, modified: &str) -> SessionMeta {
         SessionMeta {
-            session_id: id.into(), provider: provider.into(), model: "m".into(),
-            project_path: project.into(), first_prompt: "".into(),
+            session_id: id.into(),
+            provider: provider.into(),
+            model: "m".into(),
+            project_path: project.into(),
+            first_prompt: "".into(),
             file_path: format!("/p/{id}.jsonl"),
-            created_at: modified.into(), modified_at: modified.into(),
-            custom_title: None, token_usage: None,
+            created_at: modified.into(),
+            modified_at: modified.into(),
+            custom_title: None,
+            token_usage: None,
         }
     }
 

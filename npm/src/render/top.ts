@@ -64,7 +64,10 @@ function renderDashboard(snapshot: MonitorSnapshot, rows: MonitorRow[], width: n
   const tokenCache = rows.reduce((sum, row) => sum + row.tokens_cache, 0);
   const newest = rows.reduce((max, row) => Math.max(max, row.last_activity_ms), 0);
   const running = statusCounts.get("running") ?? 0;
+  const stale = statusCounts.get("stale_running") ?? 0;
   const waiting = statusCounts.get("waiting") ?? 0;
+  const aborted = statusCounts.get("aborted") ?? 0;
+  const failure = statusCounts.get("failure") ?? 0;
   const idle = statusCounts.get("idle") ?? 0;
   const stopped = statusCounts.get("stopped") ?? 0;
   const title = `${ansi.bold("Starling top")} ${ansi.gray(renderSummary(snapshot))}`;
@@ -74,7 +77,8 @@ function renderDashboard(snapshot: MonitorSnapshot, rows: MonitorRow[], width: n
   return [
     `${title}${" ".repeat(gap)}${clock}`,
     meta([
-      `tasks ${rows.length} total, ${snapshot.active} active, ${running} running, ${waiting} waiting, ${idle} idle, ${stopped} stopped`,
+      `tasks ${rows.length} total, ${snapshot.active} active, ${running} running, ${stale} stale, ${waiting} waiting, ${failure} failure, ${idle} idle, ${stopped} stopped`,
+      aborted > 0 ? `${aborted} aborted` : false,
       `tokens ${compactNumber(tokenIn)}/${compactNumber(tokenOut)}/${compactNumber(tokenCache)}`,
       `last ${relativeTime(newest, nowMs) || "-"}`,
       statusLine || false,
@@ -148,16 +152,22 @@ function statusRank(status: LiveStatus): number {
   switch (status) {
     case "running":
       return 0;
-    case "waiting":
+    case "stale_running":
       return 1;
-    case "idle":
+    case "waiting":
       return 2;
-    case "stopped":
+    case "failure":
       return 3;
-    case "unknown":
+    case "aborted":
       return 4;
-    default:
+    case "idle":
+      return 5;
+    case "stopped":
+      return 6;
+    case "unknown":
       return 7;
+    default:
+      return 8;
   }
 }
 
@@ -244,6 +254,12 @@ function statusLetter(status: LiveStatus): string {
       return ansi.blue("W");
     case "running":
       return ansi.cyan("R");
+    case "stale_running":
+      return ansi.yellow("~");
+    case "aborted":
+      return ansi.yellow("X");
+    case "failure":
+      return ansi.red("!");
     case "idle":
       return ansi.green("I");
     case "stopped":
@@ -283,6 +299,9 @@ function tokenCell(row: MonitorRow): string {
 function taskCell(task: string, row: MonitorRow): string {
   if (row.status === "waiting") return ansi.blue(task);
   if (row.status === "running") return ansi.cyan(task);
+  if (row.status === "stale_running") return ansi.yellow(task);
+  if (row.status === "aborted") return ansi.yellow(task);
+  if (row.status === "failure") return ansi.red(task);
   return task;
 }
 
@@ -306,7 +325,7 @@ function countStatuses(rows: MonitorRow[]): Map<LiveStatus, number> {
 }
 
 function statusChips(counts: Map<LiveStatus, number>): string {
-  const statuses: LiveStatus[] = ["running", "waiting", "idle", "unknown"];
+  const statuses: LiveStatus[] = ["running", "stale_running", "waiting", "aborted", "failure", "idle", "unknown"];
   return statuses
     .filter((status) => (counts.get(status) ?? 0) > 0)
     .map((status) => `${statusDot(status)} ${colorStatus(status)} ${counts.get(status)}`)

@@ -6,10 +6,10 @@
 
 Agent session manager for Claude Code and OpenAI Codex. Starling discovers local agent sessions, groups them by project, organizes them into hierarchical catalogs, monitors live agent state, and exposes fast CLI workflows for browsing, resuming, launching, and managing sessions.
 
-Current release: **0.1.0**
+Current release: **0.1.2**
 
 - npm: [`starling-ai`](https://www.npmjs.com/package/starling-ai)
-- GitHub Release: [`rust-v0.1.0`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.0)
+- GitHub Release: [`rust-v0.1.2`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.2)
 - VS Code extension: [`huangsh.starling-ai`](https://marketplace.visualstudio.com/items?itemName=huangsh.starling-ai)
 
 ## Features
@@ -48,7 +48,7 @@ On Linux and macOS, npm installs the small JavaScript launcher plus the matching
 The same native archives and sha256 files are attached to the GitHub release:
 
 ```text
-https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.0
+https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.2
 ```
 
 The npm install step also installs the bundled Starling skill to:

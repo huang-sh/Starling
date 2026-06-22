@@ -78,10 +78,16 @@ function normalizeLiveStatus(value) {
         return "waiting";
     if (status === "busy" || status === "thinking" || status === "executing" || status === "rate_limited")
         return "running";
+    if (status === "stale_running" || status === "stale-running" || status === "running_stale" || status === "running-stale")
+        return "stale_running";
+    if (status === "aborted" || status === "abort" || status === "interrupted" || status === "interrupt" || status === "cancelled" || status === "canceled" || status === "terminated")
+        return "aborted";
     if (status === "idle")
         return "idle";
     if (status === "running")
         return "running";
+    if (status === "failure" || status === "failed" || status === "error")
+        return "failure";
     if (status === "stopped" || status === "done")
         return "stopped";
     return "unknown";

@@ -62,11 +62,8 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, data: &T) -> Result<()> {
     if let Err(e) = fs::rename(&tmp_path, path) {
         // Cleanup the temp file on rename failure
         let _ = fs::remove_file(&tmp_path);
-        return Err(e).with_context(|| format!(
-            "renaming {} -> {}",
-            tmp_path.display(),
-            path.display()
-        ));
+        return Err(e)
+            .with_context(|| format!("renaming {} -> {}", tmp_path.display(), path.display()));
     }
     Ok(())
 }
@@ -96,7 +93,10 @@ mod tests {
     fn atomic_write_then_read_roundtrip() {
         let dir = tempdir();
         let path = dir.join("store.json");
-        let data = Data { name: "alpha".into(), value: 42 };
+        let data = Data {
+            name: "alpha".into(),
+            value: 42,
+        };
         atomic_write_json(&path, &data).expect("write");
         let loaded: Data = read_json(&path).expect("should exist");
         assert_eq!(loaded, data);
@@ -111,10 +111,14 @@ mod tests {
 
     fn tempdir() -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("starling-test-{}-{}", std::process::id(),
+        p.push(format!(
+            "starling-test-{}-{}",
+            std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos()).unwrap_or(0)));
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
         fs::create_dir_all(&p).unwrap();
         p
     }
@@ -140,10 +144,14 @@ pub mod test_support {
     pub fn with_temp_store<F: FnOnce()>(f: F) {
         let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
         let mut tmp = std::env::temp_dir();
-        tmp.push(format!("starling-test-{}-{}.json",
+        tmp.push(format!(
+            "starling-test-{}-{}.json",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos()).unwrap_or(0)));
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
         std::env::set_var("STARLING_CONFIG", &tmp);
         let _ = std::fs::remove_file(&tmp);
         // Run the test; if it panics, ignore so cleanup can still happen.

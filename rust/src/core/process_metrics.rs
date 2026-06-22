@@ -35,12 +35,18 @@ static CHILD_CACHE: Lazy<Mutex<Option<(u64, HashMap<u32, Vec<u32>>)>>> =
 
 const CHILD_CACHE_TTL_MS: u64 = 1000;
 
-fn is_linux() -> bool { cfg!(target_os = "linux") }
+fn is_linux() -> bool {
+    cfg!(target_os = "linux")
+}
 
 fn read_uptime() -> f64 {
-    if !is_linux() { return 0.0; }
+    if !is_linux() {
+        return 0.0;
+    }
     match std::fs::read_to_string("/proc/uptime") {
-        Ok(s) => s.split_whitespace().next()
+        Ok(s) => s
+            .split_whitespace()
+            .next()
             .and_then(|t| t.parse::<f64>().ok())
             .unwrap_or(0.0),
         Err(_) => 0.0,
@@ -48,7 +54,9 @@ fn read_uptime() -> f64 {
 }
 
 fn read_vm_rss_kb(pid: u32) -> u64 {
-    if !is_linux() { return 0; }
+    if !is_linux() {
+        return 0;
+    }
     match std::fs::read_to_string(format!("/proc/{pid}/status")) {
         Ok(s) => {
             for line in s.lines() {
@@ -68,21 +76,23 @@ fn read_vm_rss_kb(pid: u32) -> u64 {
 }
 
 fn read_ticks_and_start(pid: u32) -> (u64, u64) {
-    if !is_linux() { return (0, 0); }
+    if !is_linux() {
+        return (0, 0);
+    }
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(s) => {
-            match parse_proc_stat(&s) {
-                Some(stat) => (stat.utime + stat.stime, stat.starttime),
-                None => (0, 0),
-            }
-        }
+        Ok(s) => match parse_proc_stat(&s) {
+            Some(stat) => (stat.utime + stat.stime, stat.starttime),
+            None => (0, 0),
+        },
         Err(_) => (0, 0),
     }
 }
 
 fn get_cached_child_map() -> HashMap<u32, Vec<u32>> {
-    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64).unwrap_or(0);
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
     if let Ok(guard) = CHILD_CACHE.lock() {
         if let Some((expires, map)) = guard.as_ref() {
             if *expires > now {
@@ -103,7 +113,9 @@ fn collect_tree(root_pid: u32, child_map: &HashMap<u32, Vec<u32>>) -> (Vec<u32>,
     let mut seen = std::collections::HashSet::new();
     let mut queue = vec![root_pid];
     while let Some(pid) = queue.pop() {
-        if !seen.insert(pid) { continue; }
+        if !seen.insert(pid) {
+            continue;
+        }
         if pid != root_pid && is_claude_background_task_process(pid) {
             background_task_count += 1;
             continue;
@@ -122,9 +134,13 @@ fn collect_tree(root_pid: u32, child_map: &HashMap<u32, Vec<u32>>) -> (Vec<u32>,
 
 fn average_since_start(root_pid: u32, total_ticks: u64, now: f64) -> f64 {
     let (_ticks, starttime) = read_ticks_and_start(root_pid);
-    if starttime == 0 { return 0.0; }
+    if starttime == 0 {
+        return 0.0;
+    }
     let elapsed_s = now - (starttime as f64 / CLK_TCK as f64);
-    if elapsed_s <= 0.0 { return 0.0; }
+    if elapsed_s <= 0.0 {
+        return 0.0;
+    }
     ((total_ticks as f64 / CLK_TCK as f64) / elapsed_s) * 100.0
 }
 
@@ -154,17 +170,36 @@ pub fn get_process_tree_metrics(root_pid: u32) -> ProcessTreeMetrics {
             }
             _ => average_since_start(root_pid, total_ticks, now),
         };
-        prev.insert(root_pid, Sample { ticks: total_ticks, wall_s: now });
-        if !cpu.is_finite() || cpu < 0.0 { 0.0 } else { cpu }
+        prev.insert(
+            root_pid,
+            Sample {
+                ticks: total_ticks,
+                wall_s: now,
+            },
+        );
+        if !cpu.is_finite() || cpu < 0.0 {
+            0.0
+        } else {
+            cpu
+        }
     };
 
-    ProcessTreeMetrics { pids, cpu_pct, mem_kb: total_mem, background_task_count }
+    ProcessTreeMetrics {
+        pids,
+        cpu_pct,
+        mem_kb: total_mem,
+        background_task_count,
+    }
 }
 
 /// Clear delta-sampling state (call at the start of a fresh one-shot/watch run).
 pub fn reset_cpu_sampler() {
-    if let Ok(mut prev) = PREV_SAMPLE.lock() { prev.clear(); }
-    if let Ok(mut cache) = CHILD_CACHE.lock() { *cache = None; }
+    if let Ok(mut prev) = PREV_SAMPLE.lock() {
+        prev.clear();
+    }
+    if let Ok(mut cache) = CHILD_CACHE.lock() {
+        *cache = None;
+    }
 }
 
 #[cfg(test)]

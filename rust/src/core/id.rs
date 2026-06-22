@@ -4,7 +4,8 @@ use crate::types::{Bookmark, Space};
 
 /// `starling_NNNN` — strictly increasing across existing bookmark IDs.
 pub fn generate_bookmark_id(bookmarks: &[Bookmark]) -> String {
-    let max = bookmarks.iter()
+    let max = bookmarks
+        .iter()
         .filter_map(|b| b.id.strip_prefix("starling_"))
         .filter_map(|rest| rest.parse::<u32>().ok())
         .max()
@@ -14,9 +15,13 @@ pub fn generate_bookmark_id(bookmarks: &[Bookmark]) -> String {
 
 /// `cat_NNNN` — strictly increasing, tolerating legacy `space_NNNN` prefixes.
 pub fn generate_space_id(spaces: &[Space]) -> String {
-    let max = spaces.iter()
+    let max = spaces
+        .iter()
         .map(|s| {
-            let rest = s.id.strip_prefix("cat_").or_else(|| s.id.strip_prefix("space_")).unwrap_or(&s.id);
+            let rest =
+                s.id.strip_prefix("cat_")
+                    .or_else(|| s.id.strip_prefix("space_"))
+                    .unwrap_or(&s.id);
             rest.parse::<u32>().ok()
         })
         .flatten()
@@ -62,12 +67,18 @@ mod tests {
         }
     }
 
-    #[derive(Default)] struct SpaceBuilder;
+    #[derive(Default)]
+    struct SpaceBuilder;
     impl SpaceBuilder {
         fn mk(id: &str) -> Space {
             Space {
-                id: id.into(), name: "n".into(), description: String::new(),
-                tags: vec![], parent_id: None, created_at: "t".into(), updated_at: "t".into(),
+                id: id.into(),
+                name: "n".into(),
+                description: String::new(),
+                tags: vec![],
+                parent_id: None,
+                created_at: "t".into(),
+                updated_at: "t".into(),
             }
         }
     }

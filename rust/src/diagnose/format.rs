@@ -8,10 +8,19 @@ pub fn format_report_human(report: &DiagnoseReport) -> String {
     let mut out: Vec<String> = Vec::new();
     out.push(String::new());
     out.push(format!("{}", "═".repeat(64).cyan().bold()));
-    out.push(format!("{}", format!("  Diagnosis report — {}", report.task_name).cyan().bold()));
     out.push(format!(
         "{}",
-        format!("  task: {}   judge: {}   started: {}", report.task, report.judge, report.started_at).normal()
+        format!("  Diagnosis report — {}", report.task_name)
+            .cyan()
+            .bold()
+    ));
+    out.push(format!(
+        "{}",
+        format!(
+            "  task: {}   judge: {}   started: {}",
+            report.task, report.judge, report.started_at
+        )
+        .normal()
     ));
     out.push(format!("{}", "═".repeat(64).cyan().bold()));
 
@@ -61,7 +70,11 @@ fn format_evaluatee(ev: &EvaluateeResult) -> String {
         if let Some(err) = &r.error {
             out.push(format!("{}", format!("    {}", err).normal()));
         }
-        let body = if r.response.trim().is_empty() { "(empty)" } else { r.response.trim() };
+        let body = if r.response.trim().is_empty() {
+            "(empty)"
+        } else {
+            r.response.trim()
+        };
         for line in body.lines() {
             out.push(format!("    {}", line));
         }
@@ -72,7 +85,10 @@ fn format_evaluatee(ev: &EvaluateeResult) -> String {
 fn format_verdict(verdict: &JudgeVerdict, evaluatees: &[EvaluateeResult]) -> String {
     let mut out: Vec<String> = Vec::new();
     if let Some(err) = &verdict.parse_error {
-        out.push(format!("{}", format!("Could not parse structured verdict: {}", err).red()));
+        out.push(format!(
+            "{}",
+            format!("Could not parse structured verdict: {}", err).red()
+        ));
         out.push(format!("{}", "Raw judge output:".normal()));
         out.push(verdict.raw.trim().to_string());
         return out.join("\n");
@@ -87,10 +103,19 @@ fn format_verdict(verdict: &JudgeVerdict, evaluatees: &[EvaluateeResult]) -> Str
         out.push(format!(
             "{}  {}",
             format!("▸ {}", a.profile_label).yellow().bold(),
-            if a.personality_type.is_empty() { "(no type)".to_string() } else { a.personality_type.clone() }.green()
+            if a.personality_type.is_empty() {
+                "(no type)".to_string()
+            } else {
+                a.personality_type.clone()
+            }
+            .green()
         ));
         if !a.scores.is_empty() {
-            let cols: Vec<String> = a.scores.iter().map(|(k, v)| format!("{}:{}", k, v)).collect();
+            let cols: Vec<String> = a
+                .scores
+                .iter()
+                .map(|(k, v)| format!("{}:{}", k, v))
+                .collect();
             out.push(format!("{}  {}", "scores  ".normal(), cols.join("  ")));
         }
         if !a.rationale.is_empty() {
@@ -98,11 +123,17 @@ fn format_verdict(verdict: &JudgeVerdict, evaluatees: &[EvaluateeResult]) -> Str
         }
     }
     // Surface evaluatees the judge skipped.
-    let assessed: std::collections::HashSet<&str> =
-        verdict.assessments.iter().map(|a| a.profile_label.as_str()).collect();
+    let assessed: std::collections::HashSet<&str> = verdict
+        .assessments
+        .iter()
+        .map(|a| a.profile_label.as_str())
+        .collect();
     for ev in evaluatees {
         if !assessed.contains(ev.profile_label.as_str()) {
-            out.push(format!("{}", format!("  (no assessment for {})", ev.profile_label).normal()));
+            out.push(format!(
+                "{}",
+                format!("  (no assessment for {})", ev.profile_label).normal()
+            ));
         }
     }
     out.join("\n")

@@ -13,11 +13,15 @@ use crate::types::{SessionMeta, TokenUsage};
 pub struct JsonlEntry(pub Value);
 
 impl JsonlEntry {
-    pub fn value(&self) -> &Value { &self.0 }
+    pub fn value(&self) -> &Value {
+        &self.0
+    }
     pub fn as_record(&self) -> Option<&serde_json::Map<String, Value>> {
         self.0.as_object()
     }
-    pub fn type_str(&self) -> Option<&str> { self.0.get("type").and_then(|v| v.as_str()) }
+    pub fn type_str(&self) -> Option<&str> {
+        self.0.get("type").and_then(|v| v.as_str())
+    }
 }
 
 fn as_number(value: &Value) -> Option<f64> {
@@ -33,19 +37,29 @@ fn as_usize_field(obj: &serde_json::Map<String, Value>, key: &str) -> Option<u64
 }
 
 fn merge_token_usage(target: &mut TokenUsage, source: &TokenUsage) {
-    if let Some(v) = source.input_tokens { target.input_tokens = Some(v); }
-    if let Some(v) = source.output_tokens { target.output_tokens = Some(v); }
-    if let Some(v) = source.total_tokens { target.total_tokens = Some(v); }
-    if let Some(v) = source.cache_tokens { target.cache_tokens = Some(v); }
+    if let Some(v) = source.input_tokens {
+        target.input_tokens = Some(v);
+    }
+    if let Some(v) = source.output_tokens {
+        target.output_tokens = Some(v);
+    }
+    if let Some(v) = source.total_tokens {
+        target.total_tokens = Some(v);
+    }
+    if let Some(v) = source.cache_tokens {
+        target.cache_tokens = Some(v);
+    }
 }
 
 fn has_non_zero(usage: Option<&TokenUsage>) -> bool {
-    usage.map(|u| {
-        u.input_tokens.unwrap_or(0) > 0
-            || u.output_tokens.unwrap_or(0) > 0
-            || u.total_tokens.unwrap_or(0) > 0
-            || u.cache_tokens.unwrap_or(0) > 0
-    }).unwrap_or(false)
+    usage
+        .map(|u| {
+            u.input_tokens.unwrap_or(0) > 0
+                || u.output_tokens.unwrap_or(0) > 0
+                || u.total_tokens.unwrap_or(0) > 0
+                || u.cache_tokens.unwrap_or(0) > 0
+        })
+        .unwrap_or(false)
 }
 
 fn add_token_usage(target: &mut TokenUsage, source: &TokenUsage) {
@@ -72,7 +86,9 @@ fn normalize_cache_tokens(raw: &serde_json::Map<String, Value>) -> Option<u64> {
         .or_else(|| as_usize_field(raw, "cacheTokens"))
         .or_else(|| as_usize_field(raw, "cached_input_tokens"))
         .or_else(|| as_usize_field(raw, "cachedInputTokens"));
-    if direct.is_some() { return direct; }
+    if direct.is_some() {
+        return direct;
+    }
 
     let from_creation = as_usize_field(raw, "cache_creation_input_tokens")
         .or_else(|| as_usize_field(raw, "cacheCreationInputTokens"));
@@ -85,12 +101,16 @@ fn normalize_cache_tokens(raw: &serde_json::Map<String, Value>) -> Option<u64> {
 }
 
 fn extract_token_usage_from_value(value: &Value, depth: u32) -> Option<TokenUsage> {
-    if depth > 16 { return None; }
+    if depth > 16 {
+        return None;
+    }
 
     if let Some(arr) = value.as_array() {
         let mut merged = TokenUsage {
-            input_tokens: None, output_tokens: None,
-            total_tokens: None, cache_tokens: None,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            cache_tokens: None,
         };
         let mut found = false;
         for item in arr {
@@ -108,17 +128,25 @@ fn extract_token_usage_from_value(value: &Value, depth: u32) -> Option<TokenUsag
     };
 
     // total_token_usage wins (typically pre-summarized by Claude Code).
-    let total_src = obj.get("total_token_usage").filter(|v| v.is_object())
+    let total_src = obj
+        .get("total_token_usage")
+        .filter(|v| v.is_object())
         .or_else(|| obj.get("totalTokenUsage").filter(|v| v.is_object()));
     if let Some(src) = total_src {
         let total_usage = extract_token_usage_from_value(src, depth + 1);
-        if has_non_zero(total_usage.as_ref()) { return total_usage; }
+        if has_non_zero(total_usage.as_ref()) {
+            return total_usage;
+        }
 
-        let last_src = obj.get("last_token_usage").filter(|v| v.is_object())
+        let last_src = obj
+            .get("last_token_usage")
+            .filter(|v| v.is_object())
             .or_else(|| obj.get("lastTokenUsage").filter(|v| v.is_object()));
         if let Some(src) = last_src {
             let last_usage = extract_token_usage_from_value(src, depth + 1);
-            if has_non_zero(last_usage.as_ref()) { return last_usage; }
+            if has_non_zero(last_usage.as_ref()) {
+                return last_usage;
+            }
         }
         return total_usage;
     }
@@ -135,13 +163,18 @@ fn extract_token_usage_from_value(value: &Value, depth: u32) -> Option<TokenUsag
 
     let total = as_usize_field(obj, "total_tokens")
         .or_else(|| as_usize_field(obj, "totalTokens"))
-        .or_else(|| match (input, output) { (Some(i), Some(o)) => Some(i + o), _ => None });
+        .or_else(|| match (input, output) {
+            (Some(i), Some(o)) => Some(i + o),
+            _ => None,
+        });
 
     let cache = normalize_cache_tokens(obj);
 
     let mut usage = TokenUsage {
-        input_tokens: input, output_tokens: output,
-        total_tokens: total, cache_tokens: cache,
+        input_tokens: input,
+        output_tokens: output,
+        total_tokens: total,
+        cache_tokens: cache,
     };
 
     for (_k, candidate) in obj.iter() {
@@ -165,14 +198,29 @@ pub fn extract_token_usage(entry: &JsonlEntry) -> Option<TokenUsage> {
 }
 
 fn has_cumulative_token_usage(value: &Value, depth: u32) -> bool {
-    if depth > 16 { return false; }
+    if depth > 16 {
+        return false;
+    }
     if let Some(arr) = value.as_array() {
         return arr.iter().any(|v| has_cumulative_token_usage(v, depth + 1));
     }
-    let obj = match value.as_object() { Some(o) => o, None => return false };
-    if obj.get("total_token_usage").map(|v| v.is_object()).unwrap_or(false)
-        || obj.get("totalTokenUsage").map(|v| v.is_object()).unwrap_or(false) { return true; }
-    obj.iter().any(|(_, v)| has_cumulative_token_usage(v, depth + 1))
+    let obj = match value.as_object() {
+        Some(o) => o,
+        None => return false,
+    };
+    if obj
+        .get("total_token_usage")
+        .map(|v| v.is_object())
+        .unwrap_or(false)
+        || obj
+            .get("totalTokenUsage")
+            .map(|v| v.is_object())
+            .unwrap_or(false)
+    {
+        return true;
+    }
+    obj.iter()
+        .any(|(_, v)| has_cumulative_token_usage(v, depth + 1))
 }
 
 /// Parse up to `max_lines` JSONL lines from `path`. Malformed lines are skipped.
@@ -188,11 +236,15 @@ pub fn parse_jsonl_text(raw: &str, max_lines: usize) -> Vec<JsonlEntry> {
     let mut out = Vec::new();
     for line in raw.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() { continue; }
+        if trimmed.is_empty() {
+            continue;
+        }
         if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
             out.push(JsonlEntry(v));
         }
-        if max_lines != usize::MAX && out.len() >= max_lines { break; }
+        if max_lines != usize::MAX && out.len() >= max_lines {
+            break;
+        }
     }
     out
 }
@@ -224,18 +276,26 @@ fn first_prompt_from_message(msg: &Value) -> String {
 }
 
 fn basename_no_ext(path: &Path) -> String {
-    path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+    path.file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
-pub fn extract_claude_session_meta(entries: &[JsonlEntry], file_path: &Path, modified_at: &str) -> SessionMeta {
+pub fn extract_claude_session_meta(
+    entries: &[JsonlEntry],
+    file_path: &Path,
+    modified_at: &str,
+) -> SessionMeta {
     let mut session_id = String::new();
     let mut model = String::new();
     let mut project_path = String::new();
     let mut first_prompt = String::new();
     let mut custom_title = String::new();
     let mut token_usage = TokenUsage {
-        input_tokens: None, output_tokens: None,
-        total_tokens: None, cache_tokens: None,
+        input_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        cache_tokens: None,
     };
     let mut has_token_usage = false;
 
@@ -250,12 +310,17 @@ pub fn extract_claude_session_meta(entries: &[JsonlEntry], file_path: &Path, mod
             if entry.type_str() == Some("custom-title") {
                 if let Some(t) = o.get("customTitle").and_then(|v| v.as_str()) {
                     let trimmed = t.trim();
-                    if !trimmed.is_empty() { custom_title = trimmed.to_string(); }
+                    if !trimmed.is_empty() {
+                        custom_title = trimmed.to_string();
+                    }
                 }
             }
             if model.is_empty() {
-                let candidate = o.get("model").and_then(|v| v.as_str())
-                    .or_else(|| o.get("message").and_then(|m| m.get("model")).and_then(|v| v.as_str()));
+                let candidate = o.get("model").and_then(|v| v.as_str()).or_else(|| {
+                    o.get("message")
+                        .and_then(|m| m.get("model"))
+                        .and_then(|v| v.as_str())
+                });
                 if let Some(c) = candidate {
                     if !c.starts_with('<') && c != "synthetic" {
                         model = c.to_string();
@@ -271,7 +336,9 @@ pub fn extract_claude_session_meta(entries: &[JsonlEntry], file_path: &Path, mod
             if (t == Some("user") || t == Some("human")) && first_prompt.is_empty() {
                 if let Some(msg) = o.get("message") {
                     let p = first_prompt_from_message(msg);
-                    if !p.is_empty() { first_prompt = p; }
+                    if !p.is_empty() {
+                        first_prompt = p;
+                    }
                 }
             }
         }
@@ -297,22 +364,36 @@ pub fn extract_claude_session_meta(entries: &[JsonlEntry], file_path: &Path, mod
         model,
         project_path,
         first_prompt: truncated,
-        custom_title: if custom_title.is_empty() { None } else { Some(custom_title) },
+        custom_title: if custom_title.is_empty() {
+            None
+        } else {
+            Some(custom_title)
+        },
         file_path: file_path.to_string_lossy().to_string(),
         created_at: modified_at.to_string(),
         modified_at: modified_at.to_string(),
-        token_usage: if has_token_usage { Some(token_usage) } else { None },
+        token_usage: if has_token_usage {
+            Some(token_usage)
+        } else {
+            None
+        },
     }
 }
 
-pub fn extract_codex_session_meta(entries: &[JsonlEntry], file_path: &Path, modified_at: &str) -> SessionMeta {
+pub fn extract_codex_session_meta(
+    entries: &[JsonlEntry],
+    file_path: &Path,
+    modified_at: &str,
+) -> SessionMeta {
     let mut session_id = String::new();
     let mut model = String::new();
     let mut project_path = String::new();
     let mut first_prompt = String::new();
     let mut token_usage = TokenUsage {
-        input_tokens: None, output_tokens: None,
-        total_tokens: None, cache_tokens: None,
+        input_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        cache_tokens: None,
     };
     let mut has_token_usage = false;
 
@@ -380,7 +461,11 @@ pub fn extract_codex_session_meta(entries: &[JsonlEntry], file_path: &Path, modi
         file_path: file_path.to_string_lossy().to_string(),
         created_at: modified_at.to_string(),
         modified_at: modified_at.to_string(),
-        token_usage: if has_token_usage { Some(token_usage) } else { None },
+        token_usage: if has_token_usage {
+            Some(token_usage)
+        } else {
+            None
+        },
     }
 }
 
@@ -444,9 +529,9 @@ mod tests {
     #[test]
     fn claude_meta_extracts_custom_title() {
         let path = Path::new("/tmp/abc.jsonl");
-        let entries = vec![
-            entry(r#"{"type":"custom-title","customTitle":"  my topic  "}"#),
-        ];
+        let entries = vec![entry(
+            r#"{"type":"custom-title","customTitle":"  my topic  "}"#,
+        )];
         let meta = extract_claude_session_meta(&entries, path, "now");
         assert_eq!(meta.custom_title.as_deref(), Some("my topic"));
     }
@@ -454,9 +539,9 @@ mod tests {
     #[test]
     fn claude_meta_extracts_total_token_usage() {
         let path = Path::new("/tmp/abc.jsonl");
-        let entries = vec![
-            entry(r#"{"message":{"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":200}}}"#),
-        ];
+        let entries = vec![entry(
+            r#"{"message":{"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":200}}}"#,
+        )];
         let meta = extract_claude_session_meta(&entries, path, "now");
         let usage = meta.token_usage.expect("should have token usage");
         assert_eq!(usage.input_tokens, Some(100));
@@ -471,7 +556,9 @@ mod tests {
         // total_token_usage overrides per-turn usage
         let entries = vec![
             entry(r#"{"message":{"usage":{"input_tokens":100}}}"#),
-            entry(r#"{"total_token_usage":{"input_tokens":5000,"output_tokens":1000,"cache_read_input_tokens":3000}}"#),
+            entry(
+                r#"{"total_token_usage":{"input_tokens":5000,"output_tokens":1000,"cache_read_input_tokens":3000}}"#,
+            ),
         ];
         let meta = extract_claude_session_meta(&entries, path, "now");
         let usage = meta.token_usage.expect("should have token usage");
@@ -483,7 +570,9 @@ mod tests {
     fn codex_meta_extracts_session_meta_payload() {
         let path = Path::new("/tmp/codex-abc.jsonl");
         let entries = vec![
-            entry(r#"{"type":"session_meta","payload":{"id":"codex-abc","cwd":"/home/u/proj","model_provider":"openai"}}"#),
+            entry(
+                r#"{"type":"session_meta","payload":{"id":"codex-abc","cwd":"/home/u/proj","model_provider":"openai"}}"#,
+            ),
             entry(r#"{"type":"event_msg","payload":{"type":"user_message","content":"hi there"}}"#),
             entry(r#"{"type":"turn_context","payload":{"model":"gpt-5"}}"#),
         ];
@@ -506,9 +595,10 @@ mod tests {
     fn first_prompt_truncated_at_200_chars() {
         let long = "a".repeat(500);
         let path = Path::new("/tmp/x.jsonl");
-        let entries = vec![
-            entry(&format!(r#"{{"type":"user","message":{{"content":"{}"}}}}"#, long)),
-        ];
+        let entries = vec![entry(&format!(
+            r#"{{"type":"user","message":{{"content":"{}"}}}}"#,
+            long
+        ))];
         let meta = extract_claude_session_meta(&entries, path, "now");
         assert_eq!(meta.first_prompt.chars().count(), 200);
     }
@@ -516,4 +606,6 @@ mod tests {
 
 // Silence unused warning when only tests use now_iso
 #[allow(dead_code)]
-fn _anchor_now_iso() -> String { now_iso() }
+fn _anchor_now_iso() -> String {
+    now_iso()
+}

@@ -6,7 +6,10 @@ use crate::diagnose::{EvaluateeResult, JudgeVerdict, PersonalityAssessment, Task
 pub fn build_judge_prompt(task: &Task, evaluatees: &[EvaluateeResult]) -> String {
     let mut lines: Vec<String> = Vec::new();
 
-    lines.push("你是一位 LLM 性格评估专家。下面是一项 LLM 性格倾向测试，以及若干被评估 agent 的真实回答。".to_string());
+    lines.push(
+        "你是一位 LLM 性格评估专家。下面是一项 LLM 性格倾向测试，以及若干被评估 agent 的真实回答。"
+            .to_string(),
+    );
     lines.push("请根据每个 agent 的回答，判断其性格类型，并对每个维度打 1-5 分。".to_string());
     lines.push(String::new());
 
@@ -48,8 +51,13 @@ pub fn build_judge_prompt(task: &Task, evaluatees: &[EvaluateeResult]) -> String
         }
         for r in &ev.results {
             let q_index = task.questions.iter().position(|q| q.id == r.question_id);
-            let q_label = q_index.map(|i| format!("Q{}", i + 1)).unwrap_or_else(|| r.question_id.clone());
-            let dimension = q_index.and_then(|i| task.questions.get(i)).map(|q| q.dimension.as_str()).unwrap_or("");
+            let q_label = q_index
+                .map(|i| format!("Q{}", i + 1))
+                .unwrap_or_else(|| r.question_id.clone());
+            let dimension = q_index
+                .and_then(|i| task.questions.get(i))
+                .map(|q| q.dimension.as_str())
+                .unwrap_or("");
             lines.push(format!("{} [{}]", q_label, dimension));
             lines.push(format!("问：{}", r.prompt));
             let answer = if r.timed_out {
@@ -65,11 +73,16 @@ pub fn build_judge_prompt(task: &Task, evaluatees: &[EvaluateeResult]) -> String
 
     lines.push(String::new());
     lines.push("## 输出要求".to_string());
-    lines.push("只输出一个 JSON 对象，不要 markdown 代码块，不要任何额外说明。格式如下：".to_string());
+    lines.push(
+        "只输出一个 JSON 对象，不要 markdown 代码块，不要任何额外说明。格式如下：".to_string(),
+    );
     lines.push(
         "{\"assessments\":[{\"profileLabel\":\"<与上面完全一致的 profileLabel>\",\"personalityType\":\"<性格类型>\",\"scores\":{\"服从性\":1,\"边界感\":3,...},\"rationale\":\"<判断依据，简明扼要>\"}]}".to_string()
     );
-    lines.push(format!("scores 必须包含全部 {} 个维度，每个值为 1-5 的整数。", task.scoring_dimensions.len()));
+    lines.push(format!(
+        "scores 必须包含全部 {} 个维度，每个值为 1-5 的整数。",
+        task.scoring_dimensions.len()
+    ));
     lines.push("assessments 的数量和顺序要与被评估 agent 一致。".to_string());
 
     lines.join("\n")
@@ -135,18 +148,34 @@ pub fn parse_judge_verdict(raw: &str, evaluatees: &[EvaluateeResult]) -> JudgeVe
     let expected_labels: Vec<String> = evaluatees.iter().map(|e| e.profile_label.clone()).collect();
     let mut out: Vec<PersonalityAssessment> = Vec::new();
     for entry in arr {
-        let profile_label = entry.get("profileLabel").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let profile_label = entry
+            .get("profileLabel")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let label = if profile_label.is_empty() {
-            expected_labels.get(out.len()).cloned().unwrap_or_else(|| format!("agent-{}", out.len() + 1))
+            expected_labels
+                .get(out.len())
+                .cloned()
+                .unwrap_or_else(|| format!("agent-{}", out.len() + 1))
         } else {
             profile_label
         };
-        let personality_type = entry.get("personalityType").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let rationale = entry.get("rationale").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let personality_type = entry
+            .get("personalityType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let rationale = entry
+            .get("rationale")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let mut scores: std::collections::BTreeMap<String, i32> = std::collections::BTreeMap::new();
         if let Some(scores_obj) = entry.get("scores").and_then(|v| v.as_object()) {
             for (k, v) in scores_obj {
-                let n = v.as_i64()
+                let n = v
+                    .as_i64()
                     .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
                     .unwrap_or(0);
                 if n != 0 {
@@ -181,7 +210,10 @@ fn strip_markdown_fences(raw: &str) -> String {
     if let Some(s) = find_substring_no_case(raw, "```") {
         // Skip past the fence line
         let after = &raw[s + 3..];
-        let lang_skip = after.find(|c: char| c == '\n').map(|n| s + 3 + n + 1).unwrap_or(s + 3);
+        let lang_skip = after
+            .find(|c: char| c == '\n')
+            .map(|n| s + 3 + n + 1)
+            .unwrap_or(s + 3);
         start = lang_skip;
     }
     if let Some(e_rel) = find_substring_no_case(&raw[start..], "```") {

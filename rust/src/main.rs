@@ -2,12 +2,12 @@ use anyhow::Result;
 use clap::Parser;
 use std::any::Any;
 
-mod types;
-mod constants;
 mod cli;
 mod commands;
+mod constants;
 mod core;
 mod diagnose;
+mod types;
 
 fn main() -> Result<()> {
     std::panic::set_hook(Box::new(|info| {

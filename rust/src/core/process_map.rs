@@ -24,6 +24,7 @@ pub struct MappedSession {
     pub file_path: Option<String>,
     pub session_id: Option<String>,
     pub home: Option<String>,
+    pub confidence: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -40,9 +41,13 @@ pub struct ProcStat {
 pub fn parse_proc_environ(raw: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for chunk in raw.split('\0') {
-        if chunk.is_empty() { continue; }
+        if chunk.is_empty() {
+            continue;
+        }
         if let Some(eq) = chunk.find('=') {
-            if eq == 0 { continue; }
+            if eq == 0 {
+                continue;
+            }
             out.insert(chunk[..eq].to_string(), chunk[eq + 1..].to_string());
         }
     }
@@ -52,13 +57,13 @@ pub fn parse_proc_environ(raw: &str) -> HashMap<String, String> {
 pub fn parse_proc_stat(raw: &str) -> Option<ProcStat> {
     let open = raw.find('(')?;
     let close = raw.rfind(')')?;
-    if close <= open { return None; }
+    if close <= open {
+        return None;
+    }
     let pid: u32 = raw[..open].trim().parse().ok()?;
     let comm = raw[open + 1..close].to_string();
     let rest: Vec<&str> = raw[close + 1..].split_whitespace().collect();
-    let num = |i: usize| -> u64 {
-        rest.get(i).and_then(|s| s.parse().ok()).unwrap_or(0)
-    };
+    let num = |i: usize| -> u64 { rest.get(i).and_then(|s| s.parse().ok()).unwrap_or(0) };
     Some(ProcStat {
         pid,
         comm,
@@ -75,8 +80,12 @@ const AGENT_COMM_PREFIXES: &[&str] = &[
 ];
 
 pub fn comm_might_be_agent(comm: &str) -> bool {
-    if comm.is_empty() { return false; }
-    AGENT_COMM_PREFIXES.iter().any(|p| comm == *p || comm.starts_with(p))
+    if comm.is_empty() {
+        return false;
+    }
+    AGENT_COMM_PREFIXES
+        .iter()
+        .any(|p| comm == *p || comm.starts_with(p))
 }
 
 /// Inspect a process's cmdline vector and return which provider it launched,
@@ -84,13 +93,23 @@ pub fn comm_might_be_agent(comm: &str) -> bool {
 /// any arg by path suffix.
 pub fn provider_from_cmdline(args: &[String]) -> Option<Provider> {
     for arg in args.iter().take(4) {
-        let base = Path::new(arg).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        if base == "claude" || base == "claude-code" { return Some(Provider::Claude); }
-        if base == "codex" { return Some(Provider::Codex); }
+        let base = Path::new(arg)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if base == "claude" || base == "claude-code" {
+            return Some(Provider::Claude);
+        }
+        if base == "codex" {
+            return Some(Provider::Codex);
+        }
     }
     for arg in args {
         let lower = arg.to_lowercase();
-        if lower.ends_with("/claude") || lower.contains("/claude.js") || lower.ends_with("/claude-code") {
+        if lower.ends_with("/claude")
+            || lower.contains("/claude.js")
+            || lower.ends_with("/claude-code")
+        {
             return Some(Provider::Claude);
         }
         if lower.ends_with("/codex") || lower.contains("/codex.js") {
@@ -134,24 +153,35 @@ pub fn extract_resume_uuid(args: &[String]) -> Option<String> {
 fn looks_like_uuid(s: &str) -> bool {
     // 8-4-4-4-12 hex
     let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() != 5 { return false; }
+    if parts.len() != 5 {
+        return false;
+    }
     let lens = [8usize, 4, 4, 4, 12];
-    parts.iter().zip(lens.iter()).all(|(p, &expected)| {
-        p.len() == expected && p.chars().all(|c| c.is_ascii_hexdigit())
-    })
+    parts
+        .iter()
+        .zip(lens.iter())
+        .all(|(p, &expected)| p.len() == expected && p.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 pub fn resolve_agent_home(provider: Provider, environ: &HashMap<String, String>) -> PathBuf {
     match provider {
         Provider::Claude => {
-            if let Some(v) = environ.get("CLAUDE_CONFIG_DIR").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if let Some(v) = environ
+                .get("CLAUDE_CONFIG_DIR")
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
                 expand_home(v)
             } else {
                 dirs::home_dir().unwrap_or_default().join(".claude")
             }
         }
         Provider::Codex => {
-            if let Some(v) = environ.get("CODEX_HOME").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if let Some(v) = environ
+                .get("CODEX_HOME")
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
                 expand_home(v)
             } else {
                 dirs::home_dir().unwrap_or_default().join(".codex")
@@ -174,14 +204,19 @@ pub fn encode_claude_cwd(cwd: &str) -> String {
 }
 
 pub fn extract_session_id_from_path(file_path: &str) -> Option<String> {
-    let name = Path::new(file_path).file_stem()?.to_string_lossy().to_string();
+    let name = Path::new(file_path)
+        .file_stem()?
+        .to_string_lossy()
+        .to_string();
     // Bare UUID match
     let parts: Vec<&str> = name.split('-').collect();
     if parts.len() == 5 {
         let lens = [8usize, 4, 4, 4, 12];
-        if parts.iter().zip(lens.iter()).all(|(p, &expected)| {
-            p.len() == expected && p.chars().all(|c| c.is_ascii_hexdigit())
-        }) {
+        if parts
+            .iter()
+            .zip(lens.iter())
+            .all(|(p, &expected)| p.len() == expected && p.chars().all(|c| c.is_ascii_hexdigit()))
+        {
             return Some(parts.join("-").to_lowercase());
         }
     }
@@ -195,15 +230,21 @@ pub fn is_session_file_path(file_path: &str) -> bool {
         None => return false,
     };
     let lower = name.to_lowercase();
-    if !lower.ends_with(".jsonl") { return false; }
+    if !lower.ends_with(".jsonl") {
+        return false;
+    }
     let stem = &lower[..lower.len() - ".jsonl".len()];
     // Bare UUID
     let parts: Vec<&str> = stem.split('-').collect();
     if parts.len() == 5 {
         let lens = [8usize, 4, 4, 4, 12];
-        if parts.iter().zip(lens.iter()).all(|(p, &expected)| {
-            p.len() == expected && p.chars().all(|c| c.is_ascii_hexdigit())
-        }) { return true; }
+        if parts
+            .iter()
+            .zip(lens.iter())
+            .all(|(p, &expected)| p.len() == expected && p.chars().all(|c| c.is_ascii_hexdigit()))
+        {
+            return true;
+        }
     }
     stem.starts_with("rollout-")
 }
@@ -215,7 +256,9 @@ fn is_linux() -> bool {
 }
 
 fn read_cmdline(pid: u32) -> Option<Vec<String>> {
-    if !is_linux() { return None; }
+    if !is_linux() {
+        return None;
+    }
     let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
     Some(
         raw.split(|b| *b == 0)
@@ -226,7 +269,9 @@ fn read_cmdline(pid: u32) -> Option<Vec<String>> {
 }
 
 fn read_environ(pid: u32) -> HashMap<String, String> {
-    if !is_linux() { return HashMap::new(); }
+    if !is_linux() {
+        return HashMap::new();
+    }
     let raw = match std::fs::read(format!("/proc/{pid}/environ")) {
         Ok(r) => r,
         Err(_) => return HashMap::new(),
@@ -236,7 +281,9 @@ fn read_environ(pid: u32) -> HashMap<String, String> {
 }
 
 fn read_cwd(pid: u32) -> Option<PathBuf> {
-    if !is_linux() { return None; }
+    if !is_linux() {
+        return None;
+    }
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
 }
 
@@ -258,14 +305,14 @@ pub fn is_claude_background_task_process(pid: u32) -> bool {
         return false;
     };
     stdin == Path::new("/dev/null")
-        && stdout
-            .to_string_lossy()
-            .contains("/tasks/")
+        && stdout.to_string_lossy().contains("/tasks/")
         && stdout.extension().and_then(|e| e.to_str()) == Some("output")
 }
 
 fn read_open_jsonl_files(pid: u32) -> Vec<PathBuf> {
-    if !is_linux() { return vec![]; }
+    if !is_linux() {
+        return vec![];
+    }
     let mut out = Vec::new();
     let fd_dir = match std::fs::read_dir(format!("/proc/{pid}/fd")) {
         Ok(d) => d,
@@ -282,7 +329,9 @@ fn read_open_jsonl_files(pid: u32) -> Vec<PathBuf> {
 }
 
 pub fn is_pid_alive(pid: u32) -> bool {
-    if pid == 0 { return false; }
+    if pid == 0 {
+        return false;
+    }
     is_pid_alive_platform(pid)
 }
 
@@ -298,7 +347,9 @@ fn is_pid_alive_platform(pid: u32) -> bool {
     // kill(pid, 0) returns 0 if process exists, ESRCH if not, EPERM if exists
     // but not ours.
     let rc = unsafe { libc::kill(pid as i32, 0) };
-    if rc == 0 { return true; }
+    if rc == 0 {
+        return true;
+    }
     let errno = unsafe { *libc::__errno_location() };
     // EPERM = 1
     errno == 1
@@ -307,7 +358,9 @@ fn is_pid_alive_platform(pid: u32) -> bool {
 #[cfg(all(unix, not(target_os = "linux")))]
 fn is_pid_alive_platform(pid: u32) -> bool {
     let rc = unsafe { libc::kill(pid as i32, 0) };
-    if rc == 0 { return true; }
+    if rc == 0 {
+        return true;
+    }
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
@@ -341,7 +394,9 @@ fn is_pid_runnable_platform(_pid: u32) -> bool {
 /// ppid → children[] index over /proc.
 pub fn build_child_map() -> HashMap<u32, Vec<u32>> {
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    if !is_linux() { return children; }
+    if !is_linux() {
+        return children;
+    }
     let rd = match std::fs::read_dir("/proc") {
         Ok(r) => r,
         Err(_) => return children,
@@ -349,7 +404,12 @@ pub fn build_child_map() -> HashMap<u32, Vec<u32>> {
     for entry in rd.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        let pid: u32 = match name_str.chars().all(|c| c.is_ascii_digit()).then(|| name_str.parse().ok()).flatten() {
+        let pid: u32 = match name_str
+            .chars()
+            .all(|c| c.is_ascii_digit())
+            .then(|| name_str.parse().ok())
+            .flatten()
+        {
             Some(p) => p,
             None => continue,
         };
@@ -357,7 +417,10 @@ pub fn build_child_map() -> HashMap<u32, Vec<u32>> {
             Ok(s) => s,
             Err(_) => continue,
         };
-        let stat = match parse_proc_stat(&stat_raw) { Some(s) => s, None => continue };
+        let stat = match parse_proc_stat(&stat_raw) {
+            Some(s) => s,
+            None => continue,
+        };
         children.entry(stat.ppid).or_default().push(stat.pid);
     }
     children
@@ -380,7 +443,9 @@ pub struct ProcScan {
 pub fn scan_proc_once() -> ProcScan {
     let mut agents: Vec<(u32, Provider, Vec<String>)> = Vec::new();
     let mut child_map: HashMap<u32, Vec<u32>> = HashMap::new();
-    if !is_linux() { return ProcScan { agents, child_map }; }
+    if !is_linux() {
+        return ProcScan { agents, child_map };
+    }
     let rd = match std::fs::read_dir("/proc") {
         Ok(r) => r,
         Err(_) => return ProcScan { agents, child_map },
@@ -388,7 +453,12 @@ pub fn scan_proc_once() -> ProcScan {
     for entry in rd.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        let pid: u32 = match name_str.chars().all(|c| c.is_ascii_digit()).then(|| name_str.parse().ok()).flatten() {
+        let pid: u32 = match name_str
+            .chars()
+            .all(|c| c.is_ascii_digit())
+            .then(|| name_str.parse().ok())
+            .flatten()
+        {
             Some(p) => p,
             None => continue,
         };
@@ -396,9 +466,14 @@ pub fn scan_proc_once() -> ProcScan {
             Ok(s) => s,
             Err(_) => continue,
         };
-        let stat = match parse_proc_stat(&stat_raw) { Some(s) => s, None => continue };
+        let stat = match parse_proc_stat(&stat_raw) {
+            Some(s) => s,
+            None => continue,
+        };
         child_map.entry(stat.ppid).or_default().push(stat.pid);
-        if !comm_might_be_agent(&stat.comm) { continue; }
+        if !comm_might_be_agent(&stat.comm) {
+            continue;
+        }
         let args = match read_cmdline(pid) {
             Some(a) if !a.is_empty() => a,
             _ => continue,
@@ -426,9 +501,14 @@ fn build_file_index(root: &Path, dirs: &[String]) -> Option<HashMap<String, Path
     }
     // Claude: one subdir per cwd
     for d in dirs {
-        if d == "subagents" { continue; }
+        if d == "subagents" {
+            continue;
+        }
         let subdir = root.join(d);
-        let rd = match std::fs::read_dir(&subdir) { Ok(r) => r, Err(_) => continue };
+        let rd = match std::fs::read_dir(&subdir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
         for entry in rd.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
@@ -441,27 +521,43 @@ fn build_file_index(root: &Path, dirs: &[String]) -> Option<HashMap<String, Path
 }
 
 fn find_file_recursive(dir: &Path, target: &str, depth: u32) -> Option<PathBuf> {
-    if depth > 3 { return None; }
-    let rd = match std::fs::read_dir(dir) { Ok(r) => r, Err(_) => return None };
+    if depth > 3 {
+        return None;
+    }
+    let rd = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return None,
+    };
     let target_file = format!("{target}.jsonl");
     for entry in rd.flatten() {
         let path = entry.path();
-        if path.file_name().map(|n| n == "subagents").unwrap_or(false) { continue; }
-        let md = match entry.metadata() { Ok(m) => m, Err(_) => continue };
+        if path.file_name().map(|n| n == "subagents").unwrap_or(false) {
+            continue;
+        }
+        let md = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
         if md.is_dir() {
             if let Some(found) = find_file_recursive(&path, target, depth + 1) {
                 return Some(found);
             }
         } else {
             let name = entry.file_name().to_string_lossy().to_lowercase();
-            if name == target_file { return Some(path); }
+            if name == target_file {
+                return Some(path);
+            }
         }
     }
     None
 }
 
 /// Locate `<root>/<...>/<sessionId>.jsonl`. Uses cache when provided.
-pub fn find_session_file_by_id(root: &Path, session_id: &str, cache: Option<&mut ResolverCache>) -> Option<PathBuf> {
+pub fn find_session_file_by_id(
+    root: &Path,
+    session_id: &str,
+    cache: Option<&mut ResolverCache>,
+) -> Option<PathBuf> {
     let target = session_id.to_lowercase();
     let target_file = format!("{target}.jsonl");
 
@@ -494,26 +590,44 @@ pub fn find_session_file_by_id(root: &Path, session_id: &str, cache: Option<&mut
     }
 
     // No cache: stat each immediate subdir
-    let rd = match std::fs::read_dir(root) { Ok(r) => r, Err(_) => return None };
+    let rd = match std::fs::read_dir(root) {
+        Ok(r) => r,
+        Err(_) => return None,
+    };
     for entry in rd.flatten() {
-        if entry.file_name() == "subagents" { continue; }
+        if entry.file_name() == "subagents" {
+            continue;
+        }
         let candidate = entry.path().join(format!("{target}.jsonl"));
-        if candidate.is_file() { return Some(candidate); }
+        if candidate.is_file() {
+            return Some(candidate);
+        }
     }
     let direct = root.join(format!("{target}.jsonl"));
-    if direct.is_file() { return Some(direct); }
+    if direct.is_file() {
+        return Some(direct);
+    }
     find_file_recursive(root, &target, 0)
 }
 
 fn most_recent_jsonl(dir: &Path) -> Option<(PathBuf, u64)> {
-    let rd = match std::fs::read_dir(dir) { Ok(r) => r, Err(_) => return None };
+    let rd = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return None,
+    };
     let mut best: Option<(PathBuf, u64)> = None;
     for entry in rd.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") { continue; }
-        let mtime = entry.metadata().ok()?
-            .modified().ok()?
-            .duration_since(std::time::UNIX_EPOCH).ok()?
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .ok()?
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
             .as_millis() as u64;
         best = match best {
             Some((_, bm)) if bm >= mtime => best,
@@ -524,13 +638,23 @@ fn most_recent_jsonl(dir: &Path) -> Option<(PathBuf, u64)> {
 }
 
 fn most_recent_jsonl_recursive(dir: &Path, depth: u32) -> Option<(PathBuf, u64)> {
-    if depth > 2 { return None; }
-    let rd = match std::fs::read_dir(dir) { Ok(r) => r, Err(_) => return None };
+    if depth > 2 {
+        return None;
+    }
+    let rd = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return None,
+    };
     let mut best: Option<(PathBuf, u64)> = None;
     for entry in rd.flatten() {
         let path = entry.path();
-        if path.file_name().map(|n| n == "subagents").unwrap_or(false) { continue; }
-        let md = match entry.metadata() { Ok(m) => m, Err(_) => continue };
+        if path.file_name().map(|n| n == "subagents").unwrap_or(false) {
+            continue;
+        }
+        let md = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
         if md.is_dir() {
             if let Some(nested) = most_recent_jsonl_recursive(&path, depth + 1) {
                 best = match best {
@@ -539,9 +663,12 @@ fn most_recent_jsonl_recursive(dir: &Path, depth: u32) -> Option<(PathBuf, u64)>
                 };
             }
         } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-            let mtime = md.modified().ok()
+            let mtime = md
+                .modified()
+                .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as u64).unwrap_or(0);
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
             best = match best {
                 Some((_, bm)) if bm >= mtime => best,
                 _ => Some((path, mtime)),
@@ -556,16 +683,23 @@ fn cached_most_recent_jsonl(dir: &Path, cache: &mut ResolverCache) -> Option<(Pa
         return hit.clone();
     }
     let result = most_recent_jsonl(dir);
-    cache.recent_jsonl_flat.insert(dir.to_path_buf(), result.clone());
+    cache
+        .recent_jsonl_flat
+        .insert(dir.to_path_buf(), result.clone());
     result
 }
 
-fn cached_most_recent_jsonl_recursive(root: &Path, cache: &mut ResolverCache) -> Option<(PathBuf, u64)> {
+fn cached_most_recent_jsonl_recursive(
+    root: &Path,
+    cache: &mut ResolverCache,
+) -> Option<(PathBuf, u64)> {
     if let Some(hit) = cache.recent_jsonl.get(root) {
         return hit.clone();
     }
     let result = most_recent_jsonl_recursive(root, 0);
-    cache.recent_jsonl.insert(root.to_path_buf(), result.clone());
+    cache
+        .recent_jsonl
+        .insert(root.to_path_buf(), result.clone());
     result
 }
 
@@ -577,11 +711,18 @@ struct ResolveContext<'a> {
     cache: &'a mut ResolverCache,
 }
 
-fn resolve_from_open_files(ctx: &mut ResolveContext, provider: Provider, pid: u32) -> Option<MappedSession> {
-    let files: Vec<PathBuf> = read_open_jsonl_files(pid).into_iter()
+fn resolve_from_open_files(
+    ctx: &mut ResolveContext,
+    provider: Provider,
+    pid: u32,
+) -> Option<MappedSession> {
+    let files: Vec<PathBuf> = read_open_jsonl_files(pid)
+        .into_iter()
         .filter(|f| is_session_file_path(&f.to_string_lossy()))
         .collect();
-    if files.is_empty() { return None; }
+    if files.is_empty() {
+        return None;
+    }
     let in_root = files.iter().find(|f| f.starts_with(&ctx.root));
     let chosen = in_root.cloned().or_else(|| files.first().cloned())?;
     let sid = extract_session_id_from_path(&chosen.to_string_lossy())?;
@@ -592,10 +733,16 @@ fn resolve_from_open_files(ctx: &mut ResolveContext, provider: Provider, pid: u3
         file_path: Some(chosen.to_string_lossy().to_string()),
         home: Some(ctx.home.to_string_lossy().to_string()),
         project_path: ctx.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
+        confidence: 100,
     })
 }
 
-fn resolve_from_resume(ctx: &mut ResolveContext, uuid: &str, pid: u32, provider: Provider) -> Option<MappedSession> {
+fn resolve_from_resume(
+    ctx: &mut ResolveContext,
+    uuid: &str,
+    pid: u32,
+    provider: Provider,
+) -> Option<MappedSession> {
     let file = find_session_file_by_id(&ctx.root, uuid, Some(ctx.cache))?;
     Some(MappedSession {
         pid,
@@ -604,10 +751,15 @@ fn resolve_from_resume(ctx: &mut ResolveContext, uuid: &str, pid: u32, provider:
         file_path: Some(file.to_string_lossy().to_string()),
         home: Some(ctx.home.to_string_lossy().to_string()),
         project_path: ctx.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
+        confidence: 100,
     })
 }
 
-fn resolve_from_cwd_mtime(ctx: &mut ResolveContext, provider: Provider, pid: u32) -> Option<MappedSession> {
+fn resolve_from_cwd_mtime(
+    ctx: &mut ResolveContext,
+    provider: Provider,
+    pid: u32,
+) -> Option<MappedSession> {
     let cwd = ctx.cwd.as_ref()?;
     let encoded = encode_claude_cwd(&cwd.to_string_lossy());
     let dir = ctx.root.join(encoded);
@@ -621,7 +773,12 @@ fn resolve_from_cwd_mtime(ctx: &mut ResolveContext, provider: Provider, pid: u32
         file_path: Some(best.0.to_string_lossy().to_string()),
         home: Some(ctx.home.to_string_lossy().to_string()),
         project_path: Some(cwd.to_string_lossy().to_string()),
+        confidence: 10,
     })
+}
+
+fn should_replace_mapping(existing: &MappedSession, candidate: &MappedSession) -> bool {
+    candidate.confidence > existing.confidence
 }
 
 fn resolve_process(
@@ -632,7 +789,9 @@ fn resolve_process(
     visited: &mut HashSet<u32>,
     cache: &mut ResolverCache,
 ) -> Option<MappedSession> {
-    if visited.contains(&proc_pid) { return None; }
+    if visited.contains(&proc_pid) {
+        return None;
+    }
     visited.insert(proc_pid);
 
     let environ = read_environ(proc_pid);
@@ -640,7 +799,13 @@ fn resolve_process(
     let root = session_root_for_home(proc_provider, &home);
     let cwd = read_cwd(proc_pid);
 
-    let mut ctx = ResolveContext { environ, home, root, cwd, cache };
+    let mut ctx = ResolveContext {
+        environ,
+        home,
+        root,
+        cwd,
+        cache,
+    };
 
     // 1. fd scan first (cheap, almost always works)
     if let Some(m) = resolve_from_open_files(&mut ctx, proc_provider, proc_pid) {
@@ -655,10 +820,24 @@ fn resolve_process(
     // 3. process-tree BFS
     if let Some(children) = child_map.get(&proc_pid).cloned() {
         for child_pid in children {
-            if visited.contains(&child_pid) { continue; }
-            if is_claude_background_task_process(child_pid) { continue; }
-            let child_args = match read_cmdline(child_pid) { Some(a) => a, None => continue };
-            if let Some(m) = resolve_process(child_pid, proc_provider, &child_args, child_map, visited, ctx.cache) {
+            if visited.contains(&child_pid) {
+                continue;
+            }
+            if is_claude_background_task_process(child_pid) {
+                continue;
+            }
+            let child_args = match read_cmdline(child_pid) {
+                Some(a) => a,
+                None => continue,
+            };
+            if let Some(m) = resolve_process(
+                child_pid,
+                proc_provider,
+                &child_args,
+                child_map,
+                visited,
+                ctx.cache,
+            ) {
                 return Some(m);
             }
         }
@@ -670,22 +849,46 @@ fn resolve_process(
 /// Map every running claude/codex process to its session. Linux-only.
 pub fn map_processes_to_sessions() -> HashMap<String, MappedSession> {
     let mut result: HashMap<String, MappedSession> = HashMap::new();
-    if !is_linux() { return result; }
+    if !is_linux() {
+        return result;
+    }
 
     let scan = scan_proc_once();
-    if scan.agents.is_empty() { return result; }
+    if scan.agents.is_empty() {
+        return result;
+    }
 
     let mut cache = ResolverCache::default();
     for (pid, provider, args) in scan.agents {
-        if !is_pid_runnable(pid) { continue; }
+        if !is_pid_runnable(pid) {
+            continue;
+        }
         let mut visited = HashSet::new();
-        if let Some(mut m) = resolve_process(pid, provider, &args, &scan.child_map, &mut visited, &mut cache) {
-            if m.session_id.is_none() { continue; }
+        if let Some(mut m) = resolve_process(
+            pid,
+            provider,
+            &args,
+            &scan.child_map,
+            &mut visited,
+            &mut cache,
+        ) {
+            if m.session_id.is_none() {
+                continue;
+            }
             let sid = m.session_id.clone().unwrap();
             // Fill provider/pid if not set
-            if m.provider.is_none() { m.provider = Some(provider); }
-            if m.pid == 0 { m.pid = pid; }
-            result.entry(sid).or_insert(m);
+            if m.provider.is_none() {
+                m.provider = Some(provider);
+            }
+            if m.pid == 0 {
+                m.pid = pid;
+            }
+            match result.get(&sid) {
+                Some(existing) if !should_replace_mapping(existing, &m) => {}
+                _ => {
+                    result.insert(sid, m);
+                }
+            }
         }
     }
     result
@@ -695,21 +898,33 @@ pub fn map_processes_to_sessions() -> HashMap<String, MappedSession> {
 /// has opened. This is useful for wrappers like `starling run`, where we know
 /// the child PID and want to annotate the session while it is still running.
 pub fn map_process_tree_to_session(root_pid: u32) -> Option<MappedSession> {
-    if !is_linux() || !is_pid_runnable(root_pid) { return None; }
+    if !is_linux() || !is_pid_runnable(root_pid) {
+        return None;
+    }
     let args = read_cmdline(root_pid)?;
     let provider = provider_from_cmdline(&args)?;
     let scan = scan_proc_once();
     let mut visited = HashSet::new();
     let mut cache = ResolverCache::default();
-    resolve_process(root_pid, provider, &args, &scan.child_map, &mut visited, &mut cache)
+    resolve_process(
+        root_pid,
+        provider,
+        &args,
+        &scan.child_map,
+        &mut visited,
+        &mut cache,
+    )
 }
 
 pub fn map_process_tree_to_session_since(root_pid: u32, since_ms: u64) -> Option<MappedSession> {
     let mapped = map_process_tree_to_session(root_pid)?;
     let file_path = mapped.file_path.as_deref()?;
-    let mtime = std::fs::metadata(file_path).ok()?
-        .modified().ok()?
-        .duration_since(std::time::UNIX_EPOCH).ok()?
+    let mtime = std::fs::metadata(file_path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
         .as_millis() as u64;
     if mtime >= since_ms {
         Some(mapped)
@@ -756,13 +971,22 @@ mod tests {
         let env = parse_proc_environ(raw);
         assert_eq!(env.get("HOME").map(|s| s.as_str()), Some("/home/u"));
         assert_eq!(env.get("USER").map(|s| s.as_str()), Some("u"));
-        assert_eq!(env.get("CLAUDE_CONFIG_DIR").map(|s| s.as_str()), Some("/tmp/.claude"));
+        assert_eq!(
+            env.get("CLAUDE_CONFIG_DIR").map(|s| s.as_str()),
+            Some("/tmp/.claude")
+        );
     }
 
     #[test]
     fn provider_from_cmdline_basename() {
-        assert_eq!(provider_from_cmdline(&["/usr/bin/claude".into()]), Some(Provider::Claude));
-        assert_eq!(provider_from_cmdline(&["/usr/bin/codex".into()]), Some(Provider::Codex));
+        assert_eq!(
+            provider_from_cmdline(&["/usr/bin/claude".into()]),
+            Some(Provider::Claude)
+        );
+        assert_eq!(
+            provider_from_cmdline(&["/usr/bin/codex".into()]),
+            Some(Provider::Codex)
+        );
         assert_eq!(provider_from_cmdline(&["/usr/bin/ls".into()]), None);
     }
 
@@ -781,7 +1005,9 @@ mod tests {
     #[test]
     fn extract_resume_uuid_from_cmdline() {
         let args: Vec<String> = ["claude", "--resume", "a1b2c3d4-e5f6-7890-abcd-ef1234567890"]
-            .iter().map(|s| s.to_string()).collect();
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let uuid = extract_resume_uuid(&args).unwrap();
         assert_eq!(uuid, "a1b2c3d4-e5f6-7890-abcd-ef1234567890");
     }
@@ -789,21 +1015,28 @@ mod tests {
     #[test]
     fn extract_resume_uuid_uppercase_normalized() {
         let args: Vec<String> = ["--resume", "A1B2C3D4-E5F6-7890-ABCD-EF1234567890"]
-            .iter().map(|s| s.to_string()).collect();
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let uuid = extract_resume_uuid(&args).unwrap();
         assert_eq!(uuid, "a1b2c3d4-e5f6-7890-abcd-ef1234567890");
     }
 
     #[test]
     fn encode_claude_cwd_round_trip() {
-        assert_eq!(encode_claude_cwd("/home/user/project"), "-home-user-project");
+        assert_eq!(
+            encode_claude_cwd("/home/user/project"),
+            "-home-user-project"
+        );
         assert_eq!(encode_claude_cwd("/"), "-");
         assert_eq!(encode_claude_cwd("/a/b/c"), "-a-b-c");
     }
 
     #[test]
     fn session_file_path_basics() {
-        assert!(is_session_file_path("/x/y/a1b2c3d4-e5f6-7890-abcd-ef1234567890.jsonl"));
+        assert!(is_session_file_path(
+            "/x/y/a1b2c3d4-e5f6-7890-abcd-ef1234567890.jsonl"
+        ));
         assert!(is_session_file_path("/x/y/rollout-2026-01-01-abc.jsonl"));
         assert!(!is_session_file_path("/x/y/history.jsonl"));
         assert!(!is_session_file_path("/x/y/todos.jsonl"));
@@ -820,6 +1053,31 @@ mod tests {
             extract_session_id_from_path("/p/rollout-abc.jsonl"),
             Some("rollout-abc".into())
         );
+    }
+
+    #[test]
+    fn precise_mapping_replaces_cwd_mtime_fallback() {
+        let fallback = MappedSession {
+            pid: 1,
+            provider: Some(Provider::Claude),
+            project_path: None,
+            file_path: None,
+            session_id: Some("s".into()),
+            home: None,
+            confidence: 10,
+        };
+        let precise = MappedSession {
+            pid: 2,
+            provider: Some(Provider::Claude),
+            project_path: None,
+            file_path: None,
+            session_id: Some("s".into()),
+            home: None,
+            confidence: 100,
+        };
+
+        assert!(should_replace_mapping(&fallback, &precise));
+        assert!(!should_replace_mapping(&precise, &fallback));
     }
 
     #[test]
@@ -847,4 +1105,6 @@ mod tests {
 
 // Silence unused warning when only tests use Value
 #[allow(dead_code)]
-fn _anchor_value() -> Value { Value::Null }
+fn _anchor_value() -> Value {
+    Value::Null
+}

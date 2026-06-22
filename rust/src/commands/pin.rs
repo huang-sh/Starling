@@ -3,6 +3,7 @@
 use anyhow::Result;
 use colored::*;
 
+use crate::commands::session::resolve_session_meta;
 use crate::core::catalog_resolver::resolve_catalog_reference;
 use crate::core::discovery::canonical_session_id;
 use crate::core::discovery::find_sessions;
@@ -12,11 +13,20 @@ use crate::core::session_display::short_session_id;
 use crate::core::store::{add_bookmark, BookmarkFilter};
 use crate::core::store::{find_bookmark, list_bookmarks, update_bookmark, BookmarkPatch};
 use crate::types::{Bookmark, SessionMeta};
-use crate::commands::session::resolve_session_meta;
 
-pub fn run(session_id: Option<String>, title: Option<String>, tags: Option<String>, to: Option<String>, current: bool, json: bool) -> Result<()> {
+pub fn run(
+    session_id: Option<String>,
+    title: Option<String>,
+    tags: Option<String>,
+    to: Option<String>,
+    current: bool,
+    json: bool,
+) -> Result<()> {
     if session_id.is_none() && !current {
-        eprintln!("{}: pass a session id, or use --current for the most recent", "usage".yellow());
+        eprintln!(
+            "{}: pass a session id, or use --current for the most recent",
+            "usage".yellow()
+        );
         return Ok(());
     }
     let mut target_id = session_id;
@@ -42,9 +52,17 @@ pub fn run(session_id: Option<String>, title: Option<String>, tags: Option<Strin
     let bookmark = if let Some(b) = find_bookmark(&meta.session_id) {
         let mut patch = BookmarkPatch::default();
         let mut changed = false;
-        if let Some(t) = title.as_deref() { patch.title = Some(t.to_string()); changed = true; }
+        if let Some(t) = title.as_deref() {
+            patch.title = Some(t.to_string());
+            changed = true;
+        }
         if let Some(t) = tags.as_deref() {
-            patch.tags = Some(t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect());
+            patch.tags = Some(
+                t.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            );
             changed = true;
         }
         if changed {
@@ -64,7 +82,12 @@ pub fn run(session_id: Option<String>, title: Option<String>, tags: Option<Strin
             patch.title = Some(t.to_string());
         }
         if let Some(t) = tags.as_deref() {
-            patch.tags = Some(t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect());
+            patch.tags = Some(
+                t.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            );
         }
         update_bookmark(&b.id, patch).unwrap_or(b)
     } else {
@@ -75,8 +98,14 @@ pub fn run(session_id: Option<String>, title: Option<String>, tags: Option<Strin
             session_id: meta.session_id.clone(),
             title: title.clone().unwrap_or_else(|| meta.first_prompt.clone()),
             category: String::new(),
-            tags: tags.as_ref()
-                .map(|s| s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect())
+            tags: tags
+                .as_ref()
+                .map(|s| {
+                    s.split(',')
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty())
+                        .collect()
+                })
                 .unwrap_or_default(),
             project_path: meta.project_path.clone(),
             first_prompt: meta.first_prompt.clone(),
@@ -95,14 +124,28 @@ pub fn run(session_id: Option<String>, title: Option<String>, tags: Option<Strin
                 let mut ids = bookmark.space_ids.clone();
                 if !ids.contains(&s.id) {
                     ids.push(s.id.clone());
-                    update_bookmark(&bookmark.id, BookmarkPatch { space_ids: Some(ids), ..Default::default() });
+                    update_bookmark(
+                        &bookmark.id,
+                        BookmarkPatch {
+                            space_ids: Some(ids),
+                            ..Default::default()
+                        },
+                    );
                     if !json {
-                        println!("{}", format!("Added to catalog: {} ({})", s.name, s.id).green());
+                        println!(
+                            "{}",
+                            format!("Added to catalog: {} ({})", s.name, s.id).green()
+                        );
                     }
                 }
             }
             other => {
-                eprintln!("{}: could not resolve catalog '{}': {:?}", "error".red(), c, other);
+                eprintln!(
+                    "{}: could not resolve catalog '{}': {:?}",
+                    "error".red(),
+                    c,
+                    other
+                );
                 std::process::exit(2);
             }
         }
@@ -117,7 +160,11 @@ pub fn run(session_id: Option<String>, title: Option<String>, tags: Option<Strin
         );
     }
     println!("{}", format_bookmark_detail(&updated));
-    println!("\n{}: pinned session {}", "ok".green().bold(), short_session_id(&meta.session_id));
+    println!(
+        "\n{}: pinned session {}",
+        "ok".green().bold(),
+        short_session_id(&meta.session_id)
+    );
     Ok(())
 }
 

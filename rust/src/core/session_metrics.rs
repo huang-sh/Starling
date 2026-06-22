@@ -123,41 +123,85 @@ fn as_num(value: &Value) -> u64 {
 fn extract_assistant_usage(entry: &JsonlEntry) -> Option<AssistantUsage> {
     let obj = entry.value().as_object()?;
     let msg = obj.get("message").and_then(|v| v.as_object());
-    let usage = msg.and_then(|m| m.get("usage")).filter(|v| v.is_object())
-        .or_else(|| obj.get("usage")).and_then(|v| v.as_object())?;
+    let usage = msg
+        .and_then(|m| m.get("usage"))
+        .filter(|v| v.is_object())
+        .or_else(|| obj.get("usage"))
+        .and_then(|v| v.as_object())?;
     let pick = |keys: &[&str]| -> u64 {
         for k in keys {
             if let Some(v) = usage.get(*k) {
-                if v.is_number() { return as_num(v); }
+                if v.is_number() {
+                    return as_num(v);
+                }
             }
         }
         0
     };
     let input = pick(&["input_tokens", "inputTokens"]) + pick(&["prompt_tokens", "promptTokens"]);
-    let output = pick(&["output_tokens", "outputTokens", "completion_tokens", "completionTokens"]);
+    let output = pick(&[
+        "output_tokens",
+        "outputTokens",
+        "completion_tokens",
+        "completionTokens",
+    ]);
     let cache_creation = pick(&["cache_creation_input_tokens", "cacheCreationInputTokens"]);
-    let cache_read = pick(&["cache_read_input_tokens", "cacheReadInputTokens", "cached_input_tokens", "cachedInputTokens"]);
-    if input == 0 && output == 0 && cache_creation == 0 && cache_read == 0 { return None; }
-    Some(AssistantUsage { input, output, cache_creation, cache_read })
+    let cache_read = pick(&[
+        "cache_read_input_tokens",
+        "cacheReadInputTokens",
+        "cached_input_tokens",
+        "cachedInputTokens",
+    ]);
+    if input == 0 && output == 0 && cache_creation == 0 && cache_read == 0 {
+        return None;
+    }
+    Some(AssistantUsage {
+        input,
+        output,
+        cache_creation,
+        cache_read,
+    })
 }
 
 fn extract_usage_from_object(usage: &serde_json::Map<String, Value>) -> Option<AssistantUsage> {
     let pick = |keys: &[&str]| -> u64 {
         for k in keys {
             if let Some(v) = usage.get(*k) {
-                if v.is_number() { return as_num(v); }
+                if v.is_number() {
+                    return as_num(v);
+                }
             }
         }
         0
     };
-    let input = pick(&["input_tokens", "inputTokens", "prompt_tokens", "promptTokens"]);
-    let output = pick(&["output_tokens", "outputTokens", "completion_tokens", "completionTokens"]);
+    let input = pick(&[
+        "input_tokens",
+        "inputTokens",
+        "prompt_tokens",
+        "promptTokens",
+    ]);
+    let output = pick(&[
+        "output_tokens",
+        "outputTokens",
+        "completion_tokens",
+        "completionTokens",
+    ]);
     let cache_creation = pick(&["cache_creation_input_tokens", "cacheCreationInputTokens"]);
-    let cache_read = pick(&["cache_read_input_tokens", "cacheReadInputTokens", "cached_input_tokens", "cachedInputTokens"]);
+    let cache_read = pick(&[
+        "cache_read_input_tokens",
+        "cacheReadInputTokens",
+        "cached_input_tokens",
+        "cachedInputTokens",
+    ]);
     if input == 0 && output == 0 && cache_creation == 0 && cache_read == 0 {
         return None;
     }
-    Some(AssistantUsage { input, output, cache_creation, cache_read })
+    Some(AssistantUsage {
+        input,
+        output,
+        cache_creation,
+        cache_read,
+    })
 }
 
 fn extract_codex_token_count(entry: &JsonlEntry) -> Option<CodexTokenCount> {
@@ -178,34 +222,55 @@ fn extract_codex_token_count(entry: &JsonlEntry) -> Option<CodexTokenCount> {
         .get("last_token_usage")
         .and_then(|v| v.as_object())
         .and_then(extract_usage_from_object);
-    let context_window = info
-        .get("model_context_window")
-        .and_then(|v| v.as_u64());
-    Some(CodexTokenCount { total, last, context_window })
+    let context_window = info.get("model_context_window").and_then(|v| v.as_u64());
+    Some(CodexTokenCount {
+        total,
+        last,
+        context_window,
+    })
 }
 
 fn extract_model(entry: &JsonlEntry) -> Option<String> {
     let obj = entry.value().as_object()?;
     let direct = obj.get("model").and_then(|v| v.as_str());
     if let Some(d) = direct {
-        if !d.starts_with('<') && d != "synthetic" { return Some(d.to_string()); }
+        if !d.starts_with('<') && d != "synthetic" {
+            return Some(d.to_string());
+        }
     }
-    let payload_model = obj.get("payload").and_then(|p| p.as_object())
-        .and_then(|p| p.get("model")).and_then(|v| v.as_str());
+    let payload_model = obj
+        .get("payload")
+        .and_then(|p| p.as_object())
+        .and_then(|p| p.get("model"))
+        .and_then(|v| v.as_str());
     if let Some(m) = payload_model {
-        if !m.starts_with('<') && m != "synthetic" { return Some(m.to_string()); }
+        if !m.starts_with('<') && m != "synthetic" {
+            return Some(m.to_string());
+        }
     }
-    let payload_settings_model = obj.get("payload").and_then(|p| p.as_object())
-        .and_then(|p| p.get("collaboration_mode")).and_then(|v| v.as_object())
-        .and_then(|c| c.get("settings")).and_then(|v| v.as_object())
-        .and_then(|s| s.get("model")).and_then(|v| v.as_str());
+    let payload_settings_model = obj
+        .get("payload")
+        .and_then(|p| p.as_object())
+        .and_then(|p| p.get("collaboration_mode"))
+        .and_then(|v| v.as_object())
+        .and_then(|c| c.get("settings"))
+        .and_then(|v| v.as_object())
+        .and_then(|s| s.get("model"))
+        .and_then(|v| v.as_str());
     if let Some(m) = payload_settings_model {
-        if !m.starts_with('<') && m != "synthetic" { return Some(m.to_string()); }
+        if !m.starts_with('<') && m != "synthetic" {
+            return Some(m.to_string());
+        }
     }
-    let mm = obj.get("message").and_then(|m| m.as_object())
-        .and_then(|m| m.get("model")).and_then(|v| v.as_str());
+    let mm = obj
+        .get("message")
+        .and_then(|m| m.as_object())
+        .and_then(|m| m.get("model"))
+        .and_then(|v| v.as_str());
     if let Some(m) = mm {
-        if !m.starts_with('<') && m != "synthetic" { return Some(m.to_string()); }
+        if !m.starts_with('<') && m != "synthetic" {
+            return Some(m.to_string());
+        }
     }
     None
 }
@@ -215,24 +280,45 @@ fn extract_model_from_entries(entries: &[JsonlEntry]) -> Option<String> {
 }
 
 fn extract_tool_use_arg(name: &str, input: &Value) -> String {
-    let obj = match input.as_object() { Some(o) => o, None => return String::new() };
+    let obj = match input.as_object() {
+        Some(o) => o,
+        None => return String::new(),
+    };
     let low = name.to_lowercase();
     if low == "bash" || low == "exec_command" {
-        if let Some(c) = obj.get("command").and_then(|v| v.as_str()) { return c.to_string(); }
-        if let Some(c) = obj.get("cmd").and_then(|v| v.as_str()) { return c.to_string(); }
+        if let Some(c) = obj.get("command").and_then(|v| v.as_str()) {
+            return c.to_string();
+        }
+        if let Some(c) = obj.get("cmd").and_then(|v| v.as_str()) {
+            return c.to_string();
+        }
     }
     if low == "grep" || low == "glob" {
-        if let Some(p) = obj.get("pattern").and_then(|v| v.as_str()) { return p.to_string(); }
+        if let Some(p) = obj.get("pattern").and_then(|v| v.as_str()) {
+            return p.to_string();
+        }
     }
-    if let Some(fp) = obj.get("file_path").and_then(|v| v.as_str()) { return fp.to_string(); }
-    if let Some(sat) = obj.get("subagent_type").and_then(|v| v.as_str()) { return sat.to_string(); }
-    if let Some(desc) = obj.get("description").and_then(|v| v.as_str()) { return desc.to_string(); }
+    if let Some(fp) = obj.get("file_path").and_then(|v| v.as_str()) {
+        return fp.to_string();
+    }
+    if let Some(sat) = obj.get("subagent_type").and_then(|v| v.as_str()) {
+        return sat.to_string();
+    }
+    if let Some(desc) = obj.get("description").and_then(|v| v.as_str()) {
+        return desc.to_string();
+    }
     serde_json::to_string(input).unwrap_or_default()
 }
 
 fn parse_entry_timestamp(entry: &JsonlEntry) -> u64 {
-    let obj = match entry.value().as_object() { Some(o) => o, None => return 0 };
-    let ts = match obj.get("timestamp") { Some(v) => v, None => return 0 };
+    let obj = match entry.value().as_object() {
+        Some(o) => o,
+        None => return 0,
+    };
+    let ts = match obj.get("timestamp") {
+        Some(v) => v,
+        None => return 0,
+    };
     if let Some(s) = ts.as_str() {
         if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(s) {
             return parsed.timestamp_millis() as u64;
@@ -240,13 +326,18 @@ fn parse_entry_timestamp(entry: &JsonlEntry) -> u64 {
         return 0;
     }
     if let Some(n) = ts.as_f64() {
-        return if n > 1e12 { n as u64 } else { (n * 1000.0) as u64 };
+        return if n > 1e12 {
+            n as u64
+        } else {
+            (n * 1000.0) as u64
+        };
     }
     0
 }
 
 fn payload_type(entry: &JsonlEntry) -> Option<&str> {
-    entry.value()
+    entry
+        .value()
         .get("payload")
         .and_then(|v| v.get("type"))
         .and_then(|v| v.as_str())
@@ -276,10 +367,21 @@ fn extract_content_blocks(entry: &JsonlEntry) -> ContentBlocks {
         interrupted: false,
         tool_use: vec![],
     };
-    let obj = match entry.value().as_object() { Some(o) => o, None => return out };
-    let msg = match obj.get("message").and_then(|v| v.as_object()) { Some(m) => m, None => return out };
+    let obj = match entry.value().as_object() {
+        Some(o) => o,
+        None => return out,
+    };
+    let msg = match obj.get("message").and_then(|v| v.as_object()) {
+        Some(m) => m,
+        None => return out,
+    };
     match msg.get("content") {
-        Some(Value::String(s)) => out.text.push(s.clone()),
+        Some(Value::String(s)) => {
+            if looks_like_interruption(s) {
+                out.interrupted = true;
+            }
+            out.text.push(s.clone());
+        }
         Some(Value::Array(arr)) => {
             for part in arr {
                 if let Some(p) = part.as_object() {
@@ -336,7 +438,10 @@ fn refresh_pending_state(
         *pending_since_ms = tool.since_ms;
         *thinking_since_ms = 0;
         *last_tool = Some(tool.name.clone());
-        *current_task = truncate(&extract_tool_use_arg(&tool.name, &tool.input), MAX_TOOL_ARG_LEN);
+        *current_task = truncate(
+            &extract_tool_use_arg(&tool.name, &tool.input),
+            MAX_TOOL_ARG_LEN,
+        );
     } else {
         *pending_since_ms = 0;
         current_task.clear();
@@ -344,14 +449,16 @@ fn refresh_pending_state(
 }
 
 fn message_stop_reason(entry: &JsonlEntry) -> Option<&str> {
-    entry.value()
+    entry
+        .value()
         .get("message")
         .and_then(|v| v.get("stop_reason"))
         .and_then(|v| v.as_str())
 }
 
 fn message_has_null_stop_reason(entry: &JsonlEntry) -> bool {
-    entry.value()
+    entry
+        .value()
         .get("message")
         .and_then(|v| v.get("stop_reason"))
         .is_some_and(Value::is_null)
@@ -371,7 +478,11 @@ fn output_tool_call_id(entry: &JsonlEntry, is_codex_function_output: bool) -> Op
         .map(|s| s.to_string())
 }
 
-fn clear_completed_tools(pending_tools: &mut HashMap<String, PendingTool>, ids: &[String], has_output: bool) {
+fn clear_completed_tools(
+    pending_tools: &mut HashMap<String, PendingTool>,
+    ids: &[String],
+    has_output: bool,
+) {
     for id in ids {
         pending_tools.remove(id);
     }
@@ -404,11 +515,17 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
 
     for entry in entries {
         if model.is_empty() {
-            if let Some(m) = extract_model(entry) { model = m; }
+            if let Some(m) = extract_model(entry) {
+                model = m;
+            }
         }
         let ts = parse_entry_timestamp(entry);
-        if started_at_ms == 0 && ts > 0 { started_at_ms = ts; }
-        if ts > latest_entry_ms { latest_entry_ms = ts; }
+        if started_at_ms == 0 && ts > 0 {
+            started_at_ms = ts;
+        }
+        if ts > latest_entry_ms {
+            latest_entry_ms = ts;
+        }
 
         if let Some(usage) = extract_assistant_usage(entry) {
             tokens.input += usage.input;
@@ -425,24 +542,34 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
                 context_window_override = token_count.context_window;
             }
             token_history.push(tokens.input + tokens.output + tokens.cache);
-            if token_history.len() > MAX_TOKEN_HISTORY { token_history.remove(0); }
+            if token_history.len() > MAX_TOKEN_HISTORY {
+                token_history.remove(0);
+            }
             let ctx_usage = token_count.last.unwrap_or(token_count.total);
             let ctx_size = ctx_usage.input + ctx_usage.cache_creation + ctx_usage.cache_read;
             context_history.push(ctx_size);
-            if context_history.len() > MAX_TOKEN_HISTORY { context_history.remove(0); }
+            if context_history.len() > MAX_TOKEN_HISTORY {
+                context_history.remove(0);
+            }
         }
 
         let entry_type = entry.type_str();
         let codex_payload_type = payload_type(entry);
         let is_codex_response_item = entry_type == Some("response_item");
         let is_codex_event = entry_type == Some("event_msg");
-        let is_codex_function_call = is_codex_response_item && codex_payload_type == Some("function_call");
-        let is_codex_function_output = is_codex_response_item && codex_payload_type == Some("function_call_output");
+        let is_codex_function_call =
+            is_codex_response_item && codex_payload_type == Some("function_call");
+        let is_codex_function_output =
+            is_codex_response_item && codex_payload_type == Some("function_call_output");
         let is_codex_message = is_codex_response_item && codex_payload_type == Some("message");
         let is_codex_reasoning = is_codex_response_item && codex_payload_type == Some("reasoning");
-        let is_assistant = entry_type == Some("assistant") || entry_type == Some("function_call") || is_codex_message;
-        let is_user = entry_type == Some("user") || entry_type == Some("human")
-            || entry_type == Some("function_call_output") || is_codex_function_output;
+        let is_assistant = entry_type == Some("assistant")
+            || entry_type == Some("function_call")
+            || is_codex_message;
+        let is_user = entry_type == Some("user")
+            || entry_type == Some("human")
+            || entry_type == Some("function_call_output")
+            || is_codex_function_output;
 
         let mut tool_uses: Vec<(Option<String>, String, Value)> = Vec::new();
         if is_codex_event {
@@ -457,13 +584,22 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
                     activity_signal = Some("codex_task_started".to_string());
                     activity_since_ms = activity_ms;
                 }
-                Some("task_complete") | Some("turn_aborted") => {
+                Some("task_complete") => {
                     pending_tools.clear();
                     pending_since_ms = 0;
                     thinking_since_ms = 0;
                     current_task.clear();
                     activity_status = Some("idle".to_string());
-                    activity_signal = Some(format!("codex_{}", codex_payload_type.unwrap()));
+                    activity_signal = Some("codex_task_complete".to_string());
+                    activity_since_ms = activity_ms;
+                }
+                Some("turn_aborted") => {
+                    pending_tools.clear();
+                    pending_since_ms = 0;
+                    thinking_since_ms = 0;
+                    current_task.clear();
+                    activity_status = Some("aborted".to_string());
+                    activity_signal = Some("codex_turn_aborted".to_string());
                     activity_since_ms = activity_ms;
                 }
                 Some("exec_approval_request")
@@ -492,49 +628,76 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
                 }
             }
             let stop_reason = message_stop_reason(entry);
-            let stop_reason_in_progress = stop_reason.is_none() && message_has_null_stop_reason(entry);
+            let stop_reason_in_progress =
+                stop_reason.is_none() && message_has_null_stop_reason(entry);
             if !blocks.tool_use.is_empty() {
                 tool_uses = blocks.tool_use;
             }
             if is_assistant {
                 thinking_since_ms = 0;
                 if !tool_uses.is_empty() {
-                    pending_since_ms = if ts > 0 { ts } else { last_activity_ms };
+                    let activity_ms = if ts > 0 { ts } else { last_activity_ms };
+                    pending_since_ms = activity_ms;
+                    activity_status = Some("running".to_string());
+                    activity_signal = Some("claude_tool_use".to_string());
+                    activity_since_ms = activity_ms;
                 } else if !blocks.text.is_empty() {
                     if pending_tools.is_empty() {
                         pending_since_ms = 0;
                         current_task.clear();
                     }
                     if stop_reason_in_progress {
-                        thinking_since_ms = if ts > 0 { ts } else { last_activity_ms };
+                        let activity_ms = if ts > 0 { ts } else { last_activity_ms };
+                        thinking_since_ms = activity_ms;
+                        activity_status = Some("running".to_string());
+                        activity_signal = Some("claude_assistant_in_progress".to_string());
+                        activity_since_ms = activity_ms;
+                    } else if pending_tools.is_empty() {
+                        let activity_ms = if ts > 0 { ts } else { last_activity_ms };
+                        activity_status = Some("idle".to_string());
+                        activity_signal = Some("claude_assistant_message".to_string());
+                        activity_since_ms = activity_ms;
                     }
                 } else if blocks.thinking {
                     if pending_tools.is_empty() {
                         pending_since_ms = 0;
                         current_task.clear();
                     }
-                    thinking_since_ms = if ts > 0 { ts } else { last_activity_ms };
+                    let activity_ms = if ts > 0 { ts } else { last_activity_ms };
+                    thinking_since_ms = activity_ms;
+                    activity_status = Some("running".to_string());
+                    activity_signal = Some("claude_thinking".to_string());
+                    activity_since_ms = activity_ms;
                 }
                 for t in blocks.text {
                     let t = t.trim();
                     if !t.is_empty() {
-                        chat_tail.push(ChatMessageEntry { role: ChatRole::Assistant, text: truncate(&t, MAX_CHAT_TEXT_LEN) });
-                        if chat_tail.len() > MAX_CHAT_TAIL { chat_tail.remove(0); }
+                        chat_tail.push(ChatMessageEntry {
+                            role: ChatRole::Assistant,
+                            text: truncate(&t, MAX_CHAT_TEXT_LEN),
+                        });
+                        if chat_tail.len() > MAX_CHAT_TAIL {
+                            chat_tail.remove(0);
+                        }
                     }
                 }
             } else if is_user {
-                clear_completed_tools(&mut pending_tools, &blocks.tool_result_ids, blocks.tool_result);
+                clear_completed_tools(
+                    &mut pending_tools,
+                    &blocks.tool_result_ids,
+                    blocks.tool_result,
+                );
                 if blocks.interrupted {
                     pending_tools.clear();
+                    activity_status = Some("aborted".to_string());
+                    activity_signal = Some("claude_request_interrupted".to_string());
+                    activity_since_ms = if ts > 0 { ts } else { last_activity_ms };
                 }
                 let has_human_prompt = !blocks.tool_result
-                    && blocks
-                        .text
-                        .iter()
-                        .any(|t| {
-                            let t = t.trim();
-                            !t.is_empty() && !looks_like_interruption(t)
-                        });
+                    && blocks.text.iter().any(|t| {
+                        let t = t.trim();
+                        !t.is_empty() && !looks_like_interruption(t)
+                    });
                 if !pending_tools.is_empty() {
                     refresh_pending_state(
                         &pending_tools,
@@ -547,19 +710,32 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
                     pending_since_ms = 0;
                     current_task.clear();
                     thinking_since_ms = if blocks.tool_result && !blocks.interrupted {
-                    if ts > 0 { ts } else { last_activity_ms }
+                        if ts > 0 {
+                            ts
+                        } else {
+                            last_activity_ms
+                        }
                     } else if has_human_prompt {
-                    if ts > 0 { ts } else { last_activity_ms }
+                        if ts > 0 {
+                            ts
+                        } else {
+                            last_activity_ms
+                        }
                     } else {
-                    0
+                        0
                     };
                 }
                 if !blocks.tool_result {
                     for t in blocks.text {
                         let t = t.trim();
                         if !t.is_empty() && !looks_like_interruption(t) {
-                            chat_tail.push(ChatMessageEntry { role: ChatRole::User, text: truncate(&t, MAX_CHAT_TEXT_LEN) });
-                            if chat_tail.len() > MAX_CHAT_TAIL { chat_tail.remove(0); }
+                            chat_tail.push(ChatMessageEntry {
+                                role: ChatRole::User,
+                                text: truncate(&t, MAX_CHAT_TEXT_LEN),
+                            });
+                            if chat_tail.len() > MAX_CHAT_TAIL {
+                                chat_tail.remove(0);
+                            }
                         }
                     }
                 }
@@ -581,10 +757,12 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string());
                         let input = match call.get("arguments") {
-                        Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::Null),
-                        Some(other) => other.clone(),
-                        None => Value::Null,
-                    };
+                            Some(Value::String(s)) => {
+                                serde_json::from_str(s).unwrap_or(Value::Null)
+                            }
+                            Some(other) => other.clone(),
+                            None => Value::Null,
+                        };
                         tool_uses.push((id, name.to_string(), input));
                     }
                 }
@@ -599,17 +777,26 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
             current_task = truncate(&extract_tool_use_arg(&last.1, &last.2), MAX_TOOL_ARG_LEN);
             for (id, name, input) in &tool_uses {
                 let arg = truncate(&extract_tool_use_arg(name, input), MAX_TOOL_ARG_LEN);
-                tool_calls_tail.push(ToolCallEntry { name: name.clone(), arg, duration_ms: 0 });
-                if tool_calls_tail.len() > MAX_TOOL_TAIL { tool_calls_tail.remove(0); }
+                tool_calls_tail.push(ToolCallEntry {
+                    name: name.clone(),
+                    arg,
+                    duration_ms: 0,
+                });
+                if tool_calls_tail.len() > MAX_TOOL_TAIL {
+                    tool_calls_tail.remove(0);
+                }
                 let key = id.clone().unwrap_or_else(|| {
                     anonymous_tool_id += 1;
                     format!("anonymous-tool-{anonymous_tool_id}")
                 });
-                pending_tools.insert(key, PendingTool {
-                    name: name.clone(),
-                    input: input.clone(),
-                    since_ms,
-                });
+                pending_tools.insert(
+                    key,
+                    PendingTool {
+                        name: name.clone(),
+                        input: input.clone(),
+                        since_ms,
+                    },
+                );
             }
             refresh_pending_state(
                 &pending_tools,
@@ -624,9 +811,13 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
             let usage = last_usage.unwrap();
             let ctx_size = usage.input + usage.cache_creation + usage.cache_read;
             token_history.push(tokens.input + tokens.output + tokens.cache);
-            if token_history.len() > MAX_TOKEN_HISTORY { token_history.remove(0); }
+            if token_history.len() > MAX_TOKEN_HISTORY {
+                token_history.remove(0);
+            }
             context_history.push(ctx_size);
-            if context_history.len() > MAX_TOKEN_HISTORY { context_history.remove(0); }
+            if context_history.len() > MAX_TOKEN_HISTORY {
+                context_history.remove(0);
+            }
         }
     }
 
@@ -685,10 +876,15 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
 }
 
 fn read_tail_entries(path: &Path, size: u64) -> Vec<JsonlEntry> {
-    let mut file = match File::open(path) { Ok(f) => f, Err(_) => return vec![] };
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return vec![],
+    };
     let start = size.saturating_sub(TAIL_BYTES);
     if start > 0 {
-        if file.seek(SeekFrom::Start(start)).is_err() { return vec![]; }
+        if file.seek(SeekFrom::Start(start)).is_err() {
+            return vec![];
+        }
     }
     let len = (size - start) as usize;
     let mut buf = vec![0u8; len];
@@ -716,12 +912,15 @@ struct CacheEntry {
 static CACHE: Lazy<Mutex<HashMap<PathBuf, CacheEntry>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 pub fn clear_session_metrics_cache() {
-    if let Ok(mut c) = CACHE.lock() { c.clear(); }
+    if let Ok(mut c) = CACHE.lock() {
+        c.clear();
+    }
 }
 
 fn mtime_ms(path: &Path) -> Option<u64> {
     let md = std::fs::metadata(path).ok()?;
-    md.modified().ok()?
+    md.modified()
+        .ok()?
         .duration_since(UNIX_EPOCH)
         .ok()
         .map(|d| d.as_millis() as u64)
@@ -771,7 +970,13 @@ pub fn get_session_live_metrics(path: &Path) -> SessionLive {
     }
 
     if let Ok(mut c) = CACHE.lock() {
-        c.insert(path.to_path_buf(), CacheEntry { mtime_ms: mtime, result: result.clone() });
+        c.insert(
+            path.to_path_buf(),
+            CacheEntry {
+                mtime_ms: mtime,
+                result: result.clone(),
+            },
+        );
     }
     result
 }
@@ -795,26 +1000,40 @@ mod tests {
 
         assert_eq!(model_context_window(Some("glm-5.2")), 1_000_000);
         assert_eq!(model_context_window(Some("GLM-5.2")), 1_000_000);
-        assert_eq!(model_context_window(Some("glm-5.2 with high effort")), 1_000_000);
+        assert_eq!(
+            model_context_window(Some("glm-5.2 with high effort")),
+            1_000_000
+        );
         assert_eq!(model_context_window(Some("gpt-5.5")), 1_000_000);
         assert_eq!(model_context_window(Some("gpt-5.4")), 1_000_000);
         assert_eq!(model_context_window(Some("gpt-5.4-mini")), 400_000);
         assert_eq!(model_context_window(Some("glm-5.1")), 200_000);
         assert_eq!(model_context_window(Some("glm-5")), 200_000);
-        assert_eq!(model_context_window(Some("unknown-model")), DEFAULT_CONTEXT_WINDOW);
+        assert_eq!(
+            model_context_window(Some("unknown-model")),
+            DEFAULT_CONTEXT_WINDOW
+        );
     }
 
     #[test]
     fn reduces_tokens_and_model() {
         clear_session_metrics_cache();
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("starling-metrics-{}.jsonl",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
-        write_jsonl(&path, &[
-            r#"{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"content":"hi"}}"#,
-            r#"{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","model":"claude-sonnet","message":{"model":"claude-sonnet","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":200}}}"#,
-            r#"{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","model":"claude-sonnet","message":{"model":"claude-sonnet","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":220}}}"#,
-        ]);
+        let path = dir.join(format!(
+            "starling-metrics-{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"content":"hi"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","model":"claude-sonnet","message":{"model":"claude-sonnet","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":200}}}"#,
+                r#"{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","model":"claude-sonnet","message":{"model":"claude-sonnet","usage":{"input_tokens":120,"output_tokens":60,"cache_read_input_tokens":220}}}"#,
+            ],
+        );
         let live = get_session_live_metrics(&path);
         assert_eq!(live.model, "claude-sonnet");
         assert_eq!(live.tokens.input, 220); // 100 + 120
@@ -830,12 +1049,20 @@ mod tests {
     fn reduces_codex_token_count_events() {
         clear_session_metrics_cache();
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("starling-metrics-{}-codex.jsonl",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
-        write_jsonl(&path, &[
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":700,"output_tokens":50,"reasoning_output_tokens":10,"total_tokens":1050},"last_token_usage":{"input_tokens":200,"cached_input_tokens":150,"output_tokens":20,"reasoning_output_tokens":3,"total_tokens":220},"model_context_window":1000}}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"cached_input_tokens":900,"output_tokens":80,"reasoning_output_tokens":13,"total_tokens":1580},"last_token_usage":{"input_tokens":300,"cached_input_tokens":200,"output_tokens":30,"reasoning_output_tokens":3,"total_tokens":330},"model_context_window":1000}}}"#,
-        ]);
+        let path = dir.join(format!(
+            "starling-metrics-{}-codex.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":700,"output_tokens":50,"reasoning_output_tokens":10,"total_tokens":1050},"last_token_usage":{"input_tokens":200,"cached_input_tokens":150,"output_tokens":20,"reasoning_output_tokens":3,"total_tokens":220},"model_context_window":1000}}}"#,
+                r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"cached_input_tokens":900,"output_tokens":80,"reasoning_output_tokens":13,"total_tokens":1580},"last_token_usage":{"input_tokens":300,"cached_input_tokens":200,"output_tokens":30,"reasoning_output_tokens":3,"total_tokens":330},"model_context_window":1000}}}"#,
+            ],
+        );
         let live = get_session_live_metrics(&path);
         assert_eq!(live.model, "");
         assert_eq!(live.tokens.input, 1500);
@@ -850,12 +1077,20 @@ mod tests {
     fn reduces_codex_response_item_tool_calls() {
         clear_session_metrics_cache();
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("starling-metrics-{}-codex-response-item.jsonl",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
-        write_jsonl(&path, &[
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"response_item","payload":{"type":"reasoning"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo test\"}"}}"#,
-        ]);
+        let path = dir.join(format!(
+            "starling-metrics-{}-codex-response-item.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"timestamp":"2026-01-01T00:00:00Z","type":"response_item","payload":{"type":"reasoning"}}"#,
+                r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo test\"}"}}"#,
+            ],
+        );
         let live = get_session_live_metrics(&path);
         assert_eq!(live.tool_count, 1);
         assert_eq!(live.last_tool.as_deref(), Some("exec_command"));
@@ -869,12 +1104,20 @@ mod tests {
     fn codex_response_item_tool_output_clears_pending() {
         clear_session_metrics_cache();
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("starling-metrics-{}-codex-response-output.jsonl",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
-        write_jsonl(&path, &[
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo test\"}"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","output":"ok"}}"#,
-        ]);
+        let path = dir.join(format!(
+            "starling-metrics-{}-codex-response-output.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo test\"}"}}"#,
+                r#"{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","output":"ok"}}"#,
+            ],
+        );
         let live = get_session_live_metrics(&path);
         assert_eq!(live.pending_since_ms, 0);
         assert_eq!(live.current_task, "");
@@ -886,14 +1129,22 @@ mod tests {
     fn codex_task_complete_clears_stale_pending_tool() {
         clear_session_metrics_cache();
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("starling-metrics-{}-codex-task-complete.jsonl",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
-        write_jsonl(&path, &[
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"head -20 results.csv\"}","call_id":"call_1"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"ok"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"task_complete"}}"#,
-        ]);
+        let path = dir.join(format!(
+            "starling-metrics-{}-codex-task-complete.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+                r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"head -20 results.csv\"}","call_id":"call_1"}}"#,
+                r#"{"timestamp":"2026-01-01T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"ok"}}"#,
+                r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"task_complete"}}"#,
+            ],
+        );
         let live = get_session_live_metrics(&path);
         assert_eq!(live.pending_since_ms, 0);
         assert_eq!(live.thinking_since_ms, 0);
@@ -905,14 +1156,50 @@ mod tests {
     }
 
     #[test]
+    fn codex_turn_aborted_marks_aborted() {
+        clear_session_metrics_cache();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "starling-metrics-{}-codex-turn-aborted.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+                r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"sleep 10\"}","call_id":"call_1"}}"#,
+                r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"turn_aborted"}}"#,
+            ],
+        );
+        let live = get_session_live_metrics(&path);
+        assert_eq!(live.pending_since_ms, 0);
+        assert_eq!(live.thinking_since_ms, 0);
+        assert_eq!(live.activity_status.as_deref(), Some("aborted"));
+        assert_eq!(live.activity_signal.as_deref(), Some("codex_turn_aborted"));
+        assert_eq!(live.current_task, "");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn codex_task_started_marks_running_until_complete() {
         clear_session_metrics_cache();
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("starling-metrics-{}-codex-task-started.jsonl",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
-        write_jsonl(&path, &[
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
-        ]);
+        let path = dir.join(format!(
+            "starling-metrics-{}-codex-task-started.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+            ],
+        );
         let live = get_session_live_metrics(&path);
         assert_eq!(live.pending_since_ms, 0);
         assert_eq!(live.thinking_since_ms, 0);
@@ -927,15 +1214,26 @@ mod tests {
     fn codex_approval_request_marks_waiting() {
         clear_session_metrics_cache();
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("starling-metrics-{}-codex-approval.jsonl",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
-        write_jsonl(&path, &[
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"exec_approval_request"}}"#,
-        ]);
+        let path = dir.join(format!(
+            "starling-metrics-{}-codex-approval.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+                r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"exec_approval_request"}}"#,
+            ],
+        );
         let live = get_session_live_metrics(&path);
         assert_eq!(live.activity_status.as_deref(), Some("waiting"));
-        assert_eq!(live.activity_signal.as_deref(), Some("codex_exec_approval_request"));
+        assert_eq!(
+            live.activity_signal.as_deref(),
+            Some("codex_exec_approval_request")
+        );
         assert_eq!(live.pending_since_ms, 1_767_225_601_000);
         assert_eq!(live.thinking_since_ms, 0);
         let _ = std::fs::remove_file(&path);
@@ -945,11 +1243,19 @@ mod tests {
     fn extracts_codex_payload_model() {
         clear_session_metrics_cache();
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("starling-metrics-{}-codex-model.jsonl",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
-        write_jsonl(&path, &[
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"session_configured","model":"gpt-5.5","collaboration_mode":{"settings":{"model":"gpt-5.5"}}}}"#,
-        ]);
+        let path = dir.join(format!(
+            "starling-metrics-{}-codex-model.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"session_configured","model":"gpt-5.5","collaboration_mode":{"settings":{"model":"gpt-5.5"}}}}"#,
+            ],
+        );
         let live = get_session_live_metrics(&path);
         assert_eq!(live.model, "gpt-5.5");
         let _ = std::fs::remove_file(&path);
@@ -959,12 +1265,20 @@ mod tests {
     fn configured_model_window_overrides_codex_token_count_window() {
         clear_session_metrics_cache();
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("starling-metrics-{}-codex-model-window.jsonl",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
-        write_jsonl(&path, &[
-            r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"session_configured","model":"gpt-5.5"}}"#,
-            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"cached_input_tokens":900,"output_tokens":80},"last_token_usage":{"input_tokens":300,"cached_input_tokens":200,"output_tokens":30},"model_context_window":1000}}}"#,
-        ]);
+        let path = dir.join(format!(
+            "starling-metrics-{}-codex-model-window.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"session_configured","model":"gpt-5.5"}}"#,
+                r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"cached_input_tokens":900,"output_tokens":80},"last_token_usage":{"input_tokens":300,"cached_input_tokens":200,"output_tokens":30},"model_context_window":1000}}}"#,
+            ],
+        );
         let live = get_session_live_metrics(&path);
         assert_eq!(live.model, "gpt-5.5");
         assert_eq!(live.ctx_pct, 0);
@@ -975,12 +1289,22 @@ mod tests {
     fn fills_codex_model_from_head_when_large_file_tail_has_only_tokens() {
         clear_session_metrics_cache();
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("starling-metrics-{}-codex-large-model.jsonl",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        let path = dir.join(format!(
+            "starling-metrics-{}-codex-large-model.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         {
             let mut f = std::fs::File::create(&path).unwrap();
             writeln!(f, r#"{{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{{"type":"session_configured","model":"gpt-5.5","collaboration_mode":{{"settings":{{"model":"gpt-5.5"}}}}}}}}"#).unwrap();
-            writeln!(f, r#"{{"type":"filler","payload":"{}"}}"#, "x".repeat((FULL_READ_THRESHOLD + TAIL_BYTES) as usize)).unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"filler","payload":"{}"}}"#,
+                "x".repeat((FULL_READ_THRESHOLD + TAIL_BYTES) as usize)
+            )
+            .unwrap();
             writeln!(f, r#"{{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":1500,"cached_input_tokens":900,"output_tokens":80}},"last_token_usage":{{"input_tokens":300,"cached_input_tokens":200,"output_tokens":30}},"model_context_window":1000}}}}}}"#).unwrap();
         }
         let live = get_session_live_metrics(&path);
@@ -996,11 +1320,19 @@ mod tests {
     fn counts_tools_and_tail() {
         clear_session_metrics_cache();
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("starling-metrics-{}-b.jsonl",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
-        write_jsonl(&path, &[
-            r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"content":[{"type":"text","text":"hello"},{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}"#,
-        ]);
+        let path = dir.join(format!(
+            "starling-metrics-{}-b.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"content":[{"type":"text","text":"hello"},{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}"#,
+            ],
+        );
         let live = get_session_live_metrics(&path);
         assert_eq!(live.tool_count, 1);
         assert_eq!(live.last_tool.as_deref(), Some("Bash"));
@@ -1025,13 +1357,21 @@ mod tests {
     fn tool_result_clears_current_task() {
         clear_session_metrics_cache();
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("starling-metrics-{}-tool-result.jsonl",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
-        write_jsonl(&path, &[
-            r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"content":[{"type":"tool_use","id":"call_1","name":"Read","input":{"file_path":"/tmp/a"}}]}}"#,
-            r#"{"type":"user","timestamp":"2026-01-01T00:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call_1","content":"done"}]}}"#,
-            r#"{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","message":{"content":[{"type":"text","text":"Done."}]}}"#,
-        ]);
+        let path = dir.join(format!(
+            "starling-metrics-{}-tool-result.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"content":[{"type":"tool_use","id":"call_1","name":"Read","input":{"file_path":"/tmp/a"}}]}}"#,
+                r#"{"type":"user","timestamp":"2026-01-01T00:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call_1","content":"done"}]}}"#,
+                r#"{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","message":{"content":[{"type":"text","text":"Done."}]}}"#,
+            ],
+        );
         let live = get_session_live_metrics(&path);
         assert_eq!(live.pending_since_ms, 0);
         assert_eq!(live.thinking_since_ms, 0);
@@ -1044,12 +1384,20 @@ mod tests {
     fn parallel_tool_result_keeps_unfinished_pending_tool() {
         clear_session_metrics_cache();
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("starling-metrics-{}-parallel-tool-result.jsonl",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
-        write_jsonl(&path, &[
-            r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"content":[{"type":"tool_use","id":"call_read","name":"Read","input":{"file_path":"/tmp/a"}},{"type":"tool_use","id":"call_bash","name":"Bash","input":{"command":"cd /repo && git remote -v"}}]}}"#,
-            r#"{"type":"user","timestamp":"2026-01-01T00:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call_read","content":"done"}]}}"#,
-        ]);
+        let path = dir.join(format!(
+            "starling-metrics-{}-parallel-tool-result.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"content":[{"type":"tool_use","id":"call_read","name":"Read","input":{"file_path":"/tmp/a"}},{"type":"tool_use","id":"call_bash","name":"Bash","input":{"command":"cd /repo && git remote -v"}}]}}"#,
+                r#"{"type":"user","timestamp":"2026-01-01T00:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call_read","content":"done"}]}}"#,
+            ],
+        );
         let live = get_session_live_metrics(&path);
         assert_eq!(live.pending_since_ms, 1_767_225_600_000);
         assert_eq!(live.last_tool.as_deref(), Some("Bash"));
@@ -1061,17 +1409,30 @@ mod tests {
     fn interrupted_tool_use_clears_running_state() {
         clear_session_metrics_cache();
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("starling-metrics-{}-interrupted.jsonl",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
-        write_jsonl(&path, &[
-            r#"{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"content":"run checks"}}"#,
-            r#"{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","message":{"content":[{"type":"tool_use","id":"call_1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
-            r#"{"type":"user","timestamp":"2026-01-01T00:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call_1","content":"done"}]}}"#,
-            r#"{"type":"user","timestamp":"2026-01-01T00:00:03Z","message":{"content":"[Request interrupted by user for tool use]"}}"#,
-        ]);
+        let path = dir.join(format!(
+            "starling-metrics-{}-interrupted.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"content":"run checks"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","message":{"content":[{"type":"tool_use","id":"call_1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+                r#"{"type":"user","timestamp":"2026-01-01T00:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call_1","content":"done"}]}}"#,
+                r#"{"type":"user","timestamp":"2026-01-01T00:00:03Z","message":{"content":"[Request interrupted by user for tool use]"}}"#,
+            ],
+        );
         let live = get_session_live_metrics(&path);
         assert_eq!(live.pending_since_ms, 0);
         assert_eq!(live.thinking_since_ms, 0);
+        assert_eq!(live.activity_status.as_deref(), Some("aborted"));
+        assert_eq!(
+            live.activity_signal.as_deref(),
+            Some("claude_request_interrupted")
+        );
         assert_eq!(live.current_task, "");
         let _ = std::fs::remove_file(&path);
     }
@@ -1080,14 +1441,24 @@ mod tests {
     fn claude_thinking_block_sets_thinking_state() {
         clear_session_metrics_cache();
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("starling-metrics-{}-claude-thinking.jsonl",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
-        write_jsonl(&path, &[
-            r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"content":[{"type":"thinking","thinking":"working"}],"stop_reason":null}}"#,
-        ]);
+        let path = dir.join(format!(
+            "starling-metrics-{}-claude-thinking.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"content":[{"type":"thinking","thinking":"working"}],"stop_reason":null}}"#,
+            ],
+        );
         let live = get_session_live_metrics(&path);
         assert_eq!(live.pending_since_ms, 0);
         assert_eq!(live.thinking_since_ms, 1_767_225_600_000);
+        assert_eq!(live.activity_status.as_deref(), Some("running"));
+        assert_eq!(live.activity_signal.as_deref(), Some("claude_thinking"));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1095,15 +1466,28 @@ mod tests {
     fn claude_completed_text_clears_thinking_state() {
         clear_session_metrics_cache();
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("starling-metrics-{}-claude-complete.jsonl",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
-        write_jsonl(&path, &[
-            r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"content":[{"type":"thinking","thinking":"working"}],"stop_reason":null}}"#,
-            r#"{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","message":{"content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}}"#,
-        ]);
+        let path = dir.join(format!(
+            "starling-metrics-{}-claude-complete.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"content":[{"type":"thinking","thinking":"working"}],"stop_reason":null}}"#,
+                r#"{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","message":{"content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}}"#,
+            ],
+        );
         let live = get_session_live_metrics(&path);
         assert_eq!(live.pending_since_ms, 0);
         assert_eq!(live.thinking_since_ms, 0);
+        assert_eq!(live.activity_status.as_deref(), Some("idle"));
+        assert_eq!(
+            live.activity_signal.as_deref(),
+            Some("claude_assistant_message")
+        );
         let _ = std::fs::remove_file(&path);
     }
 

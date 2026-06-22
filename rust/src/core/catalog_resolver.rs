@@ -37,7 +37,9 @@ pub fn catalog_path(space: &Space, spaces: Option<&[Space]>) -> String {
     let mut seen = std::collections::HashSet::new();
 
     while let Some(pid) = current_id {
-        if !seen.insert(pid.clone()) { break; }
+        if !seen.insert(pid.clone()) {
+            break;
+        }
         let parent = match spaces.iter().find(|s| s.id == pid) {
             Some(p) => p,
             None => break,
@@ -57,9 +59,13 @@ mod tests {
 
     fn mk_space(id: &str, name: &str, parent_id: Option<&str>) -> Space {
         Space {
-            id: id.into(), name: name.into(), description: "".into(),
-            tags: vec![], parent_id: parent_id.map(String::from),
-            created_at: "t".into(), updated_at: "t".into(),
+            id: id.into(),
+            name: name.into(),
+            description: "".into(),
+            tags: vec![],
+            parent_id: parent_id.map(String::from),
+            created_at: "t".into(),
+            updated_at: "t".into(),
         }
     }
 
@@ -88,11 +94,9 @@ mod tests {
 
     #[test]
     fn resolve_missing() {
-        with_temp_store(|| {
-            match resolve_catalog_reference("does-not-exist") {
-                CatalogResolution::NotFound => {}
-                other => panic!("expected NotFound, got {:?}", other),
-            }
+        with_temp_store(|| match resolve_catalog_reference("does-not-exist") {
+            CatalogResolution::NotFound => {}
+            other => panic!("expected NotFound, got {:?}", other),
         });
     }
 

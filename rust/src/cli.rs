@@ -647,7 +647,7 @@ pub enum TopAction {
     Record {
         /// Session ID to update
         session_id: String,
-        /// Status: waiting | idle | running | stopped
+        /// Status: waiting | idle | running | aborted | failure | stopped
         #[arg(long)]
         status: Option<String>,
         /// Parse an OSC 0/2 title payload
@@ -688,9 +688,15 @@ pub enum TopAction {
         json: bool,
     },
 
-    /// Record a Claude Code hook event from stdin
+    /// Record an agent hook event from stdin
     #[command(hide = true)]
     Hook {
+        /// Agent provider: claude | codex
+        #[arg(long, default_value = "claude")]
+        provider: String,
+        /// Hook event name when the payload does not include one
+        #[arg(long)]
+        event: Option<String>,
         /// Starling run id, when known
         #[arg(long)]
         run_id: Option<String>,

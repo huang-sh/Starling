@@ -27,7 +27,10 @@ pub fn expand_home(value: &str) -> PathBuf {
 }
 
 fn env_trim(key: &str) -> Option<String> {
-    std::env::var(key).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    std::env::var(key)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,7 +45,11 @@ fn read_configured_starling_home() -> Option<String> {
     let parsed: CliConfigFile = serde_json::from_str(&raw).ok()?;
     parsed.home_path.and_then(|h| {
         let trimmed = h.trim().to_string();
-        if trimmed.is_empty() { None } else { Some(trimmed) }
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
     })
 }
 
@@ -175,8 +182,7 @@ pub fn now_iso() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0)
-        .unwrap_or_default();
+    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0).unwrap_or_default();
     // Use `to_rfc3339` which yields a stable `+00:00` suffix matching the
     // `new Date().toISOString()` shape (Z-terminated).
     let rfc = dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);

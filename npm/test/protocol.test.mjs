@@ -61,6 +61,9 @@ test("normalizes status aliases used by old Rust and extension builds", () => {
     pinned: [
       row({ session_id: "needs-attention", status: "needs_attention" }),
       row({ session_id: "thinking", status: "thinking" }),
+      row({ session_id: "stale", status: "stale-running" }),
+      row({ session_id: "interrupted", status: "interrupted" }),
+      row({ session_id: "failed", status: "failed" }),
       row({ session_id: "done", status: "done" }),
     ],
     recent: [],
@@ -68,10 +71,13 @@ test("normalizes status aliases used by old Rust and extension builds", () => {
 
   assert.deepEqual(
     monitorRows(snapshot).map((item) => item.status),
-    ["waiting", "running", "stopped"],
+    ["waiting", "running", "stale_running", "aborted", "failure", "stopped"],
   );
   assert.equal(isActiveLiveStatus("waiting"), true);
   assert.equal(isActiveLiveStatus("running"), true);
+  assert.equal(isActiveLiveStatus("stale_running"), false);
+  assert.equal(isActiveLiveStatus("aborted"), false);
+  assert.equal(isActiveLiveStatus("failure"), false);
   assert.equal(isActiveLiveStatus("idle"), false);
 });
 

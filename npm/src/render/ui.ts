@@ -58,6 +58,7 @@ export function pill(value: string, tone: Tone = "neutral"): string {
 export function statusDot(status: string): string {
   switch (status) {
     case "failed":
+    case "failure":
     case "crashed":
       return ansi.red("!");
     case "waiting":
@@ -69,6 +70,10 @@ export function statusDot(status: string): string {
       return ansi.green("✓");
     case "running":
       return ansi.cyan("●");
+    case "stale_running":
+      return ansi.yellow("◐");
+    case "aborted":
+      return ansi.yellow("×");
     case "stopped":
       return ansi.gray("·");
     default:
@@ -79,6 +84,7 @@ export function statusDot(status: string): string {
 export function colorStatus(status: string): string {
   switch (status) {
     case "failed":
+    case "failure":
     case "crashed":
       return ansi.red(ansi.bold(status));
     case "waiting":
@@ -90,6 +96,10 @@ export function colorStatus(status: string): string {
       return ansi.green(status);
     case "running":
       return ansi.cyan(status);
+    case "stale_running":
+      return ansi.yellow(status);
+    case "aborted":
+      return ansi.yellow(ansi.bold(status));
     case "stopped":
       return ansi.gray(status);
     default:
