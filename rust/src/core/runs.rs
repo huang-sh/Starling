@@ -341,6 +341,7 @@ mod tests {
             provider: crate::types::RunProvider::Claude,
             project_path: None,
             catalog_id: None,
+            setting: None,
             pid: None,
             status,
             exit_code: None,
@@ -353,11 +354,9 @@ mod tests {
     #[test]
     fn lifecycle_create_finalize_remove() {
         with_temp_store(|| {
-            std::env::set_var(
-                "STARLING_RUNS",
-                "/tmp/starling-runs-test-does-not-exist-yet.json",
-            );
-            let _ = std::fs::remove_file("/tmp/starling-runs-test-does-not-exist-yet.json");
+            let path = test_runs_path("starling-runs-test-does-not-exist-yet.json");
+            std::env::set_var("STARLING_RUNS", &path);
+            let _ = std::fs::remove_file(&path);
 
             let run = mk_run("r1", Some("s1"), RunStatus::Running, "2026-01-01T00:00:00Z");
             create_run(run);
@@ -383,7 +382,7 @@ mod tests {
             assert!(remove_run("r1"));
             assert!(find_run("r1").is_none());
 
-            let _ = std::fs::remove_file("/tmp/starling-runs-test-does-not-exist-yet.json");
+            let _ = std::fs::remove_file(&path);
             std::env::remove_var("STARLING_RUNS");
         });
     }
@@ -391,9 +390,9 @@ mod tests {
     #[test]
     fn list_runs_sorts_newest_first() {
         with_temp_store(|| {
-            let path = "/tmp/starling-runs-list-test.json";
-            std::env::set_var("STARLING_RUNS", path);
-            let _ = std::fs::remove_file(path);
+            let path = test_runs_path("starling-runs-list-test.json");
+            std::env::set_var("STARLING_RUNS", &path);
+            let _ = std::fs::remove_file(&path);
 
             create_run(mk_run(
                 "old",
@@ -411,9 +410,15 @@ mod tests {
             assert_eq!(runs[0].run_id, "new");
             assert_eq!(runs[1].run_id, "old");
 
-            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(&path);
             std::env::remove_var("STARLING_RUNS");
         });
+    }
+
+    fn test_runs_path(name: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-data");
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join(name)
     }
 
     #[test]

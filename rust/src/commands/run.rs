@@ -79,6 +79,7 @@ fn launch(
         provider,
         project_path: project_path.clone(),
         catalog_id: catalog_id.clone(),
+        setting: cmd_args.setting.clone(),
         pid: None,
         status: RunStatus::Running,
         exit_code: None,
@@ -1789,6 +1790,9 @@ fn status(run_id: Option<&str>, json: bool) -> Result<()> {
                 }
                 if let Some(p) = &r.project_path {
                     println!("  Project:  {}", p);
+                }
+                if let Some(setting) = &r.setting {
+                    println!("  Setting:  {}", setting);
                 }
                 Ok(())
             }

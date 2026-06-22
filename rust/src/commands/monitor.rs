@@ -32,6 +32,8 @@ const WATCH_INTERVAL_MS: u64 = 1000;
 const EDGE_RUNNING_LEASE_MS: u64 = 15 * 1000;
 const HOOK_RUNNING_STALE_MS: u64 = 30 * 60 * 1000;
 const LIVE_RUNNING_STALE_MS: u64 = 30 * 60 * 1000;
+const PENDING_TASK_STALE_MS: u64 = 30 * 60 * 1000;
+const ACTIVE_CPU_THRESHOLD: f64 = 0.1;
 pub fn handle(cmd: TopCommand) -> Result<()> {
     match cmd.action {
         Some(TopAction::Record {
@@ -706,8 +708,8 @@ fn infer_status_with_runtime(
     _provider: &str,
     hook: Option<&OscSessionState>,
     now_ms: u64,
-    _process_count: usize,
-    _cpu_pct: f64,
+    process_count: usize,
+    cpu_pct: f64,
     background_task_count: usize,
 ) -> StatusGuess {
     if let Some(state) = hook {
@@ -740,6 +742,21 @@ fn infer_status_with_runtime(
             true,
         );
     }
+    if process_alive
+        && has_live_pending_task(live)
+        && is_effective_pending_task_active(
+            live,
+            now_ms,
+            process_count,
+            cpu_pct,
+            background_task_count,
+        )
+    {
+        if text_looks_like_waiting_prompt(&live.current_task) {
+            return status_guess("waiting", Some("pending_prompt"), false);
+        }
+        return status_guess("running", Some("pending_task"), false);
+    }
     infer_status_from_hook(process_alive, hook, now_ms)
 }
 
@@ -756,6 +773,27 @@ fn is_fresh_live_running(live: &SessionLive, now_ms: u64) -> bool {
     is_live_running(live)
         && live.activity_since_ms > 0
         && now_ms.saturating_sub(live.activity_since_ms) <= LIVE_RUNNING_STALE_MS
+}
+
+fn has_live_pending_task(live: &SessionLive) -> bool {
+    live.pending_since_ms > 0 || !live.current_task.trim().is_empty()
+}
+
+fn is_effective_pending_task_active(
+    live: &SessionLive,
+    now_ms: u64,
+    process_count: usize,
+    cpu_pct: f64,
+    background_task_count: usize,
+) -> bool {
+    if process_count == 0 {
+        return false;
+    }
+    if background_task_count > 0 || cpu_pct > ACTIVE_CPU_THRESHOLD {
+        return true;
+    }
+    live.pending_since_ms > 0
+        && now_ms.saturating_sub(live.pending_since_ms) <= PENDING_TASK_STALE_MS
 }
 
 fn is_expired_edge_running(
@@ -1756,7 +1794,23 @@ mod hook_status_tests {
     }
 
     #[test]
-    fn no_hook_with_live_process_is_idle_even_if_transcript_looks_busy() {
+    fn no_hook_with_active_pending_task_is_running() {
+        let live = SessionLive {
+            pending_since_ms: 10_000,
+            current_task: "gh run watch 27966644622 --repo huang-sh/Starling-ext --exit-status"
+                .to_string(),
+            ..Default::default()
+        };
+
+        let guess = infer_status_with_runtime(true, &live, "", "codex", None, 20_000, 1, 18.5, 0);
+
+        assert_eq!(guess.status, "running");
+        assert_eq!(guess.signal.as_deref(), Some("pending_task"));
+        assert!(!guess.realtime);
+    }
+
+    #[test]
+    fn no_hook_with_waiting_pending_prompt_is_waiting() {
         let live = SessionLive {
             pending_since_ms: 1_000,
             thinking_since_ms: 1_000,
@@ -1765,6 +1819,31 @@ mod hook_status_tests {
         };
 
         let guess = infer_status_with_runtime(true, &live, "", "claude", None, 10_000, 99, 50.0, 2);
+
+        assert_eq!(guess.status, "waiting");
+        assert_eq!(guess.signal.as_deref(), Some("pending_prompt"));
+        assert!(!guess.realtime);
+    }
+
+    #[test]
+    fn stale_pending_task_without_process_activity_is_idle() {
+        let live = SessionLive {
+            pending_since_ms: 10_000,
+            current_task: "ls -la old-output".to_string(),
+            ..Default::default()
+        };
+
+        let guess = infer_status_with_runtime(
+            true,
+            &live,
+            "",
+            "codex",
+            None,
+            10_000 + PENDING_TASK_STALE_MS + 1,
+            1,
+            0.0,
+            0,
+        );
 
         assert_eq!(guess.status, "idle");
         assert_eq!(guess.signal.as_deref(), Some("process_alive"));

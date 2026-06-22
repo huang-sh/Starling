@@ -15,7 +15,8 @@ use crate::core::discovery::{
 use crate::core::format::format_session_table;
 use crate::core::id::{generate_bookmark_id, generate_note_id};
 use crate::core::runs::{
-    get_run_status_for_session, reconcile_stale_runs, status_badge, RunStatus,
+    get_latest_run_for_session, get_run_status_for_session, reconcile_stale_runs, status_badge,
+    RunStatus,
 };
 use crate::core::session_display::short_session_id;
 use crate::core::session_index::{
@@ -25,6 +26,7 @@ use crate::core::session_index::{
 use crate::core::store::{
     find_bookmark, list_bookmarks, list_spaces, remove_bookmark, update_bookmark, BookmarkPatch,
 };
+use crate::types::RunRecord;
 use crate::types::{Bookmark, SessionMeta};
 
 pub fn handle(cmd: SessionCommand) -> Result<()> {
@@ -245,11 +247,13 @@ fn show_cmd(session_id: &str, json: bool) -> Result<()> {
             meta: &'a SessionMeta,
             catalogs: Vec<String>,
             bookmark: Option<&'a Bookmark>,
+            latest_run: Option<RunRecord>,
         }
         let payload = Show {
             meta: &meta,
             catalogs,
             bookmark: bookmark.as_ref(),
+            latest_run: get_latest_run_for_session(&meta.session_id),
         };
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());

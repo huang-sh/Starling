@@ -98,6 +98,8 @@ pub struct RunRecord {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub catalog_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub setting: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub pid: Option<u32>,
     pub status: RunStatus,
     #[serde(skip_serializing_if = "Option::is_none", default)]
