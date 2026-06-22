@@ -283,7 +283,7 @@ fn spawn_pty_child(
         libc::forkpty(
             &mut master_fd as *mut libc::c_int,
             std::ptr::null_mut(),
-            std::ptr::null(),
+            std::ptr::null_mut(),
             winp,
         )
     };
