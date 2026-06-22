@@ -687,6 +687,23 @@ pub enum TopAction {
         #[arg(long)]
         json: bool,
     },
+
+    /// Record a Claude Code hook event from stdin
+    #[command(hide = true)]
+    Hook {
+        /// Starling run id, when known
+        #[arg(long)]
+        run_id: Option<String>,
+        /// Append the raw hook event to this JSONL file
+        #[arg(long)]
+        hook_file: Option<String>,
+        /// Live agent process pid
+        #[arg(long)]
+        pid: Option<u32>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 impl Cli {

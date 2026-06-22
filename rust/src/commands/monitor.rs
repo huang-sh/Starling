@@ -1,13 +1,14 @@
 //! `starling top` — live monitor.
 
 use std::collections::HashSet;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{bail, Result};
 use colored::*;
+use serde_json::Value;
 
 use crate::cli::{MonitorCommand, TopAction, TopCommand};
 use crate::core::catalog_resolver::{catalog_path, resolve_catalog_reference};
@@ -31,7 +32,6 @@ const WATCH_INTERVAL_MS: u64 = 1000;
 const STALE_PENDING_MS: u64 = 5 * 60 * 1000;
 const STALE_PENDING_IDLE_MS: u64 = 24 * 60 * 60 * 1000;
 const REALTIME_SUPERSEDE_GRACE_MS: u64 = 500;
-
 pub fn handle(cmd: TopCommand) -> Result<()> {
     match cmd.action {
         Some(TopAction::Record {
@@ -53,6 +53,12 @@ pub fn handle(cmd: TopCommand) -> Result<()> {
             pid,
             json,
         }) => clear_runtime_state(session_id, pid, json),
+        Some(TopAction::Hook {
+            run_id,
+            hook_file,
+            pid,
+            json,
+        }) => record_claude_hook_event(run_id, hook_file, pid, json),
         None => render_monitor(cmd.monitor),
     }
 }
@@ -159,6 +165,117 @@ fn clear_runtime_state(session_id: String, pid: Option<u32>, json: bool) -> Resu
         println!("{} {}", "cleared".green(), session_id.cyan());
     }
     Ok(())
+}
+
+fn record_claude_hook_event(
+    run_id: Option<String>,
+    hook_file: Option<String>,
+    pid: Option<u32>,
+    json: bool,
+) -> Result<()> {
+    let mut raw = String::new();
+    io::stdin().read_to_string(&mut raw)?;
+    if let Some(path) = hook_file.as_deref().filter(|p| !p.trim().is_empty()) {
+        append_hook_event(path, &raw)?;
+    }
+    let value: Value = serde_json::from_str(raw.trim()).unwrap_or(Value::Null);
+    let Some(session_id) = value.get("session_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    let event = value
+        .get("hook_event_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ClaudeHook");
+    let Some(status) = status_from_claude_hook_event(event, &value) else {
+        return Ok(());
+    };
+    let message = hook_message(event, &value);
+    let state = OscSessionState {
+        session_id: session_id.to_string(),
+        pid,
+        run_id,
+        status: status.to_string(),
+        message,
+        source: format!("claude-hook:{event}"),
+        updated_at_ms: now_ms(),
+    };
+    let store = upsert_osc_state(state.clone())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "action": "top.hook",
+                "data": {
+                    "state": state,
+                    "count": store.sessions.len(),
+                }
+            }))?
+        );
+    }
+    Ok(())
+}
+
+fn append_hook_event(path: &str, raw: &str) -> Result<()> {
+    let path = Path::new(path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    file.write_all(trimmed.as_bytes())?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+fn status_from_claude_hook_event<'a>(event: &str, value: &Value) -> Option<&'a str> {
+    match event {
+        "SessionStart" => Some("idle"),
+        "UserPromptSubmit" => Some("running"),
+        "PreToolUse" => Some("running"),
+        "PermissionRequest" => Some("waiting"),
+        "Notification" => Some("waiting"),
+        "Elicitation" => Some("waiting"),
+        "ElicitationResult" => Some("running"),
+        "PostToolUse" | "PostToolUseFailure" | "PostToolBatch" => Some("running"),
+        "SubagentStart" => Some("running"),
+        "SubagentStop" => Some("running"),
+        "TaskCreated" => Some("running"),
+        "TaskCompleted" => Some("running"),
+        "Stop" | "StopFailure" | "TeammateIdle" => Some("idle"),
+        "SessionEnd" => Some("stopped"),
+        _ => {
+            let message = value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if message.contains("permission") || message.contains("waiting") {
+                Some("waiting")
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn hook_message(event: &str, value: &Value) -> Option<String> {
+    let tool = value.get("tool_name").and_then(|v| v.as_str());
+    let message = value.get("message").and_then(|v| v.as_str());
+    let agent = value.get("agent_type").and_then(|v| v.as_str());
+    let text = match (tool, message, agent) {
+        (Some(tool), _, _) => format!("{event} {tool}"),
+        (_, Some(message), _) if !message.trim().is_empty() => message.trim().to_string(),
+        (_, _, Some(agent)) => format!("{event} {agent}"),
+        _ => event.to_string(),
+    };
+    Some(text)
 }
 
 fn resolve_recorded_status(
@@ -440,6 +557,9 @@ fn effective_realtime_state<'a>(
     live: &SessionLive,
 ) -> Option<&'a OscSessionState> {
     let state = osc?;
+    if state.source.starts_with("claude-hook:") {
+        return Some(state);
+    }
     if live.last_activity_ms > state.updated_at_ms.saturating_add(REALTIME_SUPERSEDE_GRACE_MS) {
         return None;
     }
@@ -1076,6 +1196,35 @@ mod tests {
 
         assert_eq!(guess.status, "waiting");
         assert_eq!(guess.signal.as_deref(), Some("pending_agent"));
+    }
+
+    #[test]
+    fn claude_hook_events_map_to_session_states() {
+        let empty = serde_json::json!({});
+        assert_eq!(status_from_claude_hook_event("UserPromptSubmit", &empty), Some("running"));
+        assert_eq!(status_from_claude_hook_event("PermissionRequest", &empty), Some("waiting"));
+        assert_eq!(status_from_claude_hook_event("Notification", &empty), Some("waiting"));
+        assert_eq!(status_from_claude_hook_event("Stop", &empty), Some("idle"));
+        assert_eq!(status_from_claude_hook_event("SessionEnd", &empty), Some("stopped"));
+    }
+
+    #[test]
+    fn claude_hook_state_survives_newer_transcript_activity() {
+        let live = SessionLive {
+            last_activity_ms: 10_000,
+            ..Default::default()
+        };
+        let state = OscSessionState {
+            session_id: "s".to_string(),
+            pid: None,
+            run_id: None,
+            status: "waiting".to_string(),
+            message: None,
+            source: "claude-hook:PermissionRequest".to_string(),
+            updated_at_ms: 1_000,
+        };
+
+        assert!(effective_realtime_state(Some(&state), &live).is_some());
     }
 
     #[test]

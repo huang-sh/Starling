@@ -495,6 +495,27 @@ mod tests {
         assert_eq!(hook.cwd.as_deref(), Some("/tmp/project"));
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn installs_runtime_hooks_for_claude_launches() {
+        let mut settings = serde_json::json!({});
+        let hook_file = PathBuf::from("/tmp/starling-hook.jsonl");
+        let starling_exe = PathBuf::from("/tmp/starling");
+
+        install_claude_runtime_hooks(&mut settings, "run-1", &hook_file, &starling_exe);
+
+        let hooks = settings.get("hooks").and_then(|v| v.as_object()).expect("hooks object");
+        for event in CLAUDE_RUNTIME_HOOK_EVENTS {
+            let arr = hooks.get(*event).and_then(|v| v.as_array()).expect("event hook");
+            let handler = &arr[0]["hooks"][0];
+            assert_eq!(handler["type"], "command");
+            assert_eq!(handler["command"], "/tmp/starling");
+            assert_eq!(handler["args"][0], "top");
+            assert_eq!(handler["args"][1], "hook");
+            assert_eq!(handler["args"][3], "run-1");
+            assert_eq!(handler["args"][5], "/tmp/starling-hook.jsonl");
+        }
+    }
 }
 
 fn prepare_launch(
@@ -566,27 +587,18 @@ fn create_claude_hook_settings(run_id: &str, base_settings: Option<&Path>) -> Re
     } else {
         serde_json::json!({})
     };
-    install_claude_session_start_hook(&mut settings, &hook_file);
+    let starling_exe = std::env::current_exe()?;
+    install_claude_runtime_hooks(&mut settings, run_id, &hook_file, &starling_exe);
     std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
     Ok(ClaudeHookSettings { settings_path, hook_file })
 }
 
-fn install_claude_session_start_hook(settings: &mut Value, hook_file: &Path) {
+fn install_claude_runtime_hooks(settings: &mut Value, run_id: &str, hook_file: &Path, starling_exe: &Path) {
     if !settings.is_object() {
         *settings = serde_json::json!({});
     }
-    let command = format!(
-        "bash -c 'cat >> \"$1\"; printf \"\\n\" >> \"$1\"' _ '{}'",
-        shell_single_quote_arg(&hook_file.to_string_lossy())
-    );
-    let hook = serde_json::json!({
-        "hooks": [
-            {
-                "type": "command",
-                "command": command
-            }
-        ]
-    });
+    let hook_file = hook_file.to_string_lossy().to_string();
+    let starling_exe = starling_exe.to_string_lossy().to_string();
 
     let root = settings.as_object_mut().expect("settings object");
     let hooks = root
@@ -596,18 +608,59 @@ fn install_claude_session_start_hook(settings: &mut Value, hook_file: &Path) {
         *hooks = serde_json::json!({});
     }
     let hooks_obj = hooks.as_object_mut().expect("hooks object");
-    let session_start = hooks_obj
-        .entry("SessionStart")
-        .or_insert_with(|| serde_json::json!([]));
-    if let Some(arr) = session_start.as_array_mut() {
-        arr.push(hook);
-    } else {
-        *session_start = serde_json::json!([hook]);
+
+    for event in CLAUDE_RUNTIME_HOOK_EVENTS {
+        let hook = claude_runtime_hook(&starling_exe, run_id, &hook_file);
+        let entry = hooks_obj
+            .entry(*event)
+            .or_insert_with(|| serde_json::json!([]));
+        if let Some(arr) = entry.as_array_mut() {
+            arr.push(hook);
+        } else {
+            *entry = serde_json::json!([hook]);
+        }
     }
 }
 
-fn shell_single_quote_arg(value: &str) -> String {
-    value.replace('\'', "'\\''")
+const CLAUDE_RUNTIME_HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PostToolBatch",
+    "Notification",
+    "SubagentStart",
+    "SubagentStop",
+    "TaskCreated",
+    "TaskCompleted",
+    "Elicitation",
+    "ElicitationResult",
+    "Stop",
+    "StopFailure",
+    "TeammateIdle",
+    "SessionEnd",
+];
+
+fn claude_runtime_hook(starling_exe: &str, run_id: &str, hook_file: &str) -> Value {
+    serde_json::json!({
+        "hooks": [
+            {
+                "type": "command",
+                "command": starling_exe,
+                "args": [
+                    "top",
+                    "hook",
+                    "--run-id",
+                    run_id,
+                    "--hook-file",
+                    hook_file
+                ],
+                "timeout": 5
+            }
+        ]
+    })
 }
 
 fn ensure_file(path: &Path, label: &str) -> Result<()> {
