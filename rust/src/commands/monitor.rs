@@ -477,6 +477,9 @@ fn infer_status(
         if process_count > 1 {
             return status_guess("running", Some("pending_tool_process"), false);
         }
+        if matches!(live.last_tool.as_deref(), Some("Agent")) {
+            return status_guess("waiting", Some("pending_agent"), false);
+        }
         if pending_age_ms >= STALE_PENDING_IDLE_MS {
             return status_guess("idle", Some("stale_pending_tool"), false);
         }
@@ -1061,6 +1064,18 @@ mod tests {
 
         assert_eq!(guess.status, "running");
         assert_eq!(guess.signal.as_deref(), Some("pending_tool_process"));
+    }
+
+    #[test]
+    fn pending_claude_agent_tool_without_child_is_waiting() {
+        let now_ms = 10_000;
+        let mut live = pending_live(now_ms, 2_000);
+        live.last_tool = Some("Agent".to_string());
+
+        let guess = infer_status(true, &live, "", None, now_ms, 1);
+
+        assert_eq!(guess.status, "waiting");
+        assert_eq!(guess.signal.as_deref(), Some("pending_agent"));
     }
 
     #[test]
