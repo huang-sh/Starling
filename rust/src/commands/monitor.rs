@@ -32,6 +32,15 @@ const WATCH_INTERVAL_MS: u64 = 1000;
 const STALE_PENDING_MS: u64 = 5 * 60 * 1000;
 const STALE_PENDING_IDLE_MS: u64 = 24 * 60 * 60 * 1000;
 const REALTIME_SUPERSEDE_GRACE_MS: u64 = 500;
+const CODEX_ACTIVE_CPU_PCT: f64 = 1.0;
+const CODEX_TASK_COMPLETE_HOLD_MS: u64 = 30 * 1000;
+const CLAUDE_ACTIVE_CPU_PCT: f64 = 0.5;
+/// Upper bound on "how long since the transcript last moved before we no longer
+/// consider the session running". Must comfortably exceed the longest expected
+/// single LLM generation / tool call (~minute-scale) so we don't flap during
+/// long API responses, but be short enough that a mis-bound stale session
+/// (transcript untouched for hours) is recognised as not-running.
+const RUNNING_TRANSCRIPT_FRESH_MS: u64 = 5 * 60 * 1000;
 pub fn handle(cmd: TopCommand) -> Result<()> {
     match cmd.action {
         Some(TopAction::Record {
@@ -254,9 +263,11 @@ fn status_from_claude_hook_event<'a>(event: &str, value: &Value) -> Option<&'a s
             let message = value
                 .get("message")
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_lowercase();
-            if message.contains("permission") || message.contains("waiting") {
+                .unwrap_or("");
+            if text_looks_like_waiting_prompt(message)
+                || message.to_lowercase().contains("permission")
+                || message.to_lowercase().contains("waiting")
+            {
                 Some("waiting")
             } else {
                 None
@@ -373,17 +384,28 @@ struct MonitorSnapshot {
 impl From<&Row> for RowJson {
     fn from(r: &Row) -> Self {
         let live = live_for(&r.file_path);
-        let (cpu, mem_kb, process_count) = process_for(r.pid);
+        let (cpu, mem_kb, process_count, background_task_count) = process_for(r.pid);
         let now_ms = now_ms();
         let osc = recent_osc_state(&r.session_id, r.pid, now_ms);
         let effective_osc = effective_realtime_state(osc.as_ref(), &live);
-        let inferred = infer_status(
-            r.pid.is_some(),
+        let running = is_actively_running(
+            r.pid,
+            &live,
+            effective_osc,
+            now_ms,
+            cpu,
+            process_count,
+        );
+        let inferred = infer_status_with_runtime(
+            running,
             &live,
             &r.title,
+            &r.provider,
             effective_osc,
             now_ms,
             process_count,
+            cpu,
+            background_task_count,
         );
         let status_realtime = inferred.realtime;
         let status_source = if status_realtime {
@@ -472,12 +494,12 @@ impl MonitorSnapshot {
     }
 }
 
-fn process_for(pid: Option<u32>) -> (f64, u64, usize) {
+fn process_for(pid: Option<u32>) -> (f64, u64, usize, usize) {
     if let Some(p) = pid.filter(|&p| p > 0) {
         let m = get_process_tree_metrics(p);
-        (m.cpu_pct, m.mem_kb, m.pids.len())
+        (m.cpu_pct, m.mem_kb, m.pids.len(), m.background_task_count)
     } else {
-        (0.0, 0, 0)
+        (0.0, 0, 0, 0)
     }
 }
 
@@ -566,6 +588,43 @@ fn effective_realtime_state<'a>(
     Some(state)
 }
 
+/// Decide whether a session should be considered "running" for status-inference
+/// purposes. This is stricter than mere PID liveness: a PID attached via the
+/// cwd+mtime fallback (`process_map::resolve_from_cwd_mtime`) can easily be a
+/// different live codex/claude process that happens to share the project
+/// directory. We require positive evidence that *this* session is currently
+/// being driven before letting the downstream decision tree label it
+/// running/waiting — otherwise we fall through to "stopped".
+///
+/// Accepted evidence (any one suffices):
+/// 1. A still-effective OSC state for this session (strongest: OSC events are
+///    emitted by the agent itself and carry the session id).
+/// 2. Transcript was modified within `RUNNING_TRANSCRIPT_FRESH_MS`.
+/// 3. Process is consuming CPU above the active threshold.
+/// 4. A child process is present (tool subprocess actively running).
+fn is_actively_running(
+    pid: Option<u32>,
+    live: &SessionLive,
+    effective_osc: Option<&OscSessionState>,
+    now_ms: u64,
+    cpu_pct: f64,
+    process_count: usize,
+) -> bool {
+    if pid.is_none() {
+        return false;
+    }
+    if effective_osc.is_some() {
+        return true;
+    }
+    if now_ms.saturating_sub(live.last_activity_ms) <= RUNNING_TRANSCRIPT_FRESH_MS {
+        return true;
+    }
+    if cpu_pct >= CODEX_ACTIVE_CPU_PCT {
+        return true;
+    }
+    process_count > 1
+}
+
 #[derive(Clone)]
 struct StatusGuess {
     status: String,
@@ -581,32 +640,80 @@ fn infer_status(
     now_ms: u64,
     process_count: usize,
 ) -> StatusGuess {
+    infer_status_with_runtime(running, live, _title, "", osc, now_ms, process_count, 0.0, 0)
+}
+
+fn infer_status_with_runtime(
+    running: bool,
+    live: &SessionLive,
+    _title: &str,
+    provider: &str,
+    osc: Option<&OscSessionState>,
+    now_ms: u64,
+    process_count: usize,
+    cpu_pct: f64,
+    background_task_count: usize,
+) -> StatusGuess {
     if !running {
         return status_guess("stopped", None, false);
     }
     if let Some(state) = osc {
         return status_guess(&state.status, Some(&state.source), true);
     }
-    if let Some(activity_status) = live.activity_status.as_deref() {
-        let signal = live.activity_signal.as_deref().unwrap_or("codex_activity");
-        return status_guess(activity_status, Some(signal), false);
+
+    let activity_signal = live.activity_signal.as_deref().unwrap_or("codex_activity");
+    if matches!(live.activity_status.as_deref(), Some("waiting" | "running")) {
+        return status_guess(live.activity_status.as_deref().unwrap(), Some(activity_signal), false);
     }
     if live.pending_since_ms > 0 {
         let last_signal_ms = live.last_activity_ms.max(live.pending_since_ms);
         let pending_age_ms = now_ms.saturating_sub(last_signal_ms);
+        if pending_age_ms >= STALE_PENDING_IDLE_MS {
+            return status_guess("idle", Some("stale_pending_tool"), false);
+        }
+        if background_task_count > 0
+            && is_claude_provider(provider)
+            && claude_pending_tool_waits_for_approval(live.last_tool.as_deref())
+        {
+            return status_guess("waiting", Some("background_task_waiting"), false);
+        }
         if process_count > 1 {
             return status_guess("running", Some("pending_tool_process"), false);
+        }
+        if is_claude_provider(provider) && cpu_pct >= CLAUDE_ACTIVE_CPU_PCT {
+            return status_guess("running", Some("claude_pending_tool_active"), false);
+        }
+        if live_has_waiting_prompt(live) {
+            return status_guess("waiting", Some("waiting_prompt_text"), false);
         }
         if matches!(live.last_tool.as_deref(), Some("Agent")) {
             return status_guess("waiting", Some("pending_agent"), false);
         }
-        if pending_age_ms >= STALE_PENDING_IDLE_MS {
-            return status_guess("idle", Some("stale_pending_tool"), false);
+        if is_claude_provider(provider) && claude_pending_tool_waits_for_approval(live.last_tool.as_deref()) {
+            return status_guess("waiting", Some("pending_tool_approval"), false);
         }
         return status_guess("idle", Some("pending_tool_no_process"), false);
     }
+    if live_has_waiting_prompt(live) {
+        return status_guess("waiting", Some("waiting_prompt_text"), false);
+    }
     if live.thinking_since_ms > 0 {
         return status_guess("running", Some("thinking"), false);
+    }
+    if background_task_count > 0 && is_claude_provider(provider) {
+        return status_guess("idle", Some("background_task_idle"), false);
+    }
+    if is_codex_provider(provider) && cpu_pct >= CODEX_ACTIVE_CPU_PCT {
+        return status_guess("running", Some("codex_process_active"), false);
+    }
+    if is_codex_provider(provider) && is_codex_task_complete_hint(live) {
+        let last_signal_ms = live.last_activity_ms.max(live.activity_since_ms);
+        if now_ms.saturating_sub(last_signal_ms) <= CODEX_TASK_COMPLETE_HOLD_MS {
+            return status_guess("running", Some("codex_task_complete_hold"), false);
+        }
+    }
+    if matches!(live.activity_status.as_deref(), Some("idle")) {
+        return status_guess("idle", Some(activity_signal), false);
     }
     let last_role = live.chat_tail.last().map(|m| m.role);
     if live.pending_since_ms == 0 && matches!(last_role, Some(ChatRole::Assistant)) {
@@ -620,6 +727,62 @@ fn infer_status(
         return status_guess("idle", Some("current_task_no_process"), false);
     }
     status_guess("idle", Some("process_alive"), false)
+}
+
+fn is_codex_provider(provider: &str) -> bool {
+    provider.eq_ignore_ascii_case("codex")
+}
+
+fn is_claude_provider(provider: &str) -> bool {
+    provider.eq_ignore_ascii_case("claude")
+}
+
+fn claude_pending_tool_waits_for_approval(tool: Option<&str>) -> bool {
+    matches!(
+        tool,
+        Some("Bash" | "Edit" | "Write" | "MultiEdit" | "NotebookEdit")
+    )
+}
+
+fn is_codex_task_complete_hint(live: &SessionLive) -> bool {
+    live.activity_status.as_deref() == Some("idle")
+        && live.activity_signal.as_deref() == Some("codex_task_complete")
+}
+
+fn live_has_waiting_prompt(live: &SessionLive) -> bool {
+    if text_looks_like_waiting_prompt(&live.current_task) {
+        return true;
+    }
+    live.chat_tail
+        .iter()
+        .rev()
+        .take(3)
+        .any(|message| text_looks_like_waiting_prompt(&message.text))
+}
+
+fn text_looks_like_waiting_prompt(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    if lower.trim().is_empty() {
+        return false;
+    }
+    lower.contains("do you want to proceed")
+        || lower.contains("would you like to proceed")
+        || lower.contains("do you want to continue")
+        || lower.contains("would you like to continue")
+        || lower.contains("waiting for input")
+        || lower.contains("waiting for approval")
+        || lower.contains("permission approval")
+        || lower.contains("requires approval")
+        || lower.contains("requires your approval")
+        || lower.contains("needs your approval")
+        || lower.contains("approve this")
+        || lower.contains("1. yes")
+        || lower.contains("2. no")
+        || lower.contains("是否继续")
+        || lower.contains("等待用户")
+        || lower.contains("等待确认")
+        || lower.contains("需要确认")
+        || lower.contains("需要批准")
 }
 
 fn status_guess(status: &str, signal: Option<&str>, realtime: bool) -> StatusGuess {
@@ -653,17 +816,20 @@ fn render_table(rows: &[Row]) -> String {
 
 fn render_compact_row(row: &Row, width: usize) -> Vec<String> {
     let live = live_for(&row.file_path);
-    let (cpu, mem_kb, process_count) = process_for(row.pid);
+    let (cpu, mem_kb, process_count, background_task_count) = process_for(row.pid);
     let now_ms = now_ms();
     let osc = recent_osc_state(&row.session_id, row.pid, now_ms);
     let effective_osc = effective_realtime_state(osc.as_ref(), &live);
-    let inferred = infer_status(
+    let inferred = infer_status_with_runtime(
         row.pid.is_some(),
         &live,
         &row.title,
+        &row.provider,
         effective_osc,
         now_ms,
         process_count,
+        cpu,
+        background_task_count,
     );
     let status = inferred.status;
     let status_padding = " ".repeat(10usize.saturating_sub(status.chars().count()));
@@ -771,14 +937,17 @@ fn render_summary(rows: &[Row]) -> String {
             let now_ms = now_ms();
             let osc = recent_osc_state(&row.session_id, row.pid, now_ms);
             let effective_osc = effective_realtime_state(osc.as_ref(), &live);
-            let (_cpu, _mem_kb, process_count) = process_for(row.pid);
-            let inferred = infer_status(
+            let (cpu, _mem_kb, process_count, background_task_count) = process_for(row.pid);
+            let inferred = infer_status_with_runtime(
                 row.pid.is_some(),
                 &live,
                 &row.title,
+                &row.provider,
                 effective_osc,
                 now_ms,
                 process_count,
+                cpu,
+                background_task_count,
             );
             is_active_status(&inferred.status)
         })
@@ -1164,12 +1333,36 @@ mod tests {
     }
 
     #[test]
+    fn pending_claude_shell_without_child_is_waiting_for_approval() {
+        let now_ms = 10_000;
+        let mut live = pending_live(now_ms, 2_000);
+        live.last_tool = Some("Bash".to_string());
+
+        let guess = infer_status_with_runtime(true, &live, "", "claude", None, now_ms, 1, 0.0, 0);
+
+        assert_eq!(guess.status, "waiting");
+        assert_eq!(guess.signal.as_deref(), Some("pending_tool_approval"));
+    }
+
+    #[test]
     fn very_old_pending_shell_without_child_becomes_idle() {
         let now_ms = STALE_PENDING_IDLE_MS + 10_000;
         let mut live = pending_live(now_ms, STALE_PENDING_IDLE_MS);
         live.last_tool = Some("Bash".to_string());
 
         let guess = infer_status(true, &live, "", None, now_ms, 1);
+
+        assert_eq!(guess.status, "idle");
+        assert_eq!(guess.signal.as_deref(), Some("stale_pending_tool"));
+    }
+
+    #[test]
+    fn stale_claude_shell_pending_does_not_stay_waiting() {
+        let now_ms = STALE_PENDING_IDLE_MS + 10_000;
+        let mut live = pending_live(now_ms, STALE_PENDING_IDLE_MS);
+        live.last_tool = Some("Bash".to_string());
+
+        let guess = infer_status_with_runtime(true, &live, "", "claude", None, now_ms, 1, 5.0, 0);
 
         assert_eq!(guess.status, "idle");
         assert_eq!(guess.signal.as_deref(), Some("stale_pending_tool"));
@@ -1196,6 +1389,109 @@ mod tests {
 
         assert_eq!(guess.status, "waiting");
         assert_eq!(guess.signal.as_deref(), Some("pending_agent"));
+    }
+
+    #[test]
+    fn pending_claude_tool_with_cpu_activity_is_running() {
+        let now_ms = 10_000;
+        let live = pending_live(now_ms, 2_000);
+
+        let guess = infer_status_with_runtime(true, &live, "", "claude", None, now_ms, 1, 5.0, 0);
+
+        assert_eq!(guess.status, "running");
+        assert_eq!(guess.signal.as_deref(), Some("claude_pending_tool_active"));
+    }
+
+    #[test]
+    fn pending_claude_background_task_stays_waiting_despite_cpu() {
+        let now_ms = 10_000;
+        let mut live = pending_live(now_ms, 2_000);
+        live.last_tool = Some("Bash".to_string());
+
+        let guess = infer_status_with_runtime(true, &live, "", "claude", None, now_ms, 1, 10.0, 1);
+
+        assert_eq!(guess.status, "waiting");
+        assert_eq!(guess.signal.as_deref(), Some("background_task_waiting"));
+    }
+
+    #[test]
+    fn pending_claude_tool_without_cpu_activity_stays_idle() {
+        let now_ms = 10_000;
+        let live = pending_live(now_ms, 2_000);
+
+        let guess = infer_status_with_runtime(true, &live, "", "claude", None, now_ms, 1, 0.0, 0);
+
+        assert_eq!(guess.status, "idle");
+        assert_eq!(guess.signal.as_deref(), Some("pending_tool_no_process"));
+    }
+
+    #[test]
+    fn claude_permission_prompt_text_is_waiting() {
+        let now_ms = 10_000;
+        let live = SessionLive {
+            last_activity_ms: now_ms - 1_000,
+            current_task: "Do you want to proceed?\n1. Yes\n2. No".to_string(),
+            ..Default::default()
+        };
+
+        let guess = infer_status_with_runtime(true, &live, "", "claude", None, now_ms, 1, 0.0, 0);
+
+        assert_eq!(guess.status, "waiting");
+        assert_eq!(guess.signal.as_deref(), Some("waiting_prompt_text"));
+    }
+
+    #[test]
+    fn claude_permission_prompt_without_runtime_evidence_is_waiting() {
+        let now_ms = 10_000;
+        let mut live = pending_live(now_ms, 1_000);
+        live.last_tool = Some("Bash".to_string());
+        live.current_task = "Do you want to proceed?\n1. Yes\n2. No".to_string();
+
+        let guess = infer_status_with_runtime(true, &live, "", "claude", None, now_ms, 1, 0.0, 0);
+
+        assert_eq!(guess.status, "waiting");
+        assert_eq!(guess.signal.as_deref(), Some("waiting_prompt_text"));
+    }
+
+    #[test]
+    fn claude_permission_prompt_with_child_process_turns_running() {
+        let now_ms = 10_000;
+        let mut live = pending_live(now_ms, 1_000);
+        live.last_tool = Some("Bash".to_string());
+        live.current_task = "Do you want to proceed?\n1. Yes\n2. No".to_string();
+
+        let guess = infer_status_with_runtime(true, &live, "", "claude", None, now_ms, 3, 20.0, 0);
+
+        assert_eq!(guess.status, "running");
+        assert_eq!(guess.signal.as_deref(), Some("pending_tool_process"));
+    }
+
+    #[test]
+    fn claude_active_process_without_task_signal_is_idle() {
+        let now_ms = STALE_PENDING_MS * 3;
+        let live = SessionLive {
+            last_activity_ms: 1_000,
+            ..Default::default()
+        };
+
+        let guess = infer_status_with_runtime(true, &live, "", "claude", None, now_ms, 1, 0.8, 0);
+
+        assert_eq!(guess.status, "idle");
+        assert_eq!(guess.signal.as_deref(), Some("process_alive"));
+    }
+
+    #[test]
+    fn claude_background_task_without_frontend_activity_is_idle() {
+        let now_ms = STALE_PENDING_MS * 3;
+        let live = SessionLive {
+            last_activity_ms: 1_000,
+            ..Default::default()
+        };
+
+        let guess = infer_status_with_runtime(true, &live, "", "claude", None, now_ms, 1, 10.0, 1);
+
+        assert_eq!(guess.status, "idle");
+        assert_eq!(guess.signal.as_deref(), Some("background_task_idle"));
     }
 
     #[test]
@@ -1228,6 +1524,81 @@ mod tests {
     }
 
     #[test]
+    fn actively_running_requires_pid() {
+        let live = SessionLive { last_activity_ms: 100, ..Default::default() };
+        // Even with CPU, child processes, and OSC, no PID means not running.
+        let state = OscSessionState {
+            session_id: "s".to_string(), pid: None, run_id: None,
+            status: "running".to_string(), message: None,
+            source: "claude-hook:UserPromptSubmit".to_string(),
+            updated_at_ms: 100,
+        };
+        assert!(!is_actively_running(None, &live, Some(&state), 1_000, 5.0, 3));
+    }
+
+    #[test]
+    fn actively_running_accepts_fresh_transcript() {
+        // Recent transcript write is enough on its own.
+        let live = SessionLive { last_activity_ms: 5_000, ..Default::default() };
+        assert!(is_actively_running(Some(42), &live, None, 10_000, 0.0, 1));
+    }
+
+    #[test]
+    fn actively_running_transcript_freshness_is_inclusive_at_boundary() {
+        let now_ms = 1_000_000;
+        let live = SessionLive {
+            last_activity_ms: now_ms - RUNNING_TRANSCRIPT_FRESH_MS,
+            ..Default::default()
+        };
+        assert!(is_actively_running(Some(42), &live, None, now_ms, 0.0, 1));
+    }
+
+    #[test]
+    fn actively_running_accepts_effective_osc() {
+        // OSC carries the session id and is emitted by the agent itself —
+        // strongest single signal that the bound PID really belongs to this
+        // session.
+        let live = SessionLive { last_activity_ms: 1_000, ..Default::default() };
+        let state = OscSessionState {
+            session_id: "s".to_string(), pid: None, run_id: None,
+            status: "running".to_string(), message: None,
+            source: "claude-hook:UserPromptSubmit".to_string(),
+            updated_at_ms: 1_000,
+        };
+        assert!(is_actively_running(Some(42), &live, Some(&state), 10_000, 0.0, 1));
+    }
+
+    #[test]
+    fn actively_running_accepts_cpu_activity() {
+        // Long LLM generation: transcript may be quiet but the process is
+        // burning CPU.
+        let live = SessionLive { last_activity_ms: 1_000, ..Default::default() };
+        assert!(is_actively_running(Some(42), &live, None, 10_000, 5.0, 1));
+    }
+
+    #[test]
+    fn actively_running_accepts_child_process() {
+        // Tool subprocess spinning under the agent PID.
+        let live = SessionLive { last_activity_ms: 1_000, ..Default::default() };
+        assert!(is_actively_running(Some(42), &live, None, 10_000, 0.0, 3));
+    }
+
+    #[test]
+    fn actively_running_rejects_mis_bound_stale_session() {
+        // Reproduces the reported codex bug: a live codex/claude process got
+        // bound to this session via the cwd+mtime fallback, but the
+        // transcript hasn't moved in hours and there's no corroborating
+        // signal. Should NOT be considered running.
+        let now_ms = 10_000_000;
+        let stale_ms = RUNNING_TRANSCRIPT_FRESH_MS + 60_000;
+        let live = SessionLive {
+            last_activity_ms: now_ms.saturating_sub(stale_ms),
+            ..Default::default()
+        };
+        assert!(!is_actively_running(Some(42), &live, None, now_ms, 0.0, 1));
+    }
+
+    #[test]
     fn assistant_thinking_stays_running_without_new_transcript_chunks() {
         let now_ms = STALE_PENDING_MS * 3;
         let live = SessionLive {
@@ -1243,7 +1614,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_activity_hint_takes_priority_over_pending_tool() {
+    fn codex_idle_activity_does_not_override_pending_tool_process() {
         let now_ms = 10_000;
         let mut live = pending_live(now_ms, 2_000);
         live.last_tool = Some("exec_command".to_string());
@@ -1251,10 +1622,61 @@ mod tests {
         live.activity_signal = Some("codex_task_complete".to_string());
         live.activity_since_ms = now_ms - 1_000;
 
-        let guess = infer_status(true, &live, "", None, now_ms, 1);
+        let guess = infer_status_with_runtime(true, &live, "", "codex", None, now_ms, 2, 0.0, 0);
+
+        assert_eq!(guess.status, "running");
+        assert_eq!(guess.signal.as_deref(), Some("pending_tool_process"));
+    }
+
+    #[test]
+    fn codex_active_process_stays_running_after_task_complete_hint() {
+        let now_ms = 10_000;
+        let live = SessionLive {
+            last_activity_ms: now_ms - 1_000,
+            activity_status: Some("idle".to_string()),
+            activity_signal: Some("codex_task_complete".to_string()),
+            activity_since_ms: now_ms - 1_000,
+            ..Default::default()
+        };
+
+        let guess = infer_status_with_runtime(true, &live, "", "codex", None, now_ms, 1, 4.0, 0);
+
+        assert_eq!(guess.status, "running");
+        assert_eq!(guess.signal.as_deref(), Some("codex_process_active"));
+    }
+
+    #[test]
+    fn codex_task_complete_hint_is_idle_without_runtime_activity() {
+        let now_ms = CODEX_TASK_COMPLETE_HOLD_MS + 10_000;
+        let live = SessionLive {
+            last_activity_ms: 1_000,
+            activity_status: Some("idle".to_string()),
+            activity_signal: Some("codex_task_complete".to_string()),
+            activity_since_ms: 1_000,
+            ..Default::default()
+        };
+
+        let guess = infer_status_with_runtime(true, &live, "", "codex", None, now_ms, 1, 0.0, 0);
 
         assert_eq!(guess.status, "idle");
         assert_eq!(guess.signal.as_deref(), Some("codex_task_complete"));
+    }
+
+    #[test]
+    fn codex_task_complete_holds_running_briefly_between_tasks() {
+        let now_ms = 10_000;
+        let live = SessionLive {
+            last_activity_ms: now_ms - 1_000,
+            activity_status: Some("idle".to_string()),
+            activity_signal: Some("codex_task_complete".to_string()),
+            activity_since_ms: now_ms - 1_000,
+            ..Default::default()
+        };
+
+        let guess = infer_status_with_runtime(true, &live, "", "codex", None, now_ms, 1, 0.0, 0);
+
+        assert_eq!(guess.status, "running");
+        assert_eq!(guess.signal.as_deref(), Some("codex_task_complete_hold"));
     }
 
     #[test]

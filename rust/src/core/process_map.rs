@@ -240,6 +240,30 @@ fn read_cwd(pid: u32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
 }
 
+#[cfg(target_os = "linux")]
+fn read_fd_link(pid: u32, fd: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/fd/{fd}")).ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_fd_link(_pid: u32, _fd: u32) -> Option<PathBuf> {
+    None
+}
+
+pub fn is_claude_background_task_process(pid: u32) -> bool {
+    let Some(stdin) = read_fd_link(pid, 0) else {
+        return false;
+    };
+    let Some(stdout) = read_fd_link(pid, 1) else {
+        return false;
+    };
+    stdin == Path::new("/dev/null")
+        && stdout
+            .to_string_lossy()
+            .contains("/tasks/")
+        && stdout.extension().and_then(|e| e.to_str()) == Some("output")
+}
+
 fn read_open_jsonl_files(pid: u32) -> Vec<PathBuf> {
     if !is_linux() { return vec![]; }
     let mut out = Vec::new();
@@ -262,6 +286,13 @@ pub fn is_pid_alive(pid: u32) -> bool {
     is_pid_alive_platform(pid)
 }
 
+pub fn is_pid_runnable(pid: u32) -> bool {
+    if !is_pid_alive(pid) {
+        return false;
+    }
+    is_pid_runnable_platform(pid)
+}
+
 #[cfg(target_os = "linux")]
 fn is_pid_alive_platform(pid: u32) -> bool {
     // kill(pid, 0) returns 0 if process exists, ESRCH if not, EPERM if exists
@@ -282,6 +313,28 @@ fn is_pid_alive_platform(pid: u32) -> bool {
 
 #[cfg(not(unix))]
 fn is_pid_alive_platform(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn is_pid_runnable_platform(pid: u32) -> bool {
+    let raw = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(raw) => raw,
+        Err(_) => return false,
+    };
+    let Some(stat) = parse_proc_stat(&raw) else {
+        return false;
+    };
+    !matches!(stat.state.as_str(), "T" | "t" | "Z" | "X" | "x")
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn is_pid_runnable_platform(pid: u32) -> bool {
+    is_pid_alive(pid)
+}
+
+#[cfg(not(unix))]
+fn is_pid_runnable_platform(_pid: u32) -> bool {
     false
 }
 
@@ -603,6 +656,7 @@ fn resolve_process(
     if let Some(children) = child_map.get(&proc_pid).cloned() {
         for child_pid in children {
             if visited.contains(&child_pid) { continue; }
+            if is_claude_background_task_process(child_pid) { continue; }
             let child_args = match read_cmdline(child_pid) { Some(a) => a, None => continue };
             if let Some(m) = resolve_process(child_pid, proc_provider, &child_args, child_map, visited, ctx.cache) {
                 return Some(m);
@@ -623,7 +677,7 @@ pub fn map_processes_to_sessions() -> HashMap<String, MappedSession> {
 
     let mut cache = ResolverCache::default();
     for (pid, provider, args) in scan.agents {
-        if !is_pid_alive(pid) { continue; }
+        if !is_pid_runnable(pid) { continue; }
         let mut visited = HashSet::new();
         if let Some(mut m) = resolve_process(pid, provider, &args, &scan.child_map, &mut visited, &mut cache) {
             if m.session_id.is_none() { continue; }
@@ -641,7 +695,7 @@ pub fn map_processes_to_sessions() -> HashMap<String, MappedSession> {
 /// has opened. This is useful for wrappers like `starling run`, where we know
 /// the child PID and want to annotate the session while it is still running.
 pub fn map_process_tree_to_session(root_pid: u32) -> Option<MappedSession> {
-    if !is_linux() || !is_pid_alive(root_pid) { return None; }
+    if !is_linux() || !is_pid_runnable(root_pid) { return None; }
     let args = read_cmdline(root_pid)?;
     let provider = provider_from_cmdline(&args)?;
     let scan = scan_proc_once();
@@ -676,6 +730,15 @@ mod tests {
         assert_eq!(stat.comm, "bash");
         assert_eq!(stat.state, "S");
         assert_eq!(stat.ppid, 1);
+    }
+
+    #[test]
+    fn parses_proc_stat_stopped_state() {
+        let raw = "41229 (claude) T 1 40903 40903 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 7 0 10000000 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n";
+        let stat = parse_proc_stat(raw).unwrap();
+        assert_eq!(stat.pid, 41229);
+        assert_eq!(stat.comm, "claude");
+        assert_eq!(stat.state, "T");
     }
 
     #[test]

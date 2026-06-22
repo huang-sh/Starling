@@ -8,7 +8,9 @@ use std::time::SystemTime;
 use once_cell::sync::Lazy;
 use serde::Serialize;
 
-use crate::core::process_map::{build_child_map, parse_proc_stat};
+use crate::core::process_map::{
+    build_child_map, is_claude_background_task_process, parse_proc_stat,
+};
 
 const CLK_TCK: u64 = 100; // Linux sysconf(_SC_CLK_TCK); effectively always 100.
 
@@ -17,6 +19,7 @@ pub struct ProcessTreeMetrics {
     pub pids: Vec<u32>,
     pub cpu_pct: f64,
     pub mem_kb: u64,
+    pub background_task_count: usize,
 }
 
 #[derive(Clone)]
@@ -94,12 +97,17 @@ fn get_cached_child_map() -> HashMap<u32, Vec<u32>> {
     map
 }
 
-fn collect_tree(root_pid: u32, child_map: &HashMap<u32, Vec<u32>>) -> Vec<u32> {
+fn collect_tree(root_pid: u32, child_map: &HashMap<u32, Vec<u32>>) -> (Vec<u32>, usize) {
     let mut out = Vec::new();
+    let mut background_task_count = 0usize;
     let mut seen = std::collections::HashSet::new();
     let mut queue = vec![root_pid];
     while let Some(pid) = queue.pop() {
         if !seen.insert(pid) { continue; }
+        if pid != root_pid && is_claude_background_task_process(pid) {
+            background_task_count += 1;
+            continue;
+        }
         out.push(pid);
         if let Some(children) = child_map.get(&pid) {
             for c in children {
@@ -109,7 +117,7 @@ fn collect_tree(root_pid: u32, child_map: &HashMap<u32, Vec<u32>>) -> Vec<u32> {
             }
         }
     }
-    out
+    (out, background_task_count)
 }
 
 fn average_since_start(root_pid: u32, total_ticks: u64, now: f64) -> f64 {
@@ -126,7 +134,7 @@ pub fn get_process_tree_metrics(root_pid: u32) -> ProcessTreeMetrics {
         return ProcessTreeMetrics::default();
     }
     let child_map = get_cached_child_map();
-    let pids = collect_tree(root_pid, &child_map);
+    let (pids, background_task_count) = collect_tree(root_pid, &child_map);
     let mut total_ticks = 0u64;
     let mut total_mem = 0u64;
     for &pid in &pids {
@@ -150,7 +158,7 @@ pub fn get_process_tree_metrics(root_pid: u32) -> ProcessTreeMetrics {
         if !cpu.is_finite() || cpu < 0.0 { 0.0 } else { cpu }
     };
 
-    ProcessTreeMetrics { pids, cpu_pct, mem_kb: total_mem }
+    ProcessTreeMetrics { pids, cpu_pct, mem_kb: total_mem, background_task_count }
 }
 
 /// Clear delta-sampling state (call at the start of a fresh one-shot/watch run).
