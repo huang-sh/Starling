@@ -8,7 +8,7 @@
   <img src="assets/starling.png" alt="Starling logo" width="160">
 </p>
 
-Starling 是一个本地 Agent 会话管理工具，面向 Claude Code 和 OpenAI Codex。它可以发现本机已有会话，按项目和 Catalog 组织会话，监控正在运行的 Agent 状态，并提供一套快速的 CLI 工作流，用来浏览、恢复、启动和管理会话。
+Starling 用来启动、切换和组织 Claude Code 与 Codex 会话，支持模型配置、Catalog、项目视图、实时监控和 VS Code 集成。
 
 当前版本：**0.1.4**
 

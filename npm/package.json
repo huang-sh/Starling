@@ -1,7 +1,7 @@
 {
   "name": "starling-ai",
   "version": "0.1.4",
-  "description": "Agent session manager — discover, bookmark, and organize AI coding sessions",
+  "description": "Launch, switch, and organize Claude Code and Codex sessions with model profiles, catalogs, project views, and VS Code integration.",
   "license": "MIT",
   "bin": {
     "starling": "bin/starling.js"

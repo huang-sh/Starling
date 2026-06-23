@@ -8,7 +8,7 @@
   <img src="assets/starling.png" alt="Starling logo" width="160">
 </p>
 
-Agent session manager for Claude Code and OpenAI Codex. Starling discovers local agent sessions, groups them by project, organizes them into hierarchical catalogs, monitors live agent state, and exposes fast CLI workflows for browsing, resuming, launching, and managing sessions.
+Launch, switch, and organize Claude Code and Codex sessions with model profiles, catalogs, project views, live monitoring, and VS Code integration.
 
 Current release: **0.1.4**
 

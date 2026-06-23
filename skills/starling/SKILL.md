@@ -1,11 +1,11 @@
 ---
-name: starling-agent-session
-description: "Use when working with Starling, the local agent session manager for Claude Code and Codex: organizing sessions into catalogs, managing projects/session, launching agents with catalog assignment, configuring Claude/Codex profiles."
+name: starling-ai-agent
+description: "Use when working with Starling: launch, switch, and organize Claude Code and Codex sessions with model profiles, catalogs, project views, live monitoring, and VS Code integration."
 ---
 
 # Starling
 
-Starling is a local session manager for Claude Code and Codex. Use it to find prior sessions, resume work, organize sessions into catalogs, inspect projects, and launch Claude/Codex with saved model profiles.
+Starling launches, switches, and organizes Claude Code and Codex sessions with model profiles, catalogs, project views, live monitoring, and VS Code integration. Use it to start agent runs, resume prior sessions, group important sessions into catalogs, inspect project history, and check live session state.
 
 This skill is an operating manual for agents using Starling. Do not treat it as Starling development or release documentation.
 
@@ -133,6 +133,20 @@ starling project ls --no-index
 starling project show /path/to/project --no-index
 ```
 
+## Live Monitor
+
+Use `top` for current session state. It is the live monitor for pinned and active sessions; `run status` is only for launch/run records.
+
+```bash
+starling top
+starling top --watch
+starling top --recent
+starling top --catalog paper-review
+starling top --json
+```
+
+Treat `running`, `waiting`, `idle`, `aborted`, `failure`, and `stopped` as session state, not just process state.
+
 ## Data Directory
 
 Starling uses `~/.starling` by default for metadata, model profiles, and session indexes. Prefer the CLI setting when the user wants to persist a different location:
@@ -193,6 +207,6 @@ Codex profiles use Codex-style TOML. For Chat Completions-only providers, add `a
 
 ## VS Code Extension
 
-The Starling VS Code extension exposes Catalog, Projects, Models, and Sessions views. It calls the local `starling` CLI.
+The Starling VS Code extension exposes Catalog, Projects, Models, and Monitor views. It calls the local `starling` CLI and consumes the same JSON outputs as terminal renderers.
 
 If the extension cannot find Starling, install the CLI or set `starling.cliPath` in VS Code settings.
