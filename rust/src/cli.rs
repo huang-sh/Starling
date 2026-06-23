@@ -323,6 +323,9 @@ pub enum CatalogCommand {
     Show {
         /// Catalog to show (name, path, or id)
         name: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Detach a session from a catalog
     #[command(alias = "rm")]

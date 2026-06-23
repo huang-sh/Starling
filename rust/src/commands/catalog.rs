@@ -33,7 +33,7 @@ pub fn handle(cmd: CatalogCommand) -> Result<()> {
             tags,
             json,
         } => add(&catalog, &session_id, title, tags, json),
-        CatalogCommand::Show { name } => show(&name),
+        CatalogCommand::Show { name, json } => show(&name, json),
         CatalogCommand::Detach {
             catalog,
             session_id,
@@ -152,24 +152,58 @@ struct SpaceWithPins {
     session_count: usize,
 }
 
+#[derive(serde::Serialize)]
+struct SpaceWithCounts {
+    #[serde(flatten)]
+    space: Space,
+    pin_count: usize,
+    session_count: usize,
+}
+
+fn pins_for_space(space: &Space, bookmarks: &[Bookmark]) -> Vec<Bookmark> {
+    bookmarks
+        .iter()
+        .filter(|b| b.space_ids.contains(&space.id))
+        .cloned()
+        .collect()
+}
+
+fn space_with_pins(space: Space, bookmarks: &[Bookmark]) -> SpaceWithPins {
+    let pins = pins_for_space(&space, bookmarks);
+    let pin_count = pins.len();
+    SpaceWithPins {
+        space,
+        pins,
+        pin_count,
+        session_count: pin_count,
+    }
+}
+
+fn space_with_counts(space: Space, bookmarks: &[Bookmark]) -> SpaceWithCounts {
+    let pin_count = bookmarks
+        .iter()
+        .filter(|b| b.space_ids.contains(&space.id))
+        .count();
+    SpaceWithCounts {
+        space,
+        pin_count,
+        session_count: pin_count,
+    }
+}
+
 fn spaces_with_pins(spaces: &[Space], bookmarks: &[Bookmark]) -> Vec<SpaceWithPins> {
     spaces
         .iter()
         .cloned()
-        .map(|space| {
-            let pins: Vec<Bookmark> = bookmarks
-                .iter()
-                .filter(|b| b.space_ids.contains(&space.id))
-                .cloned()
-                .collect();
-            let pin_count = pins.len();
-            SpaceWithPins {
-                space,
-                pins,
-                pin_count,
-                session_count: pin_count,
-            }
-        })
+        .map(|space| space_with_pins(space, bookmarks))
+        .collect()
+}
+
+fn spaces_with_counts(spaces: &[Space], bookmarks: &[Bookmark]) -> Vec<SpaceWithCounts> {
+    spaces
+        .iter()
+        .cloned()
+        .map(|space| space_with_counts(space, bookmarks))
         .collect()
 }
 
@@ -183,7 +217,10 @@ fn list(json: bool, pins: bool) -> Result<()> {
                 serde_json::to_string_pretty(&spaces_with_pins(&spaces, &bookmarks))?
             );
         } else {
-            println!("{}", serde_json::to_string_pretty(&spaces)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&spaces_with_counts(&spaces, &bookmarks))?
+            );
         }
         return Ok(());
     }
@@ -245,13 +282,20 @@ fn add(
     }))
 }
 
-fn show(name: &str) -> Result<()> {
+fn show(name: &str, json: bool) -> Result<()> {
     let space = resolve_or_exit(name);
     let spaces = list_spaces();
     let bookmarks: Vec<_> = list_bookmarks(BookmarkFilter::default())
         .into_iter()
         .filter(|b| b.space_ids.contains(&space.id))
         .collect();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&space_with_pins(space, &bookmarks))?
+        );
+        return Ok(());
+    }
     println!(
         "{}",
         format!("Catalog: {}", catalog_path(&space, Some(&spaces)))

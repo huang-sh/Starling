@@ -10,10 +10,10 @@
 
 Starling 用来启动、切换和组织 Claude Code 与 Codex 会话，支持模型配置、Catalog、项目视图、实时监控和 VS Code 集成。
 
-当前版本：**0.1.4**
+当前版本：**0.1.5**
 
 - npm：[`starling-ai`](https://www.npmjs.com/package/starling-ai)
-- GitHub Release：[`rust-v0.1.4`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.4)
+- GitHub Release：[`rust-v0.1.5`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.5)
 - VS Code 扩展：[`huangsh.starling-ai`](https://marketplace.visualstudio.com/items?itemName=huangsh.starling-ai)
 
 ## 功能
@@ -52,7 +52,7 @@ Linux 和 macOS 下，npm 会安装一个小的 JavaScript 启动器，并自动
 相同的 native 压缩包和 sha256 文件也会附在 GitHub Release 中：
 
 ```text
-https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.4
+https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.5
 ```
 
 npm 安装时还会把 Starling skill 安装到：
