@@ -1,6 +1,8 @@
-# Starling
+<p align="center">
+  English | <a href="README.zh-CN.md">简体中文</a>
+</p>
 
-[中文文档](README.zh-CN.md)
+# Starling
 
 <p align="center">
   <img src="assets/starling.png" alt="Starling logo" width="160">
