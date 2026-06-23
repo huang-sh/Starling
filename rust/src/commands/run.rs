@@ -16,7 +16,9 @@ use crate::constants::{
     default_starling_home, now_iso,
 };
 use crate::core::catalog_resolver::{resolve_catalog_reference, CatalogResolution};
-use crate::core::discovery::{canonical_session_id, find_sessions, Provider as DiscoveryProvider};
+use crate::core::discovery::{
+    canonical_session_id, find_session_by_id, find_sessions, Provider as DiscoveryProvider,
+};
 use crate::core::id::generate_bookmark_id;
 use crate::core::osc_state::{status_from_osc_sequence, upsert_osc_state, OscSessionState};
 use crate::core::process_map::map_process_tree_to_session_since;
@@ -1231,7 +1233,9 @@ fn prepare_launch(
             }
         }
         RunProvider::Codex => {
-            if attach_hook || setting.is_some() {
+            if let Some(home) = codex_resume_home_from_args(passthrough_args) {
+                envs.push(("CODEX_HOME".into(), home.to_string_lossy().to_string()));
+            } else if attach_hook || setting.is_some() {
                 let base_config = if let Some(profile) = setting {
                     let path = default_codex_settings_dir().join(format!("{profile}.toml"));
                     ensure_file(&path, "Codex profile")?;
@@ -1262,6 +1266,36 @@ fn prepare_launch(
         temp_dir,
         hook_file,
     })
+}
+
+fn codex_resume_home_from_args(args: &[String]) -> Option<PathBuf> {
+    let session_id = args
+        .windows(2)
+        .find(|window| window[0] == "resume")
+        .map(|window| window[1].as_str())?;
+    let meta = find_session_by_id(session_id)?;
+    codex_home_from_session_path(&meta.file_path)
+}
+
+fn codex_home_from_session_path(file_path: &str) -> Option<PathBuf> {
+    let path = Path::new(file_path);
+    let mut cursor = path.parent();
+    while let Some(dir) = cursor {
+        let name = dir.file_name().and_then(|s| s.to_str()).unwrap_or_default();
+        if name == "sessions" || name == "archived_sessions" {
+            let home = dir.parent()?;
+            let home_name = home
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if home_name.starts_with("codex-") {
+                return Some(home.to_path_buf());
+            }
+            return None;
+        }
+        cursor = dir.parent();
+    }
+    None
 }
 
 struct ClaudeHookSettings {
@@ -1376,6 +1410,7 @@ fn create_codex_hook_home(
         .join("run-homes")
         .join(format!("codex-{run_id}"));
     std::fs::create_dir_all(&dir)?;
+    link_codex_persistent_session_dirs(&dir)?;
 
     let mut config = if let Some(path) = base_config {
         std::fs::read_to_string(path)?
@@ -1413,6 +1448,49 @@ fn create_codex_hook_home(
         home_dir: dir,
         hook_file,
     })
+}
+
+fn link_codex_persistent_session_dirs(run_home: &Path) -> Result<()> {
+    let codex_home = default_codex_home();
+    link_codex_persistent_dir(run_home, &codex_home, "sessions")?;
+    link_codex_persistent_dir(run_home, &codex_home, "archived_sessions")?;
+    Ok(())
+}
+
+fn link_codex_persistent_dir(run_home: &Path, codex_home: &Path, name: &str) -> Result<()> {
+    let target = codex_home.join(name);
+    std::fs::create_dir_all(&target)?;
+    let link = run_home.join(name);
+
+    if link.exists() || std::fs::symlink_metadata(&link).is_ok() {
+        if is_empty_real_dir(&link) {
+            std::fs::remove_dir(&link)?;
+        } else {
+            return Ok(());
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&target, &link)?;
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_dir(&target, &link)?;
+    }
+    Ok(())
+}
+
+fn is_empty_real_dir(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return false;
+    }
+    std::fs::read_dir(path)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false)
 }
 
 fn append_codex_hook_trust_state(

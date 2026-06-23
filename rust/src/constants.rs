@@ -160,7 +160,36 @@ pub fn claude_session_roots() -> Vec<PathBuf> {
 /// `<CODEX_HOME>/sessions` (live) and `<CODEX_HOME>/archived_sessions`.
 pub fn codex_session_roots() -> Vec<PathBuf> {
     let home = resolve_codex_home();
-    vec![home.join("sessions"), home.join("archived_sessions")]
+    let mut roots = vec![home.join("sessions"), home.join("archived_sessions")];
+
+    // Older `starling run codex` versions launched Codex with a fully isolated
+    // CODEX_HOME under Starling's run-homes directory. Those sessions remain
+    // discoverable; new run-homes symlink their session dirs back to ~/.codex.
+    let run_homes = default_starling_home().join("run-homes");
+    if let Ok(entries) = std::fs::read_dir(run_homes) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("codex-") {
+                continue;
+            }
+            for session_dir in [path.join("sessions"), path.join("archived_sessions")] {
+                let is_symlink = std::fs::symlink_metadata(&session_dir)
+                    .map(|metadata| metadata.file_type().is_symlink())
+                    .unwrap_or(false);
+                if !is_symlink {
+                    roots.push(session_dir);
+                }
+            }
+        }
+    }
+
+    roots
 }
 
 /// Env-aware single-root alias — the first of `claude_session_roots()`.
@@ -235,7 +264,7 @@ mod tests {
     #[test]
     fn codex_roots_include_live_and_archived() {
         let roots = codex_session_roots();
-        assert_eq!(roots.len(), 2);
+        assert!(roots.len() >= 2);
         assert!(roots[0].ends_with("sessions"));
         assert!(roots[1].ends_with("archived_sessions"));
     }

@@ -104,6 +104,25 @@ fn build_status_map(sessions: &[SessionMeta]) -> HashMap<String, RunStatus> {
         .collect()
 }
 
+fn indexed_session_list(
+    provider: Option<Provider>,
+    limit: Option<usize>,
+) -> Option<Vec<SessionMeta>> {
+    let mut sessions = load_session_index()?.sessions;
+    if let Some(provider) = provider {
+        let provider_name = match provider {
+            Provider::Claude => "claude",
+            Provider::Codex => "codex",
+        };
+        sessions.retain(|s| s.provider == provider_name);
+    }
+    sessions.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+    if let Some(limit) = limit {
+        sessions.truncate(limit);
+    }
+    Some(sessions)
+}
+
 fn list_cmd(
     limit: usize,
     agent: Option<String>,
@@ -119,6 +138,8 @@ fn list_cmd(
     if all {
         let mut filtered = if has_catalog_filter {
             find_catalog_sessions(cataloged, catalog.as_deref(), provider)
+        } else if let Some(sessions) = indexed_session_list(provider, None) {
+            sessions
         } else {
             find_sessions(usize::MAX, provider)
         };
@@ -149,6 +170,8 @@ fn list_cmd(
 
     let sessions = if let Some(cs) = catalog_sessions.as_ref() {
         cs.iter().take(limit).cloned().collect::<Vec<_>>()
+    } else if let Some(sessions) = indexed_session_list(provider, Some(limit)) {
+        sessions
     } else {
         find_sessions(limit, provider)
     };
