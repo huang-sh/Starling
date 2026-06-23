@@ -8,10 +8,10 @@
 
 Starling 是一个本地 Agent 会话管理工具，面向 Claude Code 和 OpenAI Codex。它可以发现本机已有会话，按项目和 Catalog 组织会话，监控正在运行的 Agent 状态，并提供一套快速的 CLI 工作流，用来浏览、恢复、启动和管理会话。
 
-当前版本：**0.1.3**
+当前版本：**0.1.4**
 
 - npm：[`starling-ai`](https://www.npmjs.com/package/starling-ai)
-- GitHub Release：[`rust-v0.1.3`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.3)
+- GitHub Release：[`rust-v0.1.4`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.4)
 - VS Code 扩展：[`huangsh.starling-ai`](https://marketplace.visualstudio.com/items?itemName=huangsh.starling-ai)
 
 ## 功能
@@ -50,7 +50,7 @@ Linux 和 macOS 下，npm 会安装一个小的 JavaScript 启动器，并自动
 相同的 native 压缩包和 sha256 文件也会附在 GitHub Release 中：
 
 ```text
-https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.3
+https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.4
 ```
 
 npm 安装时还会把 Starling skill 安装到：
