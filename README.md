@@ -1,5 +1,7 @@
 # Starling
 
+[中文文档](README.zh-CN.md)
+
 <p align="center">
   <img src="assets/starling.png" alt="Starling logo" width="160">
 </p>
