@@ -84,8 +84,19 @@ jobs:
         run: npm run build -- --target=${{ matrix.target }}
 
       - name: Test staged binary
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
-        run: npm run run -- --version
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            aarch64-unknown-linux-gnu)
+              echo "Skipping execution test for cross-compiled Linux arm64 binary"
+              ;;
+            x86_64-unknown-linux-musl)
+              ./npm/vendor/${{ matrix.target }}/bin/starling --version
+              ;;
+            *)
+              npm run run -- --version
+              ;;
+          esac
 
       - name: Pack native npm package
         run: scripts/stage_npm_packages.sh ${{ matrix.target }}

@@ -89,4 +89,9 @@ cp -f "${TARGET_DIR}/starling" "${STAGE_DIR}/starling"
 chmod +x "${STAGE_DIR}/starling"
 
 echo "Staged binary: ${STAGE_DIR}/starling"
-"${STAGE_DIR}/starling" --version
+HOST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
+if [ "${TARGET}" = "${HOST_TARGET}" ]; then
+  "${STAGE_DIR}/starling" --version
+else
+  echo "Skipping staged binary execution for non-host target ${TARGET} on ${HOST_TARGET}"
+fi
