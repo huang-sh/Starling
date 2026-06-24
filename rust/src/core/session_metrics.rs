@@ -441,15 +441,45 @@ fn pending_tool_requires_permission(tool: &PendingTool) -> bool {
             .unwrap_or(false)
 }
 
-fn newest_pending_permission_ms(pending_tools: &HashMap<String, PendingTool>) -> Option<u64> {
-    pending_tools
-        .values()
-        .filter(|tool| pending_tool_requires_permission(tool))
-        .map(|tool| tool.since_ms)
-        .max()
+fn pending_tool_requests_user_input(tool: &PendingTool) -> bool {
+    let name = tool.name.to_ascii_lowercase();
+    name == "askuserquestion"
+        || name == "ask_user_question"
+        || name == "request_user_input"
+        || name == "elicitation"
+        || name.contains("request_user_input")
+        || name.contains("ask_user_question")
+        || (tool.input.get("questions").is_some()
+            && serde_json::to_string(&tool.input)
+                .map(|input| input.to_ascii_lowercase().contains("\"options\""))
+                .unwrap_or(false))
 }
 
-fn apply_pending_permission_status(
+fn newest_pending_waiting_signal(
+    pending_tools: &HashMap<String, PendingTool>,
+) -> Option<(u64, &'static str)> {
+    let mut newest: Option<(u64, &'static str)> = None;
+    for tool in pending_tools.values() {
+        let signal = if pending_tool_requires_permission(tool) {
+            Some("codex_pending_permission")
+        } else if pending_tool_requests_user_input(tool) {
+            Some("claude_pending_user_input")
+        } else {
+            None
+        };
+        if let Some(signal) = signal {
+            if newest
+                .map(|(since_ms, _)| tool.since_ms > since_ms)
+                .unwrap_or(true)
+            {
+                newest = Some((tool.since_ms, signal));
+            }
+        }
+    }
+    newest
+}
+
+fn apply_pending_waiting_status(
     pending_tools: &HashMap<String, PendingTool>,
     activity_status: &mut Option<String>,
     activity_signal: &mut Option<String>,
@@ -458,9 +488,9 @@ fn apply_pending_permission_status(
     if activity_status.as_deref() == Some("aborted") {
         return;
     }
-    if let Some(since_ms) = newest_pending_permission_ms(pending_tools) {
+    if let Some((since_ms, signal)) = newest_pending_waiting_signal(pending_tools) {
         *activity_status = Some("waiting".to_string());
-        *activity_signal = Some("codex_pending_permission".to_string());
+        *activity_signal = Some(signal.to_string());
         *activity_since_ms = since_ms;
     }
 }
@@ -744,7 +774,7 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
                         &mut current_task,
                         &mut last_tool,
                     );
-                    apply_pending_permission_status(
+                    apply_pending_waiting_status(
                         &pending_tools,
                         &mut activity_status,
                         &mut activity_signal,
@@ -773,6 +803,14 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
                     {
                         activity_status = Some("running".to_string());
                         activity_signal = Some("codex_tool_output".to_string());
+                        activity_since_ms = if ts > 0 { ts } else { last_activity_ms };
+                    } else if blocks.tool_result && !blocks.interrupted {
+                        activity_status = Some("running".to_string());
+                        activity_signal = Some("claude_tool_result".to_string());
+                        activity_since_ms = if ts > 0 { ts } else { last_activity_ms };
+                    } else if has_human_prompt {
+                        activity_status = Some("running".to_string());
+                        activity_signal = Some("claude_user_prompt".to_string());
                         activity_since_ms = if ts > 0 { ts } else { last_activity_ms };
                     }
                 }
@@ -856,7 +894,7 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
                 &mut current_task,
                 &mut last_tool,
             );
-            apply_pending_permission_status(
+            apply_pending_waiting_status(
                 &pending_tools,
                 &mut activity_status,
                 &mut activity_signal,
@@ -1452,6 +1490,62 @@ mod tests {
     }
 
     #[test]
+    fn claude_ask_user_question_marks_waiting() {
+        clear_session_metrics_cache();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "starling-metrics-{}-claude-ask-user.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"content":[{"type":"tool_use","id":"call_1","name":"AskUserQuestion","input":{"questions":[{"header":"删除范围","options":[{"label":"Only cache"},{"label":"Everything"}]}]}}]}}"#,
+            ],
+        );
+        let live = get_session_live_metrics(&path);
+        assert_eq!(live.tool_count, 1);
+        assert_eq!(live.last_tool.as_deref(), Some("AskUserQuestion"));
+        assert_eq!(live.pending_since_ms, 1_767_225_600_000);
+        assert_eq!(live.activity_status.as_deref(), Some("waiting"));
+        assert_eq!(
+            live.activity_signal.as_deref(),
+            Some("claude_pending_user_input")
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn claude_ask_user_question_result_marks_running() {
+        clear_session_metrics_cache();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "starling-metrics-{}-claude-ask-user-result.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"content":[{"type":"tool_use","id":"call_1","name":"AskUserQuestion","input":{"questions":[{"header":"删除范围","options":[{"label":"Only cache"},{"label":"Everything"}]}]}}]}}"#,
+                r#"{"type":"user","timestamp":"2026-01-01T00:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call_1","content":"Only cache"}]}}"#,
+            ],
+        );
+        let live = get_session_live_metrics(&path);
+        assert_eq!(live.pending_since_ms, 0);
+        assert_eq!(live.current_task, "");
+        assert_eq!(live.activity_status.as_deref(), Some("running"));
+        assert_eq!(live.activity_signal.as_deref(), Some("claude_tool_result"));
+        assert_eq!(live.activity_since_ms, 1_767_225_601_000);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn last_activity_uses_transcript_timestamp_not_file_mtime() {
         let entries = parse_jsonl_text(
             r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"sleep 1"}}]}}
@@ -1544,6 +1638,34 @@ mod tests {
             Some("claude_request_interrupted")
         );
         assert_eq!(live.current_task, "");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn human_prompt_after_interrupt_marks_running() {
+        clear_session_metrics_cache();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "starling-metrics-{}-interrupted-resume.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"content":[{"type":"tool_use","id":"call_1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+                r#"{"type":"user","timestamp":"2026-01-01T00:00:01Z","message":{"content":"[Request interrupted by user]"}}"#,
+                r#"{"type":"user","timestamp":"2026-01-01T00:00:02Z","message":{"content":"please resume the benchmark from the next step"}}"#,
+            ],
+        );
+        let live = get_session_live_metrics(&path);
+        assert_eq!(live.pending_since_ms, 0);
+        assert_eq!(live.thinking_since_ms, 1_767_225_602_000);
+        assert_eq!(live.activity_status.as_deref(), Some("running"));
+        assert_eq!(live.activity_signal.as_deref(), Some("claude_user_prompt"));
+        assert_eq!(live.activity_since_ms, 1_767_225_602_000);
         let _ = std::fs::remove_file(&path);
     }
 

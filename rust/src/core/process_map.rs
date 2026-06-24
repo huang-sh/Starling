@@ -763,8 +763,10 @@ fn resolve_from_cwd_mtime(
     let cwd = ctx.cwd.as_ref()?;
     let encoded = encode_claude_cwd(&cwd.to_string_lossy());
     let dir = ctx.root.join(encoded);
-    let flat_best = cached_most_recent_jsonl(&dir, ctx.cache);
-    let best = flat_best.or_else(|| cached_most_recent_jsonl_recursive(&ctx.root, ctx.cache))?;
+    let best = match provider {
+        Provider::Claude => cached_most_recent_jsonl(&dir, ctx.cache),
+        Provider::Codex => cached_most_recent_jsonl_recursive(&ctx.root, ctx.cache),
+    }?;
     let sid = extract_session_id_from_path(&best.0.to_string_lossy())?;
     Some(MappedSession {
         pid,
@@ -1078,6 +1080,66 @@ mod tests {
 
         assert!(should_replace_mapping(&fallback, &precise));
         assert!(!should_replace_mapping(&precise, &fallback));
+    }
+
+    #[test]
+    fn claude_cwd_fallback_does_not_use_unrelated_recent_session() {
+        let root =
+            std::env::temp_dir().join(format!("starling-process-map-{}", uuid::Uuid::new_v4()));
+        let unrelated_dir = root.join("-data20T-dev-nichescape");
+        std::fs::create_dir_all(&unrelated_dir).unwrap();
+        std::fs::write(
+            unrelated_dir.join("73f64f49-9fa0-4bbe-b434-2ec7d0c670a9.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+
+        let cwd = root.join("other-project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let mut cache = ResolverCache::default();
+        let mut ctx = ResolveContext {
+            environ: HashMap::new(),
+            home: root.clone(),
+            root: root.clone(),
+            cwd: Some(cwd),
+            cache: &mut cache,
+        };
+
+        let mapped = resolve_from_cwd_mtime(&mut ctx, Provider::Claude, 1234);
+        std::fs::remove_dir_all(&root).ok();
+        assert!(mapped.is_none());
+    }
+
+    #[test]
+    fn claude_cwd_fallback_uses_exact_project_dir() {
+        let root =
+            std::env::temp_dir().join(format!("starling-process-map-{}", uuid::Uuid::new_v4()));
+        let cwd = root.join("workspace");
+        let exact_dir = root.join(encode_claude_cwd(&cwd.to_string_lossy()));
+        std::fs::create_dir_all(&exact_dir).unwrap();
+        std::fs::write(
+            exact_dir.join("31d834d6-235b-4642-ae47-ca6e7c0b7235.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let mut cache = ResolverCache::default();
+        let mut ctx = ResolveContext {
+            environ: HashMap::new(),
+            home: root.clone(),
+            root: root.clone(),
+            cwd: Some(cwd),
+            cache: &mut cache,
+        };
+
+        let mapped = resolve_from_cwd_mtime(&mut ctx, Provider::Claude, 1234).unwrap();
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(
+            mapped.session_id.as_deref(),
+            Some("31d834d6-235b-4642-ae47-ca6e7c0b7235")
+        );
+        assert_eq!(mapped.confidence, 10);
     }
 
     #[test]

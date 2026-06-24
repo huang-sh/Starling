@@ -1,6 +1,6 @@
 [package]
 name = "starling"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 description = "Launch, switch, and organize Claude Code and Codex sessions with model profiles, catalogs, project views, and VS Code integration."
 license = "MIT"
