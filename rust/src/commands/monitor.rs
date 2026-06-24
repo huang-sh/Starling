@@ -735,6 +735,13 @@ fn infer_status_with_runtime(
             true,
         );
     }
+    if process_alive && is_live_waiting(live) {
+        return status_guess(
+            "waiting",
+            live.activity_signal.as_deref().or(Some("live_waiting")),
+            true,
+        );
+    }
     if process_alive && is_fresh_live_running(live, now_ms) {
         return status_guess(
             "running",
@@ -767,6 +774,10 @@ fn is_live_aborted(live: &SessionLive) -> bool {
 
 fn is_live_running(live: &SessionLive) -> bool {
     live.activity_status.as_deref() == Some("running")
+}
+
+fn is_live_waiting(live: &SessionLive) -> bool {
+    live.activity_status.as_deref() == Some("waiting")
 }
 
 fn is_fresh_live_running(live: &SessionLive, now_ms: u64) -> bool {
@@ -1710,6 +1721,24 @@ mod hook_status_tests {
 
         assert_eq!(guess.status, "running");
         assert_eq!(guess.signal.as_deref(), Some("claude_thinking"));
+        assert!(guess.realtime);
+    }
+
+    #[test]
+    fn live_waiting_activity_overrides_pending_task() {
+        let live = SessionLive {
+            activity_status: Some("waiting".to_string()),
+            activity_signal: Some("codex_pending_permission".to_string()),
+            activity_since_ms: 20_000,
+            pending_since_ms: 20_000,
+            current_task: "cargo build --release".to_string(),
+            ..Default::default()
+        };
+
+        let guess = infer_status_with_runtime(true, &live, "", "codex", None, 20_000, 1, 99.0, 0);
+
+        assert_eq!(guess.status, "waiting");
+        assert_eq!(guess.signal.as_deref(), Some("codex_pending_permission"));
         assert!(guess.realtime);
     }
 

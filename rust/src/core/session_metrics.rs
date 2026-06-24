@@ -427,6 +427,44 @@ struct PendingTool {
     since_ms: u64,
 }
 
+fn pending_tool_requires_permission(tool: &PendingTool) -> bool {
+    tool.input
+        .get("sandbox_permissions")
+        .and_then(|value| value.as_str())
+        .map(|value| value == "require_escalated")
+        .unwrap_or(false)
+        || tool
+            .input
+            .get("approval_policy")
+            .and_then(|value| value.as_str())
+            .map(|value| matches!(value, "require_escalated" | "on-request"))
+            .unwrap_or(false)
+}
+
+fn newest_pending_permission_ms(pending_tools: &HashMap<String, PendingTool>) -> Option<u64> {
+    pending_tools
+        .values()
+        .filter(|tool| pending_tool_requires_permission(tool))
+        .map(|tool| tool.since_ms)
+        .max()
+}
+
+fn apply_pending_permission_status(
+    pending_tools: &HashMap<String, PendingTool>,
+    activity_status: &mut Option<String>,
+    activity_signal: &mut Option<String>,
+    activity_since_ms: &mut u64,
+) {
+    if activity_status.as_deref() == Some("aborted") {
+        return;
+    }
+    if let Some(since_ms) = newest_pending_permission_ms(pending_tools) {
+        *activity_status = Some("waiting".to_string());
+        *activity_signal = Some("codex_pending_permission".to_string());
+        *activity_since_ms = since_ms;
+    }
+}
+
 fn refresh_pending_state(
     pending_tools: &HashMap<String, PendingTool>,
     pending_since_ms: &mut u64,
@@ -706,6 +744,12 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
                         &mut current_task,
                         &mut last_tool,
                     );
+                    apply_pending_permission_status(
+                        &pending_tools,
+                        &mut activity_status,
+                        &mut activity_signal,
+                        &mut activity_since_ms,
+                    );
                 } else {
                     pending_since_ms = 0;
                     current_task.clear();
@@ -724,6 +768,13 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
                     } else {
                         0
                     };
+                    if blocks.tool_result
+                        && activity_signal.as_deref() == Some("codex_pending_permission")
+                    {
+                        activity_status = Some("running".to_string());
+                        activity_signal = Some("codex_tool_output".to_string());
+                        activity_since_ms = if ts > 0 { ts } else { last_activity_ms };
+                    }
                 }
                 if !blocks.tool_result {
                     for t in blocks.text {
@@ -804,6 +855,12 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
                 &mut thinking_since_ms,
                 &mut current_task,
                 &mut last_tool,
+            );
+            apply_pending_permission_status(
+                &pending_tools,
+                &mut activity_status,
+                &mut activity_signal,
+                &mut activity_since_ms,
             );
         }
 
@@ -1236,6 +1293,59 @@ mod tests {
         );
         assert_eq!(live.pending_since_ms, 1_767_225_601_000);
         assert_eq!(live.thinking_since_ms, 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn codex_pending_escalated_tool_call_marks_waiting() {
+        clear_session_metrics_cache();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "starling-metrics-{}-codex-pending-permission.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"timestamp":"2026-01-01T00:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call_1","arguments":"{\"cmd\":\"cargo build --release\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"build release\"}"}}"#,
+            ],
+        );
+        let live = get_session_live_metrics(&path);
+        assert_eq!(live.pending_since_ms, 1_767_225_600_000);
+        assert_eq!(live.activity_status.as_deref(), Some("waiting"));
+        assert_eq!(
+            live.activity_signal.as_deref(),
+            Some("codex_pending_permission")
+        );
+        assert_eq!(live.current_task, "cargo build --release");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn codex_permission_tool_output_clears_waiting() {
+        clear_session_metrics_cache();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "starling-metrics-{}-codex-permission-output.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"timestamp":"2026-01-01T00:00:00Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call_1","arguments":"{\"cmd\":\"cargo build --release\",\"sandbox_permissions\":\"require_escalated\"}"}}"#,
+                r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"done"}}"#,
+            ],
+        );
+        let live = get_session_live_metrics(&path);
+        assert_eq!(live.pending_since_ms, 0);
+        assert_eq!(live.activity_status.as_deref(), Some("running"));
+        assert_eq!(live.activity_signal.as_deref(), Some("codex_tool_output"));
         let _ = std::fs::remove_file(&path);
     }
 

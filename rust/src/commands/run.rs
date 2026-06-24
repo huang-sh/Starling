@@ -48,6 +48,7 @@ struct PreparedLaunch {
     args: Vec<String>,
     envs: Vec<(String, String)>,
     temp_dir: Option<PathBuf>,
+    cleanup_files: Vec<PathBuf>,
     hook_file: Option<PathBuf>,
 }
 
@@ -116,6 +117,7 @@ fn launch(
                 assign_recent_session_fallback(
                     &run_id,
                     provider,
+                    pid,
                     catalog_id.as_deref(),
                     cmd_args.title.as_deref(),
                     project_path.as_deref(),
@@ -136,13 +138,13 @@ fn launch(
                                 session_id: None,
                             },
                         );
-                        cleanup_temp_dir(prepared.temp_dir.as_deref());
+                        cleanup_launch_artifacts(&prepared);
                         std::process::exit(exit.code.unwrap_or(if exit.success { 0 } else { 1 }));
                     }
                     Err(e) => {
                         eprintln!("{}: PTY monitor failed: {}", "error".red(), e);
                         mark_run_crashed(&run_id);
-                        cleanup_temp_dir(prepared.temp_dir.as_deref());
+                        cleanup_launch_artifacts(&prepared);
                         std::process::exit(1);
                     }
                 }
@@ -193,6 +195,7 @@ fn launch(
                     assign_recent_session_fallback(
                         &run_id,
                         provider,
+                        pid,
                         catalog_id.as_deref(),
                         cmd_args.title.as_deref(),
                         project_path.as_deref(),
@@ -212,13 +215,13 @@ fn launch(
                             session_id: None,
                         },
                     );
-                    cleanup_temp_dir(prepared.temp_dir.as_deref());
+                    cleanup_launch_artifacts(&prepared);
                     std::process::exit(status.code().unwrap_or(0));
                 }
                 Err(e) => {
                     eprintln!("{}: failed to wait on {}: {}", "error".red(), bin, e);
                     mark_run_crashed(&run_id);
-                    cleanup_temp_dir(prepared.temp_dir.as_deref());
+                    cleanup_launch_artifacts(&prepared);
                     std::process::exit(1);
                 }
             }
@@ -227,7 +230,7 @@ fn launch(
             eprintln!("{}: failed to spawn {}: {}", "error".red(), bin, e);
             // Mark as crashed since we recorded a Running entry.
             mark_run_crashed(&run_id);
-            cleanup_temp_dir(prepared.temp_dir.as_deref());
+            cleanup_launch_artifacts(&prepared);
             std::process::exit(1);
         }
     }
@@ -599,7 +602,7 @@ fn maybe_start_catalog_assignment_watcher(
                 );
                 return;
             }
-            if hook_file.is_none() {
+            if should_try_process_map_assignment(provider, hook_file.is_some()) {
                 if let Some(mapped) = map_process_tree_to_session_since(pid, start_ms) {
                     if let Some(session_id) = mapped.session_id {
                         let file_path = mapped.file_path.clone();
@@ -624,6 +627,10 @@ fn maybe_start_catalog_assignment_watcher(
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
     });
+}
+
+fn should_try_process_map_assignment(provider: RunProvider, hook_file_present: bool) -> bool {
+    !hook_file_present || provider == RunProvider::Codex
 }
 
 struct HookSession {
@@ -678,6 +685,7 @@ fn read_hook_session(path: &Path) -> Option<HookSession> {
 fn assign_recent_session_fallback(
     run_id: &str,
     provider: RunProvider,
+    pid: u32,
     catalog_id: Option<&str>,
     title: Option<&str>,
     project_path: Option<&str>,
@@ -686,6 +694,32 @@ fn assign_recent_session_fallback(
     let Some(catalog_id) = catalog_id else {
         return;
     };
+    if run_has_session_id(run_id) {
+        return;
+    }
+    if let Some(mapped) = map_process_tree_to_session_since(pid, start_ms) {
+        if let Some(session_id) = mapped.session_id {
+            let project = mapped
+                .project_path
+                .as_deref()
+                .or(project_path)
+                .unwrap_or_default();
+            assign_session_to_catalog(
+                run_id,
+                provider,
+                &session_id,
+                mapped.file_path.as_deref(),
+                project,
+                title,
+                None,
+                catalog_id,
+            );
+            return;
+        }
+    }
+    if run_has_session_id(run_id) {
+        return;
+    }
     let sessions = find_sessions(20, Some(discovery_provider(provider)));
     let candidate = sessions.into_iter().find(|session| {
         if let Some(project_path) = project_path {
@@ -693,7 +727,7 @@ fn assign_recent_session_fallback(
                 return false;
             }
         }
-        session_modified_ms(&session.modified_at)
+        session_modified_ms(&session.created_at)
             .map(|ms| ms >= start_ms)
             .unwrap_or(false)
     });
@@ -709,6 +743,13 @@ fn assign_recent_session_fallback(
             catalog_id,
         );
     }
+}
+
+fn run_has_session_id(run_id: &str) -> bool {
+    find_run(run_id)
+        .and_then(|run| run.session_id)
+        .map(|session_id| !session_id.is_empty())
+        .unwrap_or(false)
 }
 
 fn assign_session_to_catalog(
@@ -990,6 +1031,20 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[test]
+    fn codex_catalog_watcher_keeps_process_map_fallback_with_hooks() {
+        assert!(should_try_process_map_assignment(RunProvider::Codex, true));
+        assert!(should_try_process_map_assignment(RunProvider::Codex, false));
+        assert!(!should_try_process_map_assignment(
+            RunProvider::Claude,
+            true
+        ));
+        assert!(should_try_process_map_assignment(
+            RunProvider::Claude,
+            false
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn drains_complete_osc_sequences_and_keeps_partial_tail() {
@@ -1189,6 +1244,70 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn codex_profile_arg_detection_handles_common_forms() {
+        assert!(has_codex_profile_arg(&["--profile".into(), "work".into()]));
+        assert!(has_codex_profile_arg(&["--profile=work".into()]));
+        assert!(has_codex_profile_arg(&["-p".into(), "work".into()]));
+        assert!(!has_codex_profile_arg(&["resume".into(), "abc".into()]));
+    }
+
+    #[test]
+    fn codex_profile_runtime_hooks_are_inline_and_trusted() {
+        let rendered = append_codex_profile_runtime_hooks(
+            "model = \"gpt-5.5\"\n",
+            Path::new("/home/u/.codex/starling-run-1.config.toml"),
+            "run-1",
+            Path::new("/tmp/hook.jsonl"),
+            Path::new("/tmp/starling"),
+        )
+        .unwrap();
+
+        assert!(rendered.contains("model = \"gpt-5.5\""));
+        assert!(rendered.contains(
+            "[hooks.state.\"/home/u/.codex/starling-run-1.config.toml:session_start:0:0\"]"
+        ));
+        assert!(rendered.contains("[[hooks.SessionStart]]"));
+        assert!(rendered.contains("[[hooks.SessionStart.hooks]]"));
+        assert!(rendered.contains("command = \"/tmp/starling top hook"));
+        assert!(rendered.contains("trusted_hash = \"sha256:"));
+    }
+
+    #[test]
+    fn codex_external_provider_does_not_require_openai_auth() {
+        let rendered = normalize_codex_external_provider_auth(
+            r#"
+model_provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[model_providers.deepseek]
+name = "deepseek"
+base_url = "https://api.deepseek.com"
+wire_api = "responses"
+requires_openai_auth = true
+experimental_bearer_token = "secret"
+"#,
+        );
+
+        assert!(rendered.contains("model_provider = \"deepseek\""));
+        assert!(rendered.contains("requires_openai_auth = false"));
+    }
+
+    #[test]
+    fn codex_openai_provider_keeps_openai_auth_setting() {
+        let rendered = normalize_codex_external_provider_auth(
+            r#"
+model_provider = "openai"
+
+[model_providers.openai]
+name = "OpenAI"
+requires_openai_auth = true
+"#,
+        );
+
+        assert!(rendered.contains("requires_openai_auth = true"));
+    }
 }
 
 fn prepare_launch(
@@ -1201,6 +1320,7 @@ fn prepare_launch(
     let mut args = Vec::new();
     let mut envs = Vec::new();
     let mut temp_dir = None;
+    let mut cleanup_files = Vec::new();
     let mut hook_file = None;
 
     match provider {
@@ -1235,6 +1355,25 @@ fn prepare_launch(
         RunProvider::Codex => {
             if let Some(home) = codex_resume_home_from_args(passthrough_args) {
                 envs.push(("CODEX_HOME".into(), home.to_string_lossy().to_string()));
+            } else if (attach_hook || setting.is_some()) && !has_codex_profile_arg(passthrough_args)
+            {
+                let base_config = if let Some(profile) = setting {
+                    let path = default_codex_settings_dir().join(format!("{profile}.toml"));
+                    ensure_file(&path, "Codex profile")?;
+                    Some(path)
+                } else {
+                    None
+                };
+                let hook =
+                    create_codex_profile_launch(run_id, base_config.as_deref(), attach_hook)?;
+                if attach_hook {
+                    args.push("--enable".into());
+                    args.push("hooks".into());
+                }
+                args.push("--profile".into());
+                args.push(hook.profile_name);
+                hook_file = hook.hook_file;
+                cleanup_files.push(hook.profile_path);
             } else if attach_hook || setting.is_some() {
                 let base_config = if let Some(profile) = setting {
                     let path = default_codex_settings_dir().join(format!("{profile}.toml"));
@@ -1264,8 +1403,14 @@ fn prepare_launch(
         args,
         envs,
         temp_dir,
+        cleanup_files,
         hook_file,
     })
+}
+
+fn has_codex_profile_arg(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| arg == "--profile" || arg == "-p" || arg.strip_prefix("--profile=").is_some())
 }
 
 fn codex_resume_home_from_args(args: &[String]) -> Option<PathBuf> {
@@ -1306,6 +1451,12 @@ struct ClaudeHookSettings {
 
 struct CodexHookHome {
     home_dir: PathBuf,
+    hook_file: Option<PathBuf>,
+}
+
+struct CodexProfileLaunch {
+    profile_name: String,
+    profile_path: PathBuf,
     hook_file: Option<PathBuf>,
 }
 
@@ -1417,6 +1568,7 @@ fn create_codex_hook_home(
     } else {
         String::new()
     };
+    config = normalize_codex_external_provider_auth(&config);
     if attach_hook {
         config = strip_legacy_codex_hooks_bool(&config);
     }
@@ -1446,6 +1598,49 @@ fn create_codex_hook_home(
 
     Ok(CodexHookHome {
         home_dir: dir,
+        hook_file,
+    })
+}
+
+fn create_codex_profile_launch(
+    run_id: &str,
+    base_config: Option<&Path>,
+    attach_hook: bool,
+) -> Result<CodexProfileLaunch> {
+    let codex_home = default_codex_home();
+    std::fs::create_dir_all(&codex_home)?;
+
+    let profile_name = format!("starling-{run_id}");
+    let profile_path = codex_home.join(format!("{profile_name}.config.toml"));
+    let mut config = if let Some(path) = base_config {
+        std::fs::read_to_string(path)?
+    } else {
+        String::new()
+    };
+    config = normalize_codex_external_provider_auth(&config);
+
+    let hook_file = if attach_hook {
+        config = strip_legacy_codex_hooks_bool(&config);
+        let hook_dir = default_starling_home().join("run-hooks");
+        std::fs::create_dir_all(&hook_dir)?;
+        let hook_file = hook_dir.join(format!("{run_id}.jsonl"));
+        let starling_exe = std::env::current_exe()?;
+        config = append_codex_profile_runtime_hooks(
+            &config,
+            &profile_path,
+            run_id,
+            &hook_file,
+            &starling_exe,
+        )?;
+        Some(hook_file)
+    } else {
+        None
+    };
+
+    std::fs::write(&profile_path, config)?;
+    Ok(CodexProfileLaunch {
+        profile_name,
+        profile_path,
         hook_file,
     })
 }
@@ -1519,6 +1714,90 @@ fn append_codex_hook_trust_state(
         ));
     }
     Ok(rendered)
+}
+
+fn append_codex_profile_runtime_hooks(
+    config: &str,
+    profile_path: &Path,
+    run_id: &str,
+    hook_file: &Path,
+    starling_exe: &Path,
+) -> Result<String> {
+    let starling_exe = starling_exe.to_string_lossy().to_string();
+    let hook_file = hook_file.to_string_lossy().to_string();
+    let profile_path = profile_path.to_string_lossy().to_string();
+    let mut rendered = config.trim_end().to_string();
+    if !rendered.is_empty() {
+        rendered.push_str("\n\n");
+    }
+
+    for event in CODEX_RUNTIME_HOOK_EVENTS {
+        let event_key = codex_hook_event_key(event);
+        let command = codex_runtime_hook_command(&starling_exe, run_id, &hook_file, event);
+        let hash = codex_command_hook_hash(event_key, &command, 5)?;
+        rendered.push_str(&format!(
+            "[hooks.state.\"{}:{}:0:0\"]\ntrusted_hash = \"{}\"\n\n",
+            profile_path.replace('\\', "\\\\").replace('"', "\\\""),
+            event_key,
+            hash
+        ));
+    }
+
+    for event in CODEX_RUNTIME_HOOK_EVENTS {
+        let command = codex_runtime_hook_command(&starling_exe, run_id, &hook_file, event);
+        rendered.push_str(&format!(
+            "[[hooks.{event}]]\n\n[[hooks.{event}.hooks]]\ntype = \"command\"\ncommand = \"{}\"\ntimeout = 5\n\n",
+            toml_escape_basic(&command)
+        ));
+    }
+
+    Ok(rendered)
+}
+
+fn normalize_codex_external_provider_auth(config: &str) -> String {
+    let Ok(mut value) = config.parse::<toml::Value>() else {
+        return config.to_string();
+    };
+    let Some(provider_id) = value
+        .get("model_provider")
+        .and_then(|provider| provider.as_str())
+        .map(str::to_string)
+    else {
+        return config.to_string();
+    };
+    if provider_id == "openai" {
+        return config.to_string();
+    }
+
+    let Some(provider) = value
+        .get_mut("model_providers")
+        .and_then(|providers| providers.as_table_mut())
+        .and_then(|providers| providers.get_mut(&provider_id))
+        .and_then(|provider| provider.as_table_mut())
+    else {
+        return config.to_string();
+    };
+
+    provider.insert(
+        "requires_openai_auth".to_string(),
+        toml::Value::Boolean(false),
+    );
+    toml::to_string_pretty(&value).unwrap_or_else(|_| config.to_string())
+}
+
+fn toml_escape_basic(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c => escaped.push(c),
+        }
+    }
+    escaped
 }
 
 fn strip_legacy_codex_hooks_bool(config: &str) -> String {
@@ -1820,6 +2099,17 @@ fn cleanup_temp_dir(path: Option<&Path>) {
     if let Some(path) = path {
         let _ = std::fs::remove_dir_all(path);
     }
+}
+
+fn cleanup_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn cleanup_launch_artifacts(prepared: &PreparedLaunch) {
+    cleanup_temp_dir(prepared.temp_dir.as_deref());
+    cleanup_files(&prepared.cleanup_files);
 }
 
 fn update_run_pid(run_id: &str, pid: u32) {
