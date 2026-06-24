@@ -666,6 +666,9 @@ fn infer_status_from_hook(
     now_ms: u64,
 ) -> StatusGuess {
     if let Some(state) = hook {
+        if !process_alive && is_stop_hook_state(state) {
+            return status_guess("stopped", Some(&state.source), true);
+        }
         if !process_alive && matches!(state.status.as_str(), "running" | "waiting") {
             return status_guess("stopped", Some("process_missing"), false);
         }
@@ -684,6 +687,15 @@ fn infer_status_from_hook(
     } else {
         status_guess("stopped", None, false)
     }
+}
+
+fn is_stop_hook_state(state: &OscSessionState) -> bool {
+    state.status == "idle"
+        && state
+            .source
+            .rsplit_once(':')
+            .map(|(_, event)| event == "Stop")
+            .unwrap_or(false)
 }
 
 fn is_legacy_idle_notification_state(state: &OscSessionState) -> bool {
@@ -1819,6 +1831,31 @@ mod hook_status_tests {
 
         assert_eq!(guess.status, "idle");
         assert_eq!(guess.signal.as_deref(), Some("claude-hook:Notification"));
+        assert!(guess.realtime);
+    }
+
+    #[test]
+    fn stop_hook_without_process_is_stopped() {
+        let live = SessionLive {
+            activity_status: Some("idle".to_string()),
+            activity_signal: Some("codex_task_complete".to_string()),
+            ..Default::default()
+        };
+        let state = OscSessionState {
+            session_id: "s".to_string(),
+            pid: None,
+            run_id: None,
+            status: "idle".to_string(),
+            message: None,
+            source: "codex-hook:Stop".to_string(),
+            updated_at_ms: 10_000,
+        };
+
+        let guess =
+            infer_status_with_runtime(false, &live, "", "codex", Some(&state), 10_000, 0, 0.0, 0);
+
+        assert_eq!(guess.status, "stopped");
+        assert_eq!(guess.signal.as_deref(), Some("codex-hook:Stop"));
         assert!(guess.realtime);
     }
 
