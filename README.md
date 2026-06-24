@@ -45,7 +45,9 @@ starling --help
 
 On Linux and macOS, npm installs the small JavaScript launcher plus the matching native package for your platform:
 
-- `starling-linux-x64`
+- `starling-linux-x64` for glibc Linux x64
+- `starling-linux-x64-musl` for musl/Alpine Linux x64
+- `starling-linux-arm64` for glibc Linux arm64
 - `starling-darwin-x64`
 - `starling-darwin-arm64`
 

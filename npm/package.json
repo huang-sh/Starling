@@ -19,6 +19,8 @@
   "optionalDependencies": {
     "starling-darwin-arm64": "0.1.5",
     "starling-darwin-x64": "0.1.5",
+    "starling-linux-arm64": "0.1.5",
+    "starling-linux-x64-musl": "0.1.5",
     "starling-linux-x64": "0.1.5"
   },
   "scripts": {

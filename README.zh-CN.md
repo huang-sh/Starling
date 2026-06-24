@@ -45,7 +45,9 @@ starling --help
 
 Linux 和 macOS 下，npm 会安装一个小的 JavaScript 启动器，并自动拉取匹配当前平台的 native 包：
 
-- `starling-linux-x64`
+- `starling-linux-x64`：glibc Linux x64
+- `starling-linux-x64-musl`：musl/Alpine Linux x64
+- `starling-linux-arm64`：glibc Linux arm64
 - `starling-darwin-x64`
 - `starling-darwin-arm64`
 

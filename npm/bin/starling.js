@@ -16,7 +16,7 @@ const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
 
 const PLATFORM_PACKAGE_BY_TARGET = {
-  "x86_64-unknown-linux-musl": "starling-linux-x64",
+  "x86_64-unknown-linux-musl": "starling-linux-x64-musl",
   "aarch64-unknown-linux-musl": "starling-linux-arm64",
   "x86_64-unknown-linux-gnu": "starling-linux-x64",
   "aarch64-unknown-linux-gnu": "starling-linux-arm64",
@@ -32,10 +32,10 @@ switch (platform) {
   case "android":
     switch (arch) {
       case "x64":
-        targetTriple = "x86_64-unknown-linux-musl";
+        targetTriple = isLinuxMusl() ? "x86_64-unknown-linux-musl" : "x86_64-unknown-linux-gnu";
         break;
       case "arm64":
-        targetTriple = "aarch64-unknown-linux-musl";
+        targetTriple = "aarch64-unknown-linux-gnu";
         break;
       default:
         break;
@@ -72,6 +72,17 @@ function compatibleTargetTriples(primary) {
     triples.push("aarch64-unknown-linux-gnu");
   }
   return triples;
+}
+
+function isLinuxMusl() {
+  if (platform !== "linux" && platform !== "android") {
+    return false;
+  }
+  const report = typeof process.report?.getReport === "function"
+    ? process.report.getReport()
+    : null;
+  const glibc = report?.header?.glibcVersionRuntime || report?.header?.glibcVersionCompiler;
+  return !glibc;
 }
 
 function findStarlingExecutable() {

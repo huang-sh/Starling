@@ -29,14 +29,20 @@ fi
 
 # Map target -> {platform, arch}
 case "${TARGET}" in
-  x86_64-unknown-linux-gnu|x86_64-unknown-linux-musl) PLATFORM=linux; ARCH=x64 ;;
-  aarch64-unknown-linux-gnu|aarch64-unknown-linux-musl) PLATFORM=linux; ARCH=arm64 ;;
+  x86_64-unknown-linux-gnu) PLATFORM=linux; ARCH=x64; LIBC=glibc ;;
+  x86_64-unknown-linux-musl) PLATFORM=linux; ARCH=x64; LIBC=musl ;;
+  aarch64-unknown-linux-gnu) PLATFORM=linux; ARCH=arm64; LIBC=glibc ;;
+  aarch64-unknown-linux-musl) PLATFORM=linux; ARCH=arm64; LIBC=musl ;;
   x86_64-apple-darwin) PLATFORM=darwin; ARCH=x64 ;;
   aarch64-apple-darwin) PLATFORM=darwin; ARCH=arm64 ;;
   *) echo "ERROR: Unsupported target: ${TARGET}" >&2; exit 1 ;;
 esac
 
-PKG_NAME="starling-${PLATFORM}-${ARCH}"
+if [[ "${PLATFORM}" == "linux" && "${ARCH}" == "x64" && "${LIBC:-}" == "musl" ]]; then
+  PKG_NAME="starling-${PLATFORM}-${ARCH}-musl"
+else
+  PKG_NAME="starling-${PLATFORM}-${ARCH}"
+fi
 VERSION=$(grep -m1 '^version' rust/Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')
 BINARY="rust/target/${TARGET}/release/starling"
 
@@ -53,7 +59,7 @@ cp "${BINARY}" "${STAGE}/vendor/${TARGET}/bin/starling"
 chmod +x "${STAGE}/vendor/${TARGET}/bin/starling"
 
 # Generate package.json via node to keep quoting clean.
-PKG_NAME="${PKG_NAME}" VERSION="${VERSION}" PLATFORM="${PLATFORM}" ARCH="${ARCH}" STAGE="${STAGE}" node -e '
+PKG_NAME="${PKG_NAME}" VERSION="${VERSION}" PLATFORM="${PLATFORM}" ARCH="${ARCH}" LIBC="${LIBC:-}" STAGE="${STAGE}" node -e '
   const fs = require("fs");
   const pkg = {
     name: process.env.PKG_NAME,
@@ -68,6 +74,9 @@ PKG_NAME="${PKG_NAME}" VERSION="${VERSION}" PLATFORM="${PLATFORM}" ARCH="${ARCH}
     cpu: [process.env.ARCH],
     files: ["vendor/"],
   };
+  if (process.env.LIBC) {
+    pkg.libc = [process.env.LIBC];
+  }
   fs.writeFileSync(process.env.STAGE + "/package.json", JSON.stringify(pkg, null, 2) + "\n");
 '
 
