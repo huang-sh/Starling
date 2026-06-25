@@ -38,9 +38,15 @@ pub struct OscSessionState {
     pub pid: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_used_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_remaining_pct: Option<f64>,
     pub source: String,
     pub updated_at_ms: u64,
 }
@@ -57,7 +63,17 @@ pub fn save_osc_state(mut store: OscStateStore) -> Result<()> {
 pub fn upsert_osc_state(state: OscSessionState) -> Result<OscStateStore> {
     let mut store = load_osc_state();
     if let Some(existing) = store.sessions.iter_mut().find(|s| same_entry(s, &state)) {
-        *existing = state;
+        let mut merged = state;
+        if merged.model.is_none() {
+            merged.model = existing.model.clone();
+        }
+        if merged.context_used_pct.is_none() {
+            merged.context_used_pct = existing.context_used_pct;
+        }
+        if merged.context_remaining_pct.is_none() {
+            merged.context_remaining_pct = existing.context_remaining_pct;
+        }
+        *existing = merged;
     } else {
         store.sessions.push(state);
     }
@@ -98,6 +114,41 @@ pub fn recent_osc_state(
         .filter(|s| session_matches(&s.session_id, session_id))
         .filter(|s| pid_match(s.pid, pid))
         .filter(|s| is_runtime_status_source(&s.source))
+        .filter(|s| is_fresh_at(s, now_ms))
+        .max_by_key(|s| s.updated_at_ms)
+}
+
+pub fn recent_context_state(
+    session_id: &str,
+    pid: Option<u32>,
+    now_ms: u64,
+) -> Option<OscSessionState> {
+    load_osc_state()
+        .sessions
+        .into_iter()
+        .filter(|s| session_matches(&s.session_id, session_id))
+        .filter(|s| pid_match(s.pid, pid))
+        .filter(|s| s.context_used_pct.is_some() || s.context_remaining_pct.is_some())
+        .filter(|s| is_fresh_at(s, now_ms))
+        .max_by_key(|s| s.updated_at_ms)
+}
+
+pub fn recent_model_state(
+    session_id: &str,
+    pid: Option<u32>,
+    now_ms: u64,
+) -> Option<OscSessionState> {
+    load_osc_state()
+        .sessions
+        .into_iter()
+        .filter(|s| session_matches(&s.session_id, session_id))
+        .filter(|s| pid_match(s.pid, pid))
+        .filter(|s| {
+            s.model
+                .as_deref()
+                .map(|m| !m.trim().is_empty())
+                .unwrap_or(false)
+        })
         .filter(|s| is_fresh_at(s, now_ms))
         .max_by_key(|s| s.updated_at_ms)
 }
@@ -191,6 +242,7 @@ fn osc_payload(sequence: &str) -> Option<&str> {
 
 fn same_entry(a: &OscSessionState, b: &OscSessionState) -> bool {
     session_matches(&a.session_id, &b.session_id)
+        && a.source == b.source
         && match (a.pid, b.pid) {
             (Some(a), Some(b)) => a == b,
             _ => true,
@@ -235,7 +287,7 @@ fn is_agent_hook_source(source: &str) -> bool {
 }
 
 fn is_runtime_status_source(source: &str) -> bool {
-    is_agent_hook_source(source) || source.contains("-pty:")
+    (is_agent_hook_source(source) && !source.ends_with(":StatusLine")) || source.contains("-pty:")
 }
 
 #[cfg(test)]
@@ -305,8 +357,11 @@ mod tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "running".to_string(),
             message: None,
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "claude-hook:UserPromptSubmit".to_string(),
             updated_at_ms: 1_000,
         };
@@ -325,8 +380,11 @@ mod tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "running".to_string(),
             message: None,
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "claude-hook:UserPromptSubmit".to_string(),
             updated_at_ms: 1_000,
         };
@@ -341,8 +399,11 @@ mod tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "running".to_string(),
             message: None,
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "claude-hook:PreToolUse".to_string(),
             updated_at_ms: 1_000,
         };

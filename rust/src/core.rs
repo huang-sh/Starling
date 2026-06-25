@@ -5,6 +5,7 @@ pub mod discovery;
 pub mod format;
 pub mod fs_utils;
 pub mod id;
+pub mod mcp_config;
 pub mod model_config;
 pub mod osc_state;
 pub mod process_map;

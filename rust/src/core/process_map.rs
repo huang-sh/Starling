@@ -779,6 +779,70 @@ fn resolve_from_cwd_mtime(
     })
 }
 
+fn resolve_from_starling_claude_hook(
+    ctx: &mut ResolveContext,
+    proc_args: &[String],
+    pid: u32,
+) -> Option<MappedSession> {
+    let settings_path = extract_settings_path(proc_args)?;
+    let file_name = settings_path.file_name()?.to_string_lossy();
+    let run_id = file_name.strip_suffix(".settings.json")?;
+    let hook_file = settings_path.with_file_name(format!("{run_id}.jsonl"));
+    let raw = std::fs::read_to_string(hook_file).ok()?;
+
+    for line in raw.lines().rev() {
+        let value: Value = serde_json::from_str(line.trim()).ok()?;
+        let session_id = value
+            .get("session_id")
+            .or_else(|| value.get("sessionId"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?
+            .to_lowercase();
+        let file_path = value
+            .get("transcript_path")
+            .or_else(|| value.get("transcriptPath"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .or_else(|| {
+                find_session_file_by_id(&ctx.root, &session_id, Some(ctx.cache))
+                    .map(|p| p.to_string_lossy().to_string())
+            });
+        let project_path = value
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .or_else(|| ctx.cwd.as_ref().map(|p| p.to_string_lossy().to_string()));
+        return Some(MappedSession {
+            pid,
+            provider: Some(Provider::Claude),
+            project_path,
+            file_path,
+            session_id: Some(session_id),
+            home: Some(ctx.home.to_string_lossy().to_string()),
+            confidence: 110,
+        });
+    }
+
+    None
+}
+
+fn extract_settings_path(args: &[String]) -> Option<PathBuf> {
+    for (index, arg) in args.iter().enumerate() {
+        if arg == "--settings" {
+            return args.get(index + 1).map(PathBuf::from);
+        }
+        if let Some(path) = arg.strip_prefix("--settings=") {
+            return Some(PathBuf::from(path));
+        }
+    }
+    None
+}
+
 fn should_replace_mapping(existing: &MappedSession, candidate: &MappedSession) -> bool {
     candidate.confidence > existing.confidence
 }
@@ -808,6 +872,15 @@ fn resolve_process(
         cwd,
         cache,
     };
+
+    // 1. Starling's Claude hook file is the most precise signal for
+    // wrapped launches: it records Claude's real session_id immediately
+    // after SessionStart/StatusLine events.
+    if proc_provider == Provider::Claude {
+        if let Some(m) = resolve_from_starling_claude_hook(&mut ctx, proc_args, proc_pid) {
+            return Some(m);
+        }
+    }
 
     // 1. fd scan first (cheap, almost always works)
     if let Some(m) = resolve_from_open_files(&mut ctx, proc_provider, proc_pid) {
@@ -1002,6 +1075,70 @@ mod tests {
             provider_from_cmdline(&["node".into(), "/x/y/z/codex.js".into(), "--foo".into()]),
             Some(Provider::Codex)
         );
+    }
+
+    #[test]
+    fn extracts_settings_path_from_claude_args() {
+        assert_eq!(
+            extract_settings_path(&["claude".into(), "--settings".into(), "/tmp/a.json".into()]),
+            Some(PathBuf::from("/tmp/a.json"))
+        );
+        assert_eq!(
+            extract_settings_path(&["claude".into(), "--settings=/tmp/b.json".into()]),
+            Some(PathBuf::from("/tmp/b.json"))
+        );
+    }
+
+    #[test]
+    fn resolves_starling_claude_hook_session_from_settings_arg() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "starling-process-map-hook-test-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("run-1.settings.json");
+        let hook_file = dir.join("run-1.jsonl");
+        let transcript = dir.join("5735a325-4a0e-4bf8-8358-f664a645c194.jsonl");
+        std::fs::write(
+            &hook_file,
+            format!(
+                "{{\"session_id\":\"5735a325-4a0e-4bf8-8358-f664a645c194\",\"transcript_path\":\"{}\",\"cwd\":\"/work/project\"}}\n",
+                transcript.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let mut cache = ResolverCache::default();
+        let mut ctx = ResolveContext {
+            environ: HashMap::new(),
+            home: dir.clone(),
+            root: dir.clone(),
+            cwd: Some(PathBuf::from("/fallback")),
+            cache: &mut cache,
+        };
+        let args = vec![
+            "claude".to_string(),
+            "--settings".to_string(),
+            settings.to_string_lossy().to_string(),
+        ];
+
+        let mapped = resolve_from_starling_claude_hook(&mut ctx, &args, 1234).unwrap();
+
+        assert_eq!(
+            mapped.session_id.as_deref(),
+            Some("5735a325-4a0e-4bf8-8358-f664a645c194")
+        );
+        assert_eq!(mapped.pid, 1234);
+        assert_eq!(mapped.provider, Some(Provider::Claude));
+        assert_eq!(mapped.project_path.as_deref(), Some("/work/project"));
+        assert_eq!(
+            mapped.file_path.as_deref(),
+            Some(transcript.to_string_lossy().as_ref())
+        );
+        assert_eq!(mapped.confidence, 110);
     }
 
     #[test]

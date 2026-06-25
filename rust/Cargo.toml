@@ -1,6 +1,6 @@
 [package]
 name = "starling"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "Launch, switch, and organize Claude Code and Codex sessions with model profiles, catalogs, project views, and VS Code integration."
 license = "MIT"
@@ -27,6 +27,8 @@ crossterm = "0.27"
 libc = "0.2"
 indexmap = { version = "2", features = ["serde"] }
 once_cell = "1"
+ureq = { version = "2", features = ["json"] }
+base64 = "0.22"
 
 [profile.release]
 opt-level = 3

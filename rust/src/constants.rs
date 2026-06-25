@@ -116,9 +116,14 @@ pub fn default_osc_state_path() -> PathBuf {
     }
 }
 
+pub fn default_mcp_config_path() -> PathBuf {
+    default_starling_home().join("mcp.json")
+}
+
 pub const STORE_VERSION: u32 = 1;
 pub const RUNS_VERSION: u32 = 1;
 pub const OSC_STATE_VERSION: u32 = 1;
+pub const MCP_CONFIG_VERSION: u32 = 1;
 
 pub fn default_starling_settings_dir() -> PathBuf {
     default_starling_home().join("settings")

@@ -1,6 +1,6 @@
 //! Clap command/arg definitions.
 
-use clap::{ArgAction, Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
@@ -70,6 +70,9 @@ pub enum Command {
     /// Manage Starling CLI settings
     #[command(subcommand)]
     Config(ConfigCommand),
+
+    /// Run the Starling MCP server over stdio
+    Mcp(McpCommand),
 
     /// Benchmark agents against a task suite
     ///
@@ -463,6 +466,18 @@ pub struct RunCommand {
     #[arg(long)]
     pub cwd: Option<String>,
 
+    /// MCP server names to inject. Repeat or comma-separate. Defaults to the selected MCP profile.
+    #[arg(long, value_delimiter = ',')]
+    pub mcp: Vec<String>,
+
+    /// MCP profile to inject
+    #[arg(long)]
+    pub mcp_profile: Option<String>,
+
+    /// Do not inject MCP servers for this run
+    #[arg(long)]
+    pub no_mcp: bool,
+
     #[command(subcommand)]
     pub command: RunSubcommand,
 }
@@ -709,6 +724,153 @@ pub enum TopAction {
         /// Live agent process pid
         #[arg(long)]
         pid: Option<u32>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Args)]
+pub struct McpCommand {
+    /// Output transport. Only stdio is currently supported.
+    #[arg(long, default_value = "stdio")]
+    pub transport: String,
+
+    /// Tool group exposed by this stdio MCP server
+    #[arg(long, value_enum, default_value_t = McpToolSet::All)]
+    pub tools: McpToolSet,
+
+    #[command(subcommand)]
+    pub action: Option<McpAction>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum McpToolSet {
+    All,
+    Starling,
+    Agnes,
+}
+
+#[derive(Subcommand)]
+pub enum McpAction {
+    /// List configured MCP servers
+    #[command(alias = "ls")]
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add or replace an MCP server
+    Add {
+        /// Server name
+        name: String,
+        /// Server transport type: stdio or http
+        #[arg(long = "type", alias = "transport")]
+        server_type: Option<String>,
+        /// Command to execute
+        #[arg(long)]
+        command: Option<String>,
+        /// HTTP MCP endpoint URL
+        #[arg(long)]
+        url: Option<String>,
+        /// Command argument; repeatable
+        #[arg(long = "arg", action = ArgAction::Append)]
+        args: Vec<String>,
+        /// Environment variable KEY=VALUE; repeatable
+        #[arg(long = "env", action = ArgAction::Append)]
+        env: Vec<String>,
+        /// HTTP header KEY=VALUE; repeatable
+        #[arg(long = "header", action = ArgAction::Append)]
+        headers: Vec<String>,
+        /// Stdio command and arguments after `--`, or HTTP URL when --transport http is used
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command_args: Vec<String>,
+        /// Add disabled
+        #[arg(long)]
+        disabled: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Get one MCP server
+    Get {
+        /// Server name
+        name: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove an MCP server
+    Remove {
+        /// Server name
+        name: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Enable an MCP server
+    Enable {
+        /// Server name
+        name: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Disable an MCP server
+    Disable {
+        /// Server name
+        name: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Manage MCP profiles
+    #[command(subcommand)]
+    Profile(McpProfileAction),
+}
+
+#[derive(Subcommand)]
+pub enum McpProfileAction {
+    /// List MCP profiles
+    #[command(alias = "ls")]
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one MCP profile
+    Show {
+        /// Profile name
+        name: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create or replace an MCP profile
+    Set {
+        /// Profile name
+        name: String,
+        /// Server names included in the profile
+        servers: Vec<String>,
+        /// Make this profile the default
+        #[arg(long)]
+        default: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove an MCP profile
+    Remove {
+        /// Profile name
+        name: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set the default MCP profile
+    Default {
+        /// Profile name
+        name: String,
         /// Output as JSON
         #[arg(long)]
         json: bool,

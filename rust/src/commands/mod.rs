@@ -5,6 +5,7 @@ use anyhow::Result;
 pub mod catalog;
 pub mod config_cmd;
 pub mod diagnose;
+pub mod mcp;
 pub mod model;
 pub mod monitor;
 pub mod pin;
@@ -31,6 +32,7 @@ pub fn dispatch(command: Command) -> Result<()> {
         Command::Run(c) => run::handle(c),
         Command::Model(c) => model::handle(c),
         Command::Config(c) => config_cmd::handle(c),
+        Command::Mcp(c) => mcp::handle(c),
         Command::Diagnose(c) => diagnose::handle(c),
         Command::Top(c) => monitor::handle(c),
         Command::Resume { session_id } => resume::run(&session_id),

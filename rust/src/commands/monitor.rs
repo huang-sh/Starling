@@ -14,9 +14,9 @@ use crate::cli::{MonitorCommand, TopAction, TopCommand};
 use crate::core::catalog_resolver::{catalog_path, resolve_catalog_reference};
 use crate::core::discovery::{canonical_session_id, match_session_id};
 use crate::core::osc_state::{
-    clear_osc_state, normalize_status, prune_stale_osc_state, recent_osc_state,
-    status_from_osc0_title, status_from_osc94_progress, status_from_osc_sequence, upsert_osc_state,
-    OscSessionState,
+    clear_osc_state, normalize_status, prune_stale_osc_state, recent_context_state,
+    recent_model_state, recent_osc_state, status_from_osc0_title, status_from_osc94_progress,
+    status_from_osc_sequence, upsert_osc_state, OscSessionState,
 };
 use crate::core::process_metrics::{get_process_tree_metrics, reset_cpu_sampler};
 use crate::core::runs::{detect_running_sessions, reconcile_stale_runs};
@@ -125,8 +125,11 @@ fn record_runtime_state(
         session_id,
         pid,
         run_id,
+        model: None,
         status: resolved_status,
         message,
+        context_used_pct: None,
+        context_remaining_pct: None,
         source: if source == "manual" {
             parsed_source
         } else {
@@ -202,17 +205,24 @@ fn record_agent_hook_event(
         .or_else(|| value.get("hookEventName").and_then(|v| v.as_str()))
         .or(event.as_deref())
         .unwrap_or("AgentHook");
-    let Some(status) = status_from_agent_hook_event(event, &value) else {
+    let context_usage = context_window_usage_from_hook(&value);
+    let model = model_from_hook(&value);
+    let status = status_from_agent_hook_event(event, &value);
+    if status.is_none() && context_usage.is_none() && model.is_none() {
         return Ok(());
-    };
-    let message = hook_message(event, &value);
+    }
+    let provider = provider.trim().to_lowercase();
+    let source = format!("{provider}-hook:{event}");
     let state = OscSessionState {
         session_id,
         pid,
         run_id,
-        status: status.to_string(),
-        message,
-        source: format!("{}-hook:{event}", provider.trim().to_lowercase()),
+        model,
+        status: status.unwrap_or("context").to_string(),
+        message: hook_message(event, &value),
+        context_used_pct: context_usage.map(|usage| usage.used_pct),
+        context_remaining_pct: context_usage.and_then(|usage| usage.remaining_pct),
+        source,
         updated_at_ms: now_ms(),
     };
     let store = upsert_osc_state(state.clone())?;
@@ -230,6 +240,50 @@ fn record_agent_hook_event(
         );
     }
     Ok(())
+}
+
+fn model_from_hook(value: &Value) -> Option<String> {
+    fn clean(value: Option<&str>) -> Option<String> {
+        value
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter(|s| !s.starts_with('<') && *s != "synthetic")
+            .map(str::to_string)
+    }
+
+    clean(value.get("model").and_then(|v| v.as_str()))
+        .or_else(|| {
+            value
+                .get("model")
+                .and_then(|v| v.get("display_name"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| clean(Some(s)))
+        })
+        .or_else(|| {
+            value
+                .get("model")
+                .and_then(|v| v.get("id"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| clean(Some(s)))
+        })
+        .or_else(|| {
+            value
+                .pointer("/payload/model")
+                .and_then(|v| v.as_str())
+                .and_then(|s| clean(Some(s)))
+        })
+        .or_else(|| {
+            value
+                .pointer("/payload/model/display_name")
+                .and_then(|v| v.as_str())
+                .and_then(|s| clean(Some(s)))
+        })
+        .or_else(|| {
+            value
+                .pointer("/payload/model/id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| clean(Some(s)))
+        })
 }
 
 fn hook_session_id(value: &Value) -> Option<String> {
@@ -251,6 +305,39 @@ fn hook_session_id(value: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from)
+}
+
+#[derive(Clone, Copy)]
+struct ContextWindowUsage {
+    used_pct: f64,
+    remaining_pct: Option<f64>,
+}
+
+fn context_window_usage_from_hook(value: &Value) -> Option<ContextWindowUsage> {
+    let context = value
+        .get("context_window")
+        .or_else(|| value.get("contextWindow"))?;
+    let used_pct = context
+        .get("used_percentage")
+        .or_else(|| context.get("usedPercentage"))
+        .and_then(percent_value)?;
+    let remaining_pct = context
+        .get("remaining_percentage")
+        .or_else(|| context.get("remainingPercentage"))
+        .and_then(percent_value);
+    Some(ContextWindowUsage {
+        used_pct,
+        remaining_pct,
+    })
+}
+
+fn percent_value(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().trim_end_matches('%').parse::<f64>().ok(),
+        _ => None,
+    }
+    .filter(|v| v.is_finite())
 }
 
 fn append_hook_event(path: &str, raw: &str) -> Result<()> {
@@ -412,6 +499,12 @@ struct RowJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     rss_kb: Option<u64>,
     ctx_pct: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_used_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_remaining_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_source: Option<String>,
     tokens_in: u64,
     tokens_out: u64,
     tokens_cache: u64,
@@ -472,6 +565,9 @@ impl From<&Row> for RowJson {
             "process".to_string()
         };
         let status_updated_at_ms = effective_hook.map(|s| s.updated_at_ms).unwrap_or(0);
+        let context_state = recent_context_state(&r.session_id, r.pid, now_ms);
+        let model_state = recent_model_state(&r.session_id, r.pid, now_ms);
+        let ctx_pct = effective_context_pct(&live, context_state.as_ref());
         let started_at_ms = live.started_at_ms;
         let elapsed_secs = if started_at_ms > 0 && now_ms > started_at_ms {
             (now_ms - started_at_ms) / 1000
@@ -485,11 +581,7 @@ impl From<&Row> for RowJson {
             catalog: r.catalog.clone(),
             title: r.title.clone(),
             provider: r.provider.clone(),
-            model: if live.model.is_empty() {
-                r.model.clone()
-            } else {
-                live.model.clone()
-            },
+            model: effective_model(&live, r, model_state.as_ref()),
             status: inferred.status,
             status_source,
             status_realtime,
@@ -499,7 +591,10 @@ impl From<&Row> for RowJson {
             cpu_pct: cpu,
             mem_kb,
             rss_kb: Some(mem_kb),
-            ctx_pct: live.ctx_pct,
+            ctx_pct,
+            context_used_pct: context_state.as_ref().and_then(|s| s.context_used_pct),
+            context_remaining_pct: context_state.as_ref().and_then(|s| s.context_remaining_pct),
+            context_source: context_state.as_ref().map(|s| s.source.clone()),
             tokens_in: live.tokens.input,
             tokens_out: live.tokens.output,
             tokens_cache: live.tokens.cache,
@@ -566,6 +661,44 @@ fn live_for(file_path: &Option<String>) -> SessionLive {
             ..Default::default()
         },
     }
+}
+
+fn effective_context_pct(live: &SessionLive, context_state: Option<&OscSessionState>) -> i64 {
+    context_state
+        .and_then(|state| state.context_used_pct)
+        .and_then(|pct| {
+            if pct.is_finite() {
+                Some(pct.round().clamp(0.0, 100.0) as i64)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(live.ctx_pct)
+}
+
+fn effective_model(live: &SessionLive, row: &Row, model_state: Option<&OscSessionState>) -> String {
+    model_state
+        .and_then(|state| state.model.as_deref())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let model = live.model.trim();
+            if model.is_empty() {
+                None
+            } else {
+                Some(model.to_string())
+            }
+        })
+        .or_else(|| {
+            let model = row.model.trim();
+            if model.is_empty() {
+                None
+            } else {
+                Some(model.to_string())
+            }
+        })
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn merge_latest_subagent_live(parent_path: &Path, live: &mut SessionLive) {
@@ -639,7 +772,7 @@ fn effective_hook_state(osc: Option<&OscSessionState>) -> Option<&OscSessionStat
 }
 
 fn is_runtime_state_source(source: &str) -> bool {
-    source.contains("-hook:") || source.contains("-pty:")
+    (source.contains("-hook:") && !source.ends_with(":StatusLine")) || source.contains("-pty:")
 }
 
 #[derive(Clone)]
@@ -992,6 +1125,9 @@ fn render_compact_row(row: &Row, width: usize) -> Vec<String> {
     let now_ms = now_ms();
     let osc = recent_osc_state(&row.session_id, row.pid, now_ms);
     let effective_hook = effective_hook_state(osc.as_ref());
+    let context_state = recent_context_state(&row.session_id, row.pid, now_ms);
+    let model_state = recent_model_state(&row.session_id, row.pid, now_ms);
+    let ctx_pct = effective_context_pct(&live, context_state.as_ref());
     let inferred = infer_status_with_runtime(
         row.pid.is_some(),
         &live,
@@ -1016,13 +1152,7 @@ fn render_compact_row(row: &Row, width: usize) -> Vec<String> {
     } else {
         row.provider.as_str()
     };
-    let model = if !live.model.is_empty() {
-        live.model.as_str()
-    } else if !row.model.is_empty() {
-        row.model.as_str()
-    } else {
-        "-"
-    };
+    let model = effective_model(&live, row, model_state.as_ref());
     let session = short_session_id(&row.session_id);
     let title = if row.title.trim().is_empty() {
         "-"
@@ -1034,7 +1164,7 @@ fn render_compact_row(row: &Row, width: usize) -> Vec<String> {
         "{} {:<7} {:<15} {:<14} ",
         status_cell,
         truncate_chars(agent, 7),
-        truncate_chars(model, 15),
+        truncate_chars(&model, 15),
         session,
     );
     let title_width = width.saturating_sub(54).max(18);
@@ -1043,6 +1173,7 @@ fn render_compact_row(row: &Row, width: usize) -> Vec<String> {
     let metrics = render_metrics(
         &status,
         &live,
+        ctx_pct,
         cpu,
         mem_kb,
         row,
@@ -1062,6 +1193,7 @@ fn render_compact_row(row: &Row, width: usize) -> Vec<String> {
 fn render_metrics(
     _status: &str,
     live: &SessionLive,
+    ctx_pct: i64,
     cpu: f64,
     mem_kb: u64,
     row: &Row,
@@ -1078,8 +1210,8 @@ fn render_metrics(
     if mem_kb > 0 {
         parts.push(format!("mem {:.0}M", mem_kb as f64 / 1024.0));
     }
-    if live.ctx_pct >= 0 {
-        parts.push(format!("ctx {}%", live.ctx_pct));
+    if ctx_pct >= 0 {
+        parts.push(format!("ctx {}%", ctx_pct));
     }
     if live.tool_count > 0 {
         parts.push(format!("tools {}", live.tool_count));
@@ -1524,8 +1656,11 @@ mod hook_status_tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: status.to_string(),
             message: None,
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: source.to_string(),
             updated_at_ms: 1_000,
         }
@@ -1576,6 +1711,23 @@ mod hook_status_tests {
     }
 
     #[test]
+    fn claude_status_line_context_window_is_parsed_without_status() {
+        let value = serde_json::json!({
+            "session_id": "s",
+            "context_window": {
+                "used_percentage": 100,
+                "remaining_percentage": "0%"
+            }
+        });
+
+        let usage = context_window_usage_from_hook(&value).expect("context usage");
+
+        assert_eq!(usage.used_pct, 100.0);
+        assert_eq!(usage.remaining_pct, Some(0.0));
+        assert_eq!(status_from_agent_hook_event("StatusLine", &value), None);
+    }
+
+    #[test]
     fn stop_with_running_background_task_stays_running() {
         let value = serde_json::json!({
             "background_tasks": [
@@ -1621,8 +1773,11 @@ mod hook_status_tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "idle".to_string(),
             message: Some("ready".to_string()),
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "claude-pty:osc0".to_string(),
             updated_at_ms: 10_500,
         };
@@ -1647,8 +1802,11 @@ mod hook_status_tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "idle".to_string(),
             message: Some("ready".to_string()),
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "claude-pty:osc0".to_string(),
             updated_at_ms: 10_500,
         };
@@ -1695,8 +1853,11 @@ mod hook_status_tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "waiting".to_string(),
             message: Some("Claude is waiting for your input".to_string()),
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "claude-hook:Notification".to_string(),
             updated_at_ms: 10_500,
         };
@@ -1723,8 +1884,11 @@ mod hook_status_tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "waiting".to_string(),
             message: Some("Bash requires approval".to_string()),
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "claude-hook:PermissionRequest".to_string(),
             updated_at_ms: 10_500,
         };
@@ -1754,8 +1918,11 @@ mod hook_status_tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "waiting".to_string(),
             message: Some("Select an option".to_string()),
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "claude-hook:Elicitation".to_string(),
             updated_at_ms: 10_500,
         };
@@ -1813,8 +1980,11 @@ mod hook_status_tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "running".to_string(),
             message: None,
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "codex-hook:SubagentStart".to_string(),
             updated_at_ms: 10_000,
         };
@@ -1842,8 +2012,11 @@ mod hook_status_tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "running".to_string(),
             message: None,
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "codex-hook:SubagentStart".to_string(),
             updated_at_ms: 10_000,
         };
@@ -1875,8 +2048,11 @@ mod hook_status_tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "running".to_string(),
             message: None,
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "claude-hook:UserPromptSubmit".to_string(),
             updated_at_ms: 10_000,
         };
@@ -1907,8 +2083,11 @@ mod hook_status_tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "running".to_string(),
             message: Some("PreToolUse Bash".to_string()),
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "claude-hook:PreToolUse".to_string(),
             updated_at_ms: 10_000,
         };
@@ -1945,8 +2124,11 @@ mod hook_status_tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "running".to_string(),
             message: Some("PreToolUse Bash".to_string()),
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "claude-hook:PreToolUse".to_string(),
             updated_at_ms: 10_000,
         };
@@ -1966,8 +2148,11 @@ mod hook_status_tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "running".to_string(),
             message: Some("PostToolUse Bash".to_string()),
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "codex-hook:PostToolUse".to_string(),
             updated_at_ms: 10_000,
         };
@@ -1999,8 +2184,11 @@ mod hook_status_tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "running".to_string(),
             message: Some("PostToolUse Bash".to_string()),
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "codex-hook:PostToolUse".to_string(),
             updated_at_ms: 10_000,
         };
@@ -2119,8 +2307,11 @@ mod hook_status_tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "running".to_string(),
             message: Some("PreToolUse Bash".to_string()),
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "claude-hook:PreToolUse".to_string(),
             updated_at_ms: 10_000,
         };
@@ -2143,8 +2334,11 @@ mod hook_status_tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "running".to_string(),
             message: Some("PreToolUse Bash".to_string()),
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "claude-hook:PreToolUse".to_string(),
             updated_at_ms: 10_000,
         };
@@ -2171,8 +2365,11 @@ mod hook_status_tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "waiting".to_string(),
             message: Some("Claude is waiting for your input".to_string()),
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "claude-hook:Notification".to_string(),
             updated_at_ms: 10_000,
         };
@@ -2196,8 +2393,11 @@ mod hook_status_tests {
             session_id: "s".to_string(),
             pid: None,
             run_id: None,
+            model: None,
             status: "idle".to_string(),
             message: None,
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: "codex-hook:Stop".to_string(),
             updated_at_ms: 10_000,
         };

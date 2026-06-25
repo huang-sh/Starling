@@ -10,10 +10,10 @@
 
 Launch, switch, and organize Claude Code and Codex sessions with model profiles, catalogs, project views, live monitoring, and VS Code integration.
 
-Current release: **0.1.6**
+Current release: **0.1.7**
 
 - npm: [`starling-ai`](https://www.npmjs.com/package/starling-ai)
-- GitHub Release: [`rust-v0.1.6`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.6)
+- GitHub Release: [`rust-v0.1.7`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.7)
 - VS Code extension: [`huangsh.starling-ai`](https://marketplace.visualstudio.com/items?itemName=huangsh.starling-ai)
 
 ## Features
@@ -54,7 +54,7 @@ On Linux and macOS, npm installs the small JavaScript launcher plus the matching
 The same native archives and sha256 files are attached to the GitHub release:
 
 ```text
-https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.6
+https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.7
 ```
 
 The npm install step also installs the bundled Starling skill to:

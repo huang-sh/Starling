@@ -1,5 +1,6 @@
 //! `starling run` — agent launch with run-record tracking.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -20,6 +21,7 @@ use crate::core::discovery::{
     canonical_session_id, find_session_by_id, find_sessions, Provider as DiscoveryProvider,
 };
 use crate::core::id::generate_bookmark_id;
+use crate::core::mcp_config::{effective_servers, McpServerConfig};
 use crate::core::osc_state::{status_from_osc_sequence, upsert_osc_state, OscSessionState};
 use crate::core::process_map::map_process_tree_to_session_since;
 use crate::core::runs::{
@@ -73,6 +75,9 @@ fn launch(
         cmd_args.setting.as_deref(),
         passthrough_args,
         true,
+        &cmd_args.mcp,
+        cmd_args.mcp_profile.as_deref(),
+        cmd_args.no_mcp,
     )?;
 
     // Pre-spawn record (pid unknown yet).
@@ -527,8 +532,11 @@ fn observe_pty_osc_chunk(
             session_id: canonical_session_id(&session_id),
             pid: Some(pid),
             run_id: Some(run_id.to_string()),
+            model: None,
             status,
             message,
+            context_used_pct: None,
+            context_remaining_pct: None,
             source: format!("{}-pty:{source}", provider_name(provider)),
             updated_at_ms: now,
         };
@@ -1091,6 +1099,58 @@ mod tests {
             assert!(command.contains("--run-id run-1"));
             assert!(command.contains("--hook-file /tmp/starling-hook.jsonl"));
         }
+        let status_line = settings
+            .get("statusLine")
+            .and_then(|v| v.as_object())
+            .expect("statusLine object");
+        assert_eq!(
+            status_line.get("type").and_then(|v| v.as_str()),
+            Some("command")
+        );
+        let command = status_line
+            .get("command")
+            .and_then(|v| v.as_str())
+            .expect("statusLine command");
+        assert!(command.contains("/tmp/starling top hook"));
+        assert!(command.contains("--provider claude"));
+        assert!(command.contains("--event StatusLine"));
+        assert!(command.contains("--run-id run-1"));
+        assert!(command.contains("--hook-file /tmp/starling-hook.jsonl"));
+        assert!(settings.get("mcpServers").is_none());
+    }
+
+    #[test]
+    fn claude_mcp_servers_render_as_mcp_config_json() {
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            "starling".to_string(),
+            McpServerConfig {
+                r#type: "stdio".to_string(),
+                enabled: true,
+                builtin: true,
+                command: Some("/tmp/starling".to_string()),
+                args: vec![
+                    "mcp".to_string(),
+                    "--tools".to_string(),
+                    "starling".to_string(),
+                ],
+                env: BTreeMap::new(),
+                url: None,
+                headers: BTreeMap::new(),
+            },
+        );
+
+        let mcp = mcp_servers_to_claude_json(&servers);
+        assert_eq!(mcp["starling"]["type"], "stdio");
+        assert_eq!(mcp["starling"]["command"], "/tmp/starling");
+        assert_eq!(
+            mcp["starling"]["args"].as_array().cloned(),
+            Some(vec![
+                serde_json::json!("mcp"),
+                serde_json::json!("--tools"),
+                serde_json::json!("starling")
+            ])
+        );
     }
 
     #[test]
@@ -1275,6 +1335,29 @@ mod tests {
     }
 
     #[test]
+    fn codex_mcp_server_is_injected_into_config() {
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            "starling".to_string(),
+            McpServerConfig {
+                r#type: "stdio".to_string(),
+                enabled: true,
+                builtin: true,
+                command: Some("/tmp/starling".to_string()),
+                args: vec!["mcp".to_string()],
+                env: BTreeMap::new(),
+                url: None,
+                headers: BTreeMap::new(),
+            },
+        );
+        let rendered = upsert_codex_mcp_servers("model = \"gpt-5.5\"\n", &servers).unwrap();
+
+        assert!(rendered.contains("[mcp_servers.starling]"));
+        assert!(rendered.contains("command = \"/tmp/starling\""));
+        assert!(rendered.contains("args = [\"mcp\"]"));
+    }
+
+    #[test]
     fn codex_external_provider_does_not_require_openai_auth() {
         let rendered = normalize_codex_external_provider_auth(
             r#"
@@ -1316,6 +1399,9 @@ fn prepare_launch(
     setting: Option<&str>,
     passthrough_args: &[String],
     attach_hook: bool,
+    mcp_names: &[String],
+    mcp_profile: Option<&str>,
+    no_mcp: bool,
 ) -> Result<PreparedLaunch> {
     let mut args = Vec::new();
     let mut envs = Vec::new();
@@ -1333,9 +1419,19 @@ fn prepare_launch(
                 } else {
                     None
                 };
-                let hook = create_claude_hook_settings(run_id, base_settings.as_deref())?;
+                let hook = create_claude_hook_settings(
+                    run_id,
+                    base_settings.as_deref(),
+                    mcp_names,
+                    mcp_profile,
+                    no_mcp,
+                )?;
                 args.push("--settings".into());
                 args.push(hook.settings_path.to_string_lossy().to_string());
+                if let Some(path) = &hook.mcp_config_path {
+                    args.push("--mcp-config".into());
+                    args.push(path.to_string_lossy().to_string());
+                }
                 if let Some(model) = hook
                     .model
                     .as_deref()
@@ -1364,8 +1460,14 @@ fn prepare_launch(
                 } else {
                     None
                 };
-                let hook =
-                    create_codex_profile_launch(run_id, base_config.as_deref(), attach_hook)?;
+                let hook = create_codex_profile_launch(
+                    run_id,
+                    base_config.as_deref(),
+                    attach_hook,
+                    mcp_names,
+                    mcp_profile,
+                    no_mcp,
+                )?;
                 if attach_hook {
                     args.push("--enable".into());
                     args.push("hooks".into());
@@ -1383,7 +1485,14 @@ fn prepare_launch(
                     let path = default_codex_home().join("config.toml");
                     path.exists().then_some(path)
                 };
-                let hook = create_codex_hook_home(run_id, base_config.as_deref(), attach_hook)?;
+                let hook = create_codex_hook_home(
+                    run_id,
+                    base_config.as_deref(),
+                    attach_hook,
+                    mcp_names,
+                    mcp_profile,
+                    no_mcp,
+                )?;
                 if attach_hook {
                     args.push("--enable".into());
                     args.push("hooks".into());
@@ -1445,6 +1554,7 @@ fn codex_home_from_session_path(file_path: &str) -> Option<PathBuf> {
 
 struct ClaudeHookSettings {
     settings_path: PathBuf,
+    mcp_config_path: Option<PathBuf>,
     model: Option<String>,
     hook_file: PathBuf,
 }
@@ -1463,11 +1573,15 @@ struct CodexProfileLaunch {
 fn create_claude_hook_settings(
     run_id: &str,
     base_settings: Option<&Path>,
+    mcp_names: &[String],
+    mcp_profile: Option<&str>,
+    no_mcp: bool,
 ) -> Result<ClaudeHookSettings> {
     let dir = default_starling_home().join("run-hooks");
     std::fs::create_dir_all(&dir)?;
     let hook_file = dir.join(format!("{run_id}.jsonl"));
     let settings_path = dir.join(format!("{run_id}.settings.json"));
+    let mcp_config_path = dir.join(format!("{run_id}.mcp.json"));
     let mut settings = if let Some(path) = base_settings {
         let raw = std::fs::read_to_string(path)?;
         serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| serde_json::json!({}))
@@ -1477,10 +1591,21 @@ fn create_claude_hook_settings(
     let model = claude_model_from_settings(&settings);
     normalize_claude_permission_rules(&mut settings);
     let starling_exe = std::env::current_exe()?;
+    let mcp_servers = selected_mcp_servers(mcp_names, mcp_profile, no_mcp, &starling_exe)?;
     install_claude_runtime_hooks(&mut settings, run_id, &hook_file, &starling_exe);
+    let mcp_config_path = if mcp_servers.is_empty() {
+        None
+    } else {
+        let config = serde_json::json!({
+            "mcpServers": mcp_servers_to_claude_json(&mcp_servers)
+        });
+        std::fs::write(&mcp_config_path, serde_json::to_string_pretty(&config)?)?;
+        Some(mcp_config_path)
+    };
     std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
     Ok(ClaudeHookSettings {
         settings_path,
+        mcp_config_path,
         model,
         hook_file,
     })
@@ -1556,6 +1681,9 @@ fn create_codex_hook_home(
     run_id: &str,
     base_config: Option<&Path>,
     attach_hook: bool,
+    mcp_names: &[String],
+    mcp_profile: Option<&str>,
+    no_mcp: bool,
 ) -> Result<CodexHookHome> {
     let dir = default_starling_home()
         .join("run-homes")
@@ -1572,19 +1700,38 @@ fn create_codex_hook_home(
     if attach_hook {
         config = strip_legacy_codex_hooks_bool(&config);
     }
+    let needs_starling_exe = attach_hook || mcp_injection_requested(no_mcp);
+    let starling_exe = if needs_starling_exe {
+        Some(std::env::current_exe()?)
+    } else {
+        None
+    };
+    if mcp_injection_requested(no_mcp) {
+        let mcp_servers = selected_mcp_servers(
+            mcp_names,
+            mcp_profile,
+            no_mcp,
+            starling_exe.as_ref().expect("starling exe for mcp"),
+        )?;
+        config = upsert_codex_mcp_servers(&config, &mcp_servers)?;
+    }
     let hook_file = if attach_hook {
         let hook_dir = default_starling_home().join("run-hooks");
         std::fs::create_dir_all(&hook_dir)?;
         let hook_file = hook_dir.join(format!("{run_id}.jsonl"));
-        let starling_exe = std::env::current_exe()?;
         config = append_codex_hook_trust_state(
             &config,
             &dir.join("hooks.json"),
             run_id,
             &hook_file,
-            &starling_exe,
+            starling_exe.as_ref().expect("starling exe for hooks"),
         )?;
-        install_codex_runtime_hooks(&dir, run_id, &hook_file, &starling_exe)?;
+        install_codex_runtime_hooks(
+            &dir,
+            run_id,
+            &hook_file,
+            starling_exe.as_ref().expect("starling exe for hooks"),
+        )?;
         Some(hook_file)
     } else {
         None
@@ -1606,6 +1753,9 @@ fn create_codex_profile_launch(
     run_id: &str,
     base_config: Option<&Path>,
     attach_hook: bool,
+    mcp_names: &[String],
+    mcp_profile: Option<&str>,
+    no_mcp: bool,
 ) -> Result<CodexProfileLaunch> {
     let codex_home = default_codex_home();
     std::fs::create_dir_all(&codex_home)?;
@@ -1619,18 +1769,33 @@ fn create_codex_profile_launch(
     };
     config = normalize_codex_external_provider_auth(&config);
 
+    let needs_starling_exe = attach_hook || mcp_injection_requested(no_mcp);
+    let starling_exe = if needs_starling_exe {
+        Some(std::env::current_exe()?)
+    } else {
+        None
+    };
+    if mcp_injection_requested(no_mcp) {
+        let mcp_servers = selected_mcp_servers(
+            mcp_names,
+            mcp_profile,
+            no_mcp,
+            starling_exe.as_ref().expect("starling exe for mcp"),
+        )?;
+        config = upsert_codex_mcp_servers(&config, &mcp_servers)?;
+    }
+
     let hook_file = if attach_hook {
         config = strip_legacy_codex_hooks_bool(&config);
         let hook_dir = default_starling_home().join("run-hooks");
         std::fs::create_dir_all(&hook_dir)?;
         let hook_file = hook_dir.join(format!("{run_id}.jsonl"));
-        let starling_exe = std::env::current_exe()?;
         config = append_codex_profile_runtime_hooks(
             &config,
             &profile_path,
             run_id,
             &hook_file,
-            &starling_exe,
+            starling_exe.as_ref().expect("starling exe for hooks"),
         )?;
         Some(hook_file)
     } else {
@@ -1783,6 +1948,164 @@ fn normalize_codex_external_provider_auth(config: &str) -> String {
         toml::Value::Boolean(false),
     );
     toml::to_string_pretty(&value).unwrap_or_else(|_| config.to_string())
+}
+
+fn upsert_codex_mcp_servers(
+    config: &str,
+    servers: &BTreeMap<String, McpServerConfig>,
+) -> Result<String> {
+    if servers.is_empty() {
+        return Ok(config.to_string());
+    }
+    let parsed = if config.trim().is_empty() {
+        Ok(toml::Value::Table(toml::map::Map::new()))
+    } else {
+        config.parse::<toml::Value>()
+    };
+    let Ok(mut value) = parsed else {
+        return Ok(append_codex_mcp_server_blocks(config, servers));
+    };
+    let Some(root) = value.as_table_mut() else {
+        return Ok(append_codex_mcp_server_blocks(config, servers));
+    };
+    let mcp_servers = root
+        .entry("mcp_servers".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let Some(mcp_servers) = mcp_servers.as_table_mut() else {
+        return Ok(append_codex_mcp_server_blocks(config, servers));
+    };
+    for (name, server) in servers {
+        let table = codex_mcp_server_table(server);
+        mcp_servers.insert(name.clone(), toml::Value::Table(table));
+    }
+    toml::to_string_pretty(&value).map_err(Into::into)
+}
+
+fn codex_mcp_server_table(server: &McpServerConfig) -> toml::map::Map<String, toml::Value> {
+    let mut table = toml::map::Map::new();
+    match server.r#type.as_str() {
+        "http" => {
+            table.insert("type".to_string(), toml::Value::String("http".to_string()));
+            if let Some(url) = &server.url {
+                table.insert("url".to_string(), toml::Value::String(url.clone()));
+            }
+            if !server.headers.is_empty() {
+                table.insert(
+                    "headers".to_string(),
+                    toml::Value::Table(
+                        server
+                            .headers
+                            .iter()
+                            .map(|(key, value)| (key.clone(), toml::Value::String(value.clone())))
+                            .collect(),
+                    ),
+                );
+            }
+        }
+        _ => {
+            table.insert(
+                "command".to_string(),
+                toml::Value::String(server.command.clone().unwrap_or_default()),
+            );
+            table.insert(
+                "args".to_string(),
+                toml::Value::Array(
+                    server
+                        .args
+                        .iter()
+                        .cloned()
+                        .map(toml::Value::String)
+                        .collect(),
+                ),
+            );
+            if !server.env.is_empty() {
+                table.insert(
+                    "env".to_string(),
+                    toml::Value::Table(
+                        server
+                            .env
+                            .iter()
+                            .map(|(key, value)| (key.clone(), toml::Value::String(value.clone())))
+                            .collect(),
+                    ),
+                );
+            }
+        }
+    }
+    table
+}
+
+fn append_codex_mcp_server_blocks(
+    config: &str,
+    servers: &BTreeMap<String, McpServerConfig>,
+) -> String {
+    let mut rendered = config.trim_end().to_string();
+    if !rendered.is_empty() {
+        rendered.push_str("\n\n");
+    }
+    for (name, server) in servers {
+        rendered.push_str(&format!("[mcp_servers.{}]\n", toml_escape_basic_key(name)));
+        match server.r#type.as_str() {
+            "http" => {
+                rendered.push_str("type = \"http\"\n");
+                if let Some(url) = &server.url {
+                    rendered.push_str(&format!("url = \"{}\"\n", toml_escape_basic(url)));
+                }
+                if !server.headers.is_empty() {
+                    rendered.push_str(&format!(
+                        "[mcp_servers.{}.headers]\n",
+                        toml_escape_basic_key(name)
+                    ));
+                    for (key, value) in &server.headers {
+                        rendered.push_str(&format!(
+                            "{} = \"{}\"\n",
+                            toml_escape_basic_key(key),
+                            toml_escape_basic(value)
+                        ));
+                    }
+                }
+            }
+            _ => {
+                rendered.push_str(&format!(
+                    "command = \"{}\"\n",
+                    toml_escape_basic(server.command.as_deref().unwrap_or(""))
+                ));
+                let args = server
+                    .args
+                    .iter()
+                    .map(|arg| format!("\"{}\"", toml_escape_basic(arg)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                rendered.push_str(&format!("args = [{args}]\n"));
+                if !server.env.is_empty() {
+                    rendered.push_str(&format!(
+                        "[mcp_servers.{}.env]\n",
+                        toml_escape_basic_key(name)
+                    ));
+                    for (key, value) in &server.env {
+                        rendered.push_str(&format!(
+                            "{} = \"{}\"\n",
+                            toml_escape_basic_key(key),
+                            toml_escape_basic(value)
+                        ));
+                    }
+                }
+            }
+        }
+        rendered.push('\n');
+    }
+    rendered
+}
+
+fn toml_escape_basic_key(value: &str) -> String {
+    if value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+    {
+        value.to_string()
+    } else {
+        format!("\"{}\"", toml_escape_basic(value))
+    }
 }
 
 fn toml_escape_basic(value: &str) -> String {
@@ -2010,6 +2333,45 @@ fn install_claude_runtime_hooks(
             *entry = serde_json::json!([hook]);
         }
     }
+
+    root.entry("statusLine")
+        .or_insert_with(|| claude_runtime_status_line(&starling_exe, run_id, &hook_file));
+}
+
+fn mcp_servers_to_claude_json(servers: &BTreeMap<String, McpServerConfig>) -> Value {
+    let mut mcp_servers = serde_json::Map::new();
+    for (name, server) in servers {
+        mcp_servers.insert(name.clone(), claude_mcp_server_entry(server));
+    }
+    Value::Object(mcp_servers)
+}
+
+fn claude_mcp_server_entry(server: &McpServerConfig) -> Value {
+    match server.r#type.as_str() {
+        "http" => {
+            let mut entry = serde_json::json!({
+                "type": "http",
+                "url": server.url
+            });
+            if !server.headers.is_empty() {
+                entry["headers"] =
+                    serde_json::to_value(&server.headers).unwrap_or_else(|_| serde_json::json!({}));
+            }
+            entry
+        }
+        _ => {
+            let mut entry = serde_json::json!({
+                "type": "stdio",
+                "command": server.command,
+                "args": server.args
+            });
+            if !server.env.is_empty() {
+                entry["env"] =
+                    serde_json::to_value(&server.env).unwrap_or_else(|_| serde_json::json!({}));
+            }
+            entry
+        }
+    }
 }
 
 const CLAUDE_RUNTIME_HOOK_EVENTS: &[&str] = &[
@@ -2023,6 +2385,7 @@ const CLAUDE_RUNTIME_HOOK_EVENTS: &[&str] = &[
     "SessionEnd",
 ];
 const CLAUDE_USER_PROMPT_HOOK_ENV: &str = "STARLING_CLAUDE_USER_PROMPT_HOOK";
+const STARLING_MCP_INJECT_ENV: &str = "STARLING_MCP_INJECT";
 
 fn claude_runtime_hook_events(include_user_prompt: bool) -> Vec<&'static str> {
     let mut events = CLAUDE_RUNTIME_HOOK_EVENTS.to_vec();
@@ -2040,6 +2403,34 @@ fn claude_user_prompt_hook_enabled() -> bool {
         ),
         Err(_) => true,
     }
+}
+
+fn mcp_injection_requested(no_mcp: bool) -> bool {
+    !no_mcp && starling_mcp_injection_enabled()
+}
+
+fn starling_mcp_injection_enabled() -> bool {
+    match std::env::var(STARLING_MCP_INJECT_ENV) {
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
+}
+
+fn selected_mcp_servers(
+    mcp_names: &[String],
+    mcp_profile: Option<&str>,
+    no_mcp: bool,
+    starling_exe: &Path,
+) -> Result<BTreeMap<String, McpServerConfig>> {
+    effective_servers(
+        mcp_names,
+        mcp_profile,
+        !mcp_injection_requested(no_mcp),
+        starling_exe,
+    )
 }
 
 const CODEX_RUNTIME_HOOK_EVENTS: &[&str] = &[
@@ -2072,6 +2463,31 @@ fn claude_runtime_hook_command(starling_exe: &str, run_id: &str, hook_file: &str
         "hook".to_string(),
         "--provider".to_string(),
         "claude".to_string(),
+        "--run-id".to_string(),
+        shell_quote(run_id),
+        "--hook-file".to_string(),
+        shell_quote(hook_file),
+    ]
+    .join(" ")
+}
+
+fn claude_runtime_status_line(starling_exe: &str, run_id: &str, hook_file: &str) -> Value {
+    serde_json::json!({
+        "type": "command",
+        "command": claude_runtime_status_line_command(starling_exe, run_id, hook_file),
+        "padding": 0
+    })
+}
+
+fn claude_runtime_status_line_command(starling_exe: &str, run_id: &str, hook_file: &str) -> String {
+    [
+        shell_quote(starling_exe),
+        "top".to_string(),
+        "hook".to_string(),
+        "--provider".to_string(),
+        "claude".to_string(),
+        "--event".to_string(),
+        "StatusLine".to_string(),
         "--run-id".to_string(),
         shell_quote(run_id),
         "--hook-file".to_string(),
