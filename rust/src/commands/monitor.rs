@@ -1,6 +1,6 @@
 //! `starling top` — live monitor.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1373,6 +1373,23 @@ fn build_snapshot(
         })
         .collect();
     bookmarks.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let bookmark_meta: HashMap<String, (String, Option<String>)> = bookmarks
+        .iter()
+        .map(|b| {
+            let title = if b.title.trim().is_empty() {
+                b.first_prompt.clone()
+            } else {
+                b.title.clone()
+            };
+            let catalog = b
+                .space_ids
+                .iter()
+                .filter_map(|sid| spaces.iter().find(|s| &s.id == sid))
+                .map(|s| catalog_path(s, Some(&spaces)))
+                .next();
+            (canonical_session_id(&b.session_id), (title, catalog))
+        })
+        .collect();
     let mut pinned_rows: Vec<Row> = bookmarks
         .iter()
         .take(pinned_limit)
@@ -1421,20 +1438,28 @@ fn build_snapshot(
                 .iter()
                 .filter(|s| !pinned_ids.contains(&canonical_session_id(&s.session_id)))
                 .take(50)
-                .map(|s| Row {
-                    session_id: s.session_id.clone(),
-                    provider: s.provider.clone(),
-                    model: s.model.clone(),
-                    project: s.project_path.clone(),
-                    title: if s.first_prompt.is_empty() {
-                        "-".into()
-                    } else {
-                        s.first_prompt.clone()
-                    },
-                    pinned: false,
-                    catalog: None,
-                    file_path: Some(s.file_path.clone()),
-                    pid: None,
+                .map(|s| {
+                    let bookmark = bookmark_meta.get(&canonical_session_id(&s.session_id));
+                    Row {
+                        session_id: s.session_id.clone(),
+                        provider: s.provider.clone(),
+                        model: s.model.clone(),
+                        project: s.project_path.clone(),
+                        title: bookmark
+                            .map(|(title, _)| title.clone())
+                            .filter(|title| !title.trim().is_empty())
+                            .unwrap_or_else(|| {
+                                if s.first_prompt.is_empty() {
+                                    "-".into()
+                                } else {
+                                    s.first_prompt.clone()
+                                }
+                            }),
+                        pinned: false,
+                        catalog: bookmark.and_then(|(_, catalog)| catalog.clone()),
+                        file_path: Some(s.file_path.clone()),
+                        pid: None,
+                    }
                 })
                 .collect();
             rows.append(&mut recent);
