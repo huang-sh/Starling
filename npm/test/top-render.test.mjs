@@ -20,6 +20,10 @@ function row(overrides = {}) {
     tokens_cache: 0,
     last_tool: null,
     tool_count: 0,
+    last_skill: null,
+    skill_count: 0,
+    skill_usage: [],
+    skill_calls_tail: [],
     project_path: "/tmp/project",
     project: "project",
     last_activity_ms: 1_000,
@@ -58,7 +62,8 @@ test("renders top rows in running, stale, waiting, failure, aborted, idle, stopp
     recent: [],
   }, { width: 132, now: new Date(10_000) }));
 
-  assert.match(output, /Starling top 7 pinned .* 2 active/);
+  const firstLine = output.split("\n")[0] ?? "";
+  assert.match(firstLine, /^Starling top\s+\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s+7 pinned · 2 active$/);
   assert.match(output, /SID\s+S\s+AGT\s+MODEL\s+PID\s+CPU\s+MEM\s+CTX\s+TOK\s+AGE\s+TASK/);
   assert.ok(output.indexOf("cargo test") < output.indexOf("approve git remote"));
   assert.ok(output.indexOf("cargo test") < output.indexOf("last prompt still open"));
@@ -69,7 +74,7 @@ test("renders top rows in running, stale, waiting, failure, aborted, idle, stopp
   assert.ok(output.indexOf("idle task") < output.indexOf("stopped task"));
 });
 
-test("renders empty top snapshot with unpin hint", () => {
+test("renders empty top snapshot with startup hint", () => {
   const output = stripAnsi(renderTopSnapshot({
     pinned_total: 0,
     recent_total: 0,
@@ -79,7 +84,44 @@ test("renders empty top snapshot with unpin hint", () => {
   }, { width: 100, now: new Date(10_000) }));
 
   assert.match(output, /No agent sessions to display/);
-  assert.match(output, /--unpin/);
+  assert.match(output, /start or pin an agent session/);
+});
+
+test("labels mixed pinned and unpinned snapshots as sessions", () => {
+  const output = stripAnsi(renderTopSnapshot({
+    pinned_total: 1,
+    recent_total: 1,
+    active: 0,
+    pinned: [
+      row({ session_id: "pinned-0000-4000-8000-000000000000", pinned: true, title: "pinned task" }),
+    ],
+    recent: [
+      row({ session_id: "recent-0000-4000-8000-000000000000", pinned: false, title: "recent task" }),
+    ],
+  }, { width: 132, now: new Date(10_000) }));
+
+  assert.match(output, /Sessions \(2; 1 pinned, 1 unpinned\)/);
+  assert.doesNotMatch(output, /Pinned \(1\)/);
+});
+
+test("respects explicit row order from Rust sort mode", () => {
+  const output = stripAnsi(renderTopSnapshot({
+    pinned_total: 1,
+    recent_total: 1,
+    active: 1,
+    rows: [
+      row({ session_id: "idle-000000-4000-8000-000000000000", status: "idle", title: "idle first", last_activity_ms: 1_000 }),
+      row({ session_id: "running-00-4000-8000-000000000000", status: "running", title: "running second", last_activity_ms: 2_000 }),
+    ],
+    pinned: [
+      row({ session_id: "running-00-4000-8000-000000000000", status: "running", title: "running second", last_activity_ms: 2_000 }),
+    ],
+    recent: [
+      row({ session_id: "idle-000000-4000-8000-000000000000", status: "idle", title: "idle first", last_activity_ms: 1_000 }),
+    ],
+  }, { width: 132, now: new Date(10_000) }));
+
+  assert.ok(output.indexOf("idle first") < output.indexOf("running second"));
 });
 
 test("keeps pid visible and project column absent in default top table", () => {
@@ -106,4 +148,50 @@ test("keeps pid visible and project column absent in default top table", () => {
   assert.doesNotMatch(header, /\bPROJECT\b/);
   assert.match(output, /851731/);
   assert.match(output, /cd \/repo && git remote -v/);
+});
+
+test("renders skill usage beside last tool in task column", () => {
+  const output = stripAnsi(renderTopSnapshot({
+    pinned_total: 1,
+    recent_total: 0,
+    active: 1,
+    pinned: [
+      row({
+        session_id: "skill-0000-4000-8000-000000000000",
+        provider: "codex",
+        status: "idle",
+        last_tool: "exec_command",
+        tool_count: 16,
+        last_skill: "openai-docs",
+        skill_count: 2,
+      }),
+    ],
+    recent: [],
+  }, { width: 132, now: new Date(10_000) }));
+
+  assert.match(output, /skills 2/);
+  assert.match(output, /skills×2 · exec_command/);
+});
+
+test("renders a dedicated skill column on wide terminals", () => {
+  const output = stripAnsi(renderTopSnapshot({
+    pinned_total: 1,
+    recent_total: 0,
+    active: 1,
+    pinned: [
+      row({
+        session_id: "skill-0000-4000-8000-000000000000",
+        provider: "codex",
+        status: "idle",
+        last_tool: "exec_command",
+        tool_count: 16,
+        last_skill: "openai-docs",
+        skill_count: 2,
+      }),
+    ],
+    recent: [],
+  }, { width: 170, now: new Date(10_000) }));
+
+  assert.match(output, /SID\s+S\s+AGT\s+MODEL\s+PID\s+CPU\s+MEM\s+CTX\s+TOK\s+AGE\s+SKILLS\s+TASK/);
+  assert.match(output, /\s2\s+exec_command×16/);
 });

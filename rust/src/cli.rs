@@ -642,13 +642,25 @@ pub struct MonitorCommand {
     #[arg(short, long)]
     pub catalog_filter: Option<String>,
 
-    /// Max pinned sessions to display
+    /// Max sessions to display
     #[arg(short, long)]
     pub limit: Option<usize>,
 
-    /// Also show unpinned sessions
+    /// Filter by agent: claude | codex
+    #[arg(short, long, value_enum)]
+    pub agent: Option<MonitorAgent>,
+
+    /// Sort sessions by activity, recent, tokens, created, memory, cpu, ctx, skills, or tools
+    #[arg(long, value_enum, default_value_t = MonitorSort::Activity)]
+    pub sort: MonitorSort,
+
+    /// Legacy no-op for default top; with --catalog, also show unpinned recent sessions
     #[arg(long, visible_alias = "unpin", visible_alias = "unpinned")]
     pub recent: bool,
+
+    /// Only show pinned sessions
+    #[arg(long)]
+    pub pinned: bool,
 
     /// Live monitoring mode (re-render every 1s)
     #[arg(long)]
@@ -657,6 +669,44 @@ pub struct MonitorCommand {
     /// Output the current snapshot as JSON
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum MonitorAgent {
+    /// Claude Code sessions
+    Claude,
+    /// Codex sessions
+    Codex,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum MonitorSort {
+    /// Status activity first, then most recent activity
+    #[value(alias = "active", alias = "status")]
+    Activity,
+    /// Most recent activity time first
+    #[value(alias = "last-active", alias = "last-activity", alias = "time")]
+    Recent,
+    /// Highest total token usage first
+    #[value(alias = "token")]
+    Tokens,
+    /// Newest session start time first
+    #[value(alias = "start", alias = "started", alias = "created-at")]
+    Created,
+    /// Highest memory usage first
+    #[value(alias = "mem", alias = "rss")]
+    Memory,
+    /// Highest CPU usage first
+    Cpu,
+    /// Highest context percentage first
+    #[value(alias = "context")]
+    Ctx,
+    /// Highest skill-call count first
+    #[value(alias = "skill")]
+    Skills,
+    /// Highest tool-call count first
+    #[value(alias = "tool")]
+    Tools,
 }
 
 #[derive(Subcommand)]

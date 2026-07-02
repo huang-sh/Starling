@@ -601,8 +601,11 @@ fn tool_definitions(tool_set: McpToolSet) -> Vec<Value> {
             json!({
                 "type": "object",
                 "properties": {
-                    "recent": { "type": "boolean", "description": "Include unpinned recent sessions." },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 10000 },
+                    "pinned": { "type": "boolean", "description": "Only include pinned sessions." },
+                    "recent": { "type": "boolean", "description": "Legacy option to include unpinned recent sessions; default top already includes them unless pinned is true." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 10000, "description": "Maximum sessions to return after activity sorting." },
+                    "agent": { "type": "string", "enum": ["claude", "codex"], "description": "Only include sessions for this agent." },
+                    "sort": { "type": "string", "enum": ["activity", "recent", "tokens", "created", "memory", "cpu", "ctx", "skills", "tools"], "description": "Sort mode for sessions." },
                     "catalog": { "type": "string", "description": "Catalog name/path/id filter." }
                 }
             }),
@@ -814,8 +817,17 @@ fn tool_cli_args(name: &str, args: &Value) -> std::result::Result<Vec<String>, (
     match name {
         "starling_top" => {
             out.extend(["top".to_string(), "--json".to_string()]);
+            if bool_arg(args, "pinned") {
+                out.push("--pinned".to_string());
+            }
             if bool_arg(args, "recent") {
                 out.push("--recent".to_string());
+            }
+            if let Some(sort) = string_arg(args, "sort") {
+                out.extend(["--sort".to_string(), sort]);
+            }
+            if let Some(agent) = string_arg(args, "agent") {
+                out.extend(["--agent".to_string(), agent]);
             }
             if let Some(limit) = usize_arg(args, "limit") {
                 out.extend(["--limit".to_string(), limit.to_string()]);

@@ -104,3 +104,27 @@ test("fills numeric defaults and normalizes tool/chat tails", () => {
   });
   assert.deepEqual(item.chat_tail.map((chat) => chat.role), ["assistant", "user"]);
 });
+
+test("preserves explicit monitor rows order from current Rust snapshots", () => {
+  const snapshot = normalizeMonitorSnapshot({
+    pinned_total: 1,
+    recent_total: 1,
+    active: 0,
+    rows: [
+      row({ session_id: "recent-first", pinned: false }),
+      row({ session_id: "pinned-second", pinned: true }),
+    ],
+    pinned: [
+      row({ session_id: "pinned-second", pinned: true }),
+    ],
+    recent: [
+      row({ session_id: "recent-first", pinned: false }),
+    ],
+  });
+
+  assert.equal(snapshot.rows_ordered, true);
+  assert.deepEqual(monitorRows(snapshot).map((item) => item.session_id), [
+    "recent-first",
+    "pinned-second",
+  ]);
+});

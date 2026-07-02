@@ -19,6 +19,22 @@ export interface MonitorChatMessage {
   text: string;
 }
 
+export interface MonitorSkillUsage {
+  name: string;
+  path: string;
+  count: number;
+  explicit: number;
+  implicit: number;
+  last_used_ms: number;
+}
+
+export interface MonitorSkillCall {
+  name: string;
+  path: string;
+  kind: string;
+  timestamp_ms: number;
+}
+
 export interface MonitorRow {
   session_id: string;
   pinned: boolean;
@@ -37,6 +53,8 @@ export interface MonitorRow {
   tokens_cache: number;
   last_tool: string | null;
   tool_count: number;
+  last_skill: string | null;
+  skill_count: number;
   project_path: string;
   project: string;
   file_path?: string;
@@ -50,6 +68,8 @@ export interface MonitorRow {
   compaction_count: number;
   current_task: string;
   tool_calls_tail: MonitorToolCall[];
+  skill_usage: MonitorSkillUsage[];
+  skill_calls_tail: MonitorSkillCall[];
   chat_tail: MonitorChatMessage[];
 }
 
@@ -59,6 +79,8 @@ export interface MonitorSnapshot {
   pinned_total: number;
   recent_total: number;
   active: number;
+  rows?: MonitorRow[];
+  rows_ordered?: boolean;
   pinned: MonitorRow[];
   recent: MonitorRow[];
 }
@@ -74,6 +96,8 @@ export function normalizeMonitorSnapshot(raw: unknown): MonitorSnapshot {
       pinned_total: pinned.length,
       recent_total: recent.length,
       active: rows.filter((row) => isActiveLiveStatus(row.status)).length,
+      rows,
+      rows_ordered: false,
       pinned,
       recent,
     };
@@ -82,13 +106,16 @@ export function normalizeMonitorSnapshot(raw: unknown): MonitorSnapshot {
   const obj = isRecord(raw) ? raw : {};
   const pinned = Array.isArray(obj.pinned) ? obj.pinned.map(normalizeMonitorRow) : [];
   const recent = Array.isArray(obj.recent) ? obj.recent.map(normalizeMonitorRow) : [];
-  const rows = [...pinned, ...recent];
+  const rawRows = Array.isArray(obj.rows) ? obj.rows.map(normalizeMonitorRow) : null;
+  const rows = rawRows ?? [...pinned, ...recent];
   return {
     schema_version: toNumber(obj.schema_version, 1),
     generated_at_ms: toNumber(obj.generated_at_ms, Date.now()),
     pinned_total: toNumber(obj.pinned_total, pinned.length),
     recent_total: toNumber(obj.recent_total, recent.length),
     active: toNumber(obj.active, rows.filter((row) => isActiveLiveStatus(row.status)).length),
+    rows,
+    rows_ordered: Boolean(rawRows),
     pinned,
     recent,
   };
@@ -115,6 +142,8 @@ export function normalizeMonitorRow(raw: unknown): MonitorRow {
     tokens_cache: toNumber(row.tokens_cache, 0),
     last_tool: typeof row.last_tool === "string" && row.last_tool ? row.last_tool : null,
     tool_count: toNumber(row.tool_count, 0),
+    last_skill: typeof row.last_skill === "string" && row.last_skill ? row.last_skill : null,
+    skill_count: toNumber(row.skill_count, 0),
     project_path: String(row.project_path ?? row.project ?? ""),
     project: String(row.project ?? row.project_path ?? ""),
     file_path: typeof row.file_path === "string" ? row.file_path : undefined,
@@ -128,12 +157,14 @@ export function normalizeMonitorRow(raw: unknown): MonitorRow {
     compaction_count: toNumber(row.compaction_count, 0),
     current_task: String(row.current_task ?? ""),
     tool_calls_tail: Array.isArray(row.tool_calls_tail) ? row.tool_calls_tail.map(normalizeMonitorToolCall) : [],
+    skill_usage: Array.isArray(row.skill_usage) ? row.skill_usage.map(normalizeMonitorSkillUsage) : [],
+    skill_calls_tail: Array.isArray(row.skill_calls_tail) ? row.skill_calls_tail.map(normalizeMonitorSkillCall) : [],
     chat_tail: Array.isArray(row.chat_tail) ? row.chat_tail.map(normalizeMonitorChatMessage) : [],
   };
 }
 
 export function monitorRows(snapshot: MonitorSnapshot): MonitorRow[] {
-  return [...snapshot.pinned, ...snapshot.recent];
+  return snapshot.rows ?? [...snapshot.pinned, ...snapshot.recent];
 }
 
 export function isActiveLiveStatus(status: LiveStatus): boolean {
@@ -160,6 +191,28 @@ function normalizeMonitorToolCall(raw: unknown): MonitorToolCall {
     name: String(row.name ?? ""),
     arg: String(row.arg ?? ""),
     duration_ms: toNumber(row.duration_ms, 0),
+  };
+}
+
+function normalizeMonitorSkillUsage(raw: unknown): MonitorSkillUsage {
+  const row = isRecord(raw) ? raw : {};
+  return {
+    name: String(row.name ?? ""),
+    path: String(row.path ?? ""),
+    count: toNumber(row.count, 0),
+    explicit: toNumber(row.explicit, 0),
+    implicit: toNumber(row.implicit, 0),
+    last_used_ms: toNumber(row.last_used_ms, 0),
+  };
+}
+
+function normalizeMonitorSkillCall(raw: unknown): MonitorSkillCall {
+  const row = isRecord(raw) ? raw : {};
+  return {
+    name: String(row.name ?? ""),
+    path: String(row.path ?? ""),
+    kind: String(row.kind ?? ""),
+    timestamp_ms: toNumber(row.timestamp_ms, 0),
   };
 }
 

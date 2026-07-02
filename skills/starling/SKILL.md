@@ -135,15 +135,24 @@ starling project show /path/to/project --no-index
 
 ## Live Monitor
 
-Use `top` for current session state. It is the live monitor for pinned and active sessions; `run status` is only for launch/run records.
+Use `top` for current session state. It shows the top 20 active pinned and unpinned sessions by default; `run status` is only for launch/run records.
 
 ```bash
 starling top
 starling top --watch
-starling top --recent
+starling top --pinned
+starling top --limit 40
+starling top --agent codex
+starling top --agent claude --sort cpu
+starling top --sort tokens
+starling top --sort cpu
 starling top --catalog paper-review
 starling top --json
 ```
+
+Top supports `--agent claude` and `--agent codex`.
+
+Top sort modes are `activity` (default), `recent`, `tokens`, `created`, `memory`, `cpu`, `ctx`, `skills`, and `tools`.
 
 Treat `running`, `waiting`, `idle`, `aborted`, `failure`, and `stopped` as session state, not just process state.
 

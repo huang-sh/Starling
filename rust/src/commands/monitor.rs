@@ -10,7 +10,7 @@ use anyhow::{bail, Result};
 use colored::*;
 use serde_json::Value;
 
-use crate::cli::{MonitorCommand, TopAction, TopCommand};
+use crate::cli::{MonitorAgent, MonitorCommand, MonitorSort, TopAction, TopCommand};
 use crate::core::catalog_resolver::{catalog_path, resolve_catalog_reference};
 use crate::core::discovery::{canonical_session_id, match_session_id};
 use crate::core::osc_state::{
@@ -35,6 +35,7 @@ const LIVE_RUNNING_STALE_MS: u64 = 30 * 60 * 1000;
 const PENDING_TASK_STALE_MS: u64 = 30 * 60 * 1000;
 const RECENT_TRANSCRIPT_RUNNING_GRACE_MS: u64 = 20 * 1000;
 const ACTIVE_CPU_THRESHOLD: f64 = 0.1;
+const DEFAULT_TOP_LIMIT: usize = 20;
 pub fn handle(cmd: TopCommand) -> Result<()> {
     match cmd.action {
         Some(TopAction::Record {
@@ -69,14 +70,17 @@ pub fn handle(cmd: TopCommand) -> Result<()> {
 }
 
 fn render_monitor(cmd: MonitorCommand) -> Result<()> {
-    let catalog_filter = cmd.catalog_filter.or(cmd.catalog);
-    let limit = cmd.limit.unwrap_or(30);
+    let catalog_filter = cmd.catalog_filter.as_deref().or(cmd.catalog.as_deref());
+    let limit = cmd.limit.unwrap_or(DEFAULT_TOP_LIMIT);
+    let agent_filter = cmd.agent;
+    let sort = cmd.sort;
+    let include_unpinned = include_unpinned_sessions(&cmd, catalog_filter);
 
     if cmd.json && cmd.watch {
-        return watch_json(catalog_filter.as_deref(), cmd.recent, limit);
+        return watch_json(catalog_filter, include_unpinned, limit, agent_filter, sort);
     }
 
-    let rows = build_snapshot(catalog_filter.as_deref(), cmd.recent, limit)?;
+    let rows = build_snapshot(catalog_filter, include_unpinned, limit, agent_filter, sort)?;
     if cmd.json {
         let json = serde_json::to_string_pretty(&MonitorSnapshot::from_rows(&rows))?;
         let _ = write_stdout_line(&json)?;
@@ -84,20 +88,40 @@ fn render_monitor(cmd: MonitorCommand) -> Result<()> {
     }
 
     if cmd.watch {
-        return watch(catalog_filter.as_deref(), cmd.recent, limit);
+        return watch(catalog_filter, include_unpinned, limit, agent_filter, sort);
     }
 
     if rows.is_empty() {
         println!("{}", "No agent sessions to display.".yellow());
         println!(
             "{}",
-            "Tip: use --unpin to include unpinned sessions.".normal()
+            "Tip: start or pin an agent session, or remove filters.".normal()
         );
         return Ok(());
     }
 
     println!("{}", render_table(&rows));
     Ok(())
+}
+
+fn include_unpinned_sessions(cmd: &MonitorCommand, catalog_filter: Option<&str>) -> bool {
+    if cmd.pinned {
+        return false;
+    }
+    catalog_filter.is_none() || cmd.recent
+}
+
+fn monitor_agent_name(agent: MonitorAgent) -> &'static str {
+    match agent {
+        MonitorAgent::Claude => "claude",
+        MonitorAgent::Codex => "codex",
+    }
+}
+
+fn provider_matches_agent(provider: &str, agent_filter: Option<MonitorAgent>) -> bool {
+    agent_filter
+        .map(|agent| provider.eq_ignore_ascii_case(monitor_agent_name(agent)))
+        .unwrap_or(true)
 }
 
 fn record_runtime_state(
@@ -510,6 +534,8 @@ struct RowJson {
     tokens_cache: u64,
     last_tool: Option<String>,
     tool_count: u32,
+    last_skill: Option<String>,
+    skill_count: u32,
     project_path: String,
     project: String,
     file_path: Option<String>,
@@ -526,6 +552,8 @@ struct RowJson {
     compaction_count: u32,
     current_task: String,
     tool_calls_tail: Vec<crate::core::session_metrics::ToolCallEntry>,
+    skill_usage: Vec<crate::core::session_metrics::SkillUsageEntry>,
+    skill_calls_tail: Vec<crate::core::session_metrics::SkillCallEntry>,
     chat_tail: Vec<crate::core::session_metrics::ChatMessageEntry>,
 }
 
@@ -536,6 +564,7 @@ struct MonitorSnapshot {
     pinned_total: usize,
     recent_total: usize,
     active: usize,
+    rows: Vec<RowJson>,
     pinned: Vec<RowJson>,
     recent: Vec<RowJson>,
 }
@@ -600,6 +629,8 @@ impl From<&Row> for RowJson {
             tokens_cache: live.tokens.cache,
             last_tool: live.last_tool.clone(),
             tool_count: live.tool_count,
+            last_skill: live.last_skill.clone(),
+            skill_count: live.skill_count,
             project_path: r.project.clone(),
             project: r.project.clone(),
             file_path: r.file_path.clone(),
@@ -616,6 +647,8 @@ impl From<&Row> for RowJson {
             compaction_count: live.compaction_count,
             current_task: live.current_task.clone(),
             tool_calls_tail: live.tool_calls_tail.clone(),
+            skill_usage: live.skill_usage.clone(),
+            skill_calls_tail: live.skill_calls_tail.clone(),
             chat_tail: live.chat_tail.clone(),
         }
     }
@@ -626,13 +659,14 @@ impl MonitorSnapshot {
         let all: Vec<RowJson> = rows.iter().map(RowJson::from).collect();
         let active = all.iter().filter(|r| is_active_status(&r.status)).count();
         let pinned: Vec<RowJson> = all.iter().filter(|r| r.pinned).cloned().collect();
-        let recent: Vec<RowJson> = all.into_iter().filter(|r| !r.pinned).collect();
+        let recent: Vec<RowJson> = all.iter().filter(|r| !r.pinned).cloned().collect();
         MonitorSnapshot {
             schema_version: 1,
             generated_at_ms: now_ms(),
             pinned_total: pinned.len(),
             recent_total: recent.len(),
             active,
+            rows: all,
             pinned,
             recent,
         }
@@ -729,6 +763,16 @@ fn merge_latest_subagent_live(parent_path: &Path, live: &mut SessionLive) {
             .or_else(|| live.last_tool.clone());
     }
     live.tool_count = live.tool_count.saturating_add(sub_live.tool_count);
+    live.skill_count = live.skill_count.saturating_add(sub_live.skill_count);
+    if sub_live.last_skill.is_some() {
+        live.last_skill = sub_live.last_skill.clone();
+    }
+    if sub_active || live.skill_usage.is_empty() {
+        live.skill_usage = sub_live.skill_usage.clone();
+    }
+    if sub_active || live.skill_calls_tail.is_empty() {
+        live.skill_calls_tail = sub_live.skill_calls_tail.clone();
+    }
     if sub_active || live.tool_calls_tail.is_empty() {
         live.tool_calls_tail = sub_live.tool_calls_tail.clone();
     }
@@ -1102,14 +1146,123 @@ fn is_active_status(status: &str) -> bool {
     matches!(status, "waiting" | "running")
 }
 
+fn status_sort_rank(status: &str) -> u8 {
+    match status {
+        "running" => 0,
+        "stale_running" => 1,
+        "waiting" => 2,
+        "failure" => 3,
+        "aborted" => 4,
+        "idle" => 5,
+        "stopped" => 6,
+        "unknown" => 7,
+        _ => 8,
+    }
+}
+
+struct RowSortInfo {
+    status_rank: u8,
+    activity_ms: u64,
+    started_at_ms: u64,
+    tokens: u64,
+    mem_kb: u64,
+    cpu_pct: f64,
+    ctx_pct: i64,
+    skill_count: u32,
+    tool_count: u32,
+}
+
+fn row_sort_info(row: &Row, now_ms: u64) -> RowSortInfo {
+    let live = live_for(&row.file_path);
+    let (cpu, mem_kb, process_count, background_task_count) = process_for(row.pid);
+    let osc = recent_osc_state(&row.session_id, row.pid, now_ms);
+    let effective_hook = effective_hook_state(osc.as_ref());
+    let context_state = recent_context_state(&row.session_id, row.pid, now_ms);
+    let inferred = infer_status_with_runtime(
+        row.pid.is_some(),
+        &live,
+        &row.title,
+        &row.provider,
+        effective_hook,
+        now_ms,
+        process_count,
+        cpu,
+        background_task_count,
+    );
+    let activity_ms = live
+        .last_activity_ms
+        .max(live.activity_since_ms)
+        .max(effective_hook.map(|state| state.updated_at_ms).unwrap_or(0));
+    RowSortInfo {
+        status_rank: status_sort_rank(&inferred.status),
+        activity_ms,
+        started_at_ms: live.started_at_ms,
+        tokens: live
+            .tokens
+            .input
+            .saturating_add(live.tokens.output)
+            .saturating_add(live.tokens.cache),
+        mem_kb,
+        cpu_pct: cpu,
+        ctx_pct: effective_context_pct(&live, context_state.as_ref()),
+        skill_count: live.skill_count,
+        tool_count: live.tool_count,
+    }
+}
+
+fn sort_and_truncate_rows(rows: &mut Vec<Row>, limit: usize, sort: MonitorSort) {
+    if limit == 0 {
+        rows.clear();
+        return;
+    }
+    let now = now_ms();
+    let mut keyed: Vec<(RowSortInfo, Row)> = rows
+        .drain(..)
+        .map(|row| (row_sort_info(&row, now), row))
+        .collect();
+    keyed.sort_by(|(a_info, a_row), (b_info, b_row)| {
+        compare_rows(sort, a_info, a_row, b_info, b_row)
+    });
+    rows.extend(keyed.into_iter().take(limit).map(|(_, row)| row));
+}
+
+fn compare_rows(
+    sort: MonitorSort,
+    a: &RowSortInfo,
+    a_row: &Row,
+    b: &RowSortInfo,
+    b_row: &Row,
+) -> std::cmp::Ordering {
+    let primary = match sort {
+        MonitorSort::Activity => a
+            .status_rank
+            .cmp(&b.status_rank)
+            .then_with(|| b.activity_ms.cmp(&a.activity_ms)),
+        MonitorSort::Recent => b.activity_ms.cmp(&a.activity_ms),
+        MonitorSort::Tokens => b.tokens.cmp(&a.tokens),
+        MonitorSort::Created => b.started_at_ms.cmp(&a.started_at_ms),
+        MonitorSort::Memory => b.mem_kb.cmp(&a.mem_kb),
+        MonitorSort::Cpu => b.cpu_pct.total_cmp(&a.cpu_pct),
+        MonitorSort::Ctx => b.ctx_pct.max(0).cmp(&a.ctx_pct.max(0)),
+        MonitorSort::Skills => b.skill_count.cmp(&a.skill_count),
+        MonitorSort::Tools => b.tool_count.cmp(&a.tool_count),
+    };
+    primary
+        .then_with(|| a.status_rank.cmp(&b.status_rank))
+        .then_with(|| b.activity_ms.cmp(&a.activity_ms))
+        .then_with(|| b_row.pinned.cmp(&a_row.pinned))
+        .then_with(|| a_row.session_id.cmp(&b_row.session_id))
+}
+
 fn render_table(rows: &[Row]) -> String {
     let width = terminal_width().max(72);
     let mut lines = Vec::new();
-    lines.push(format!(
-        "{} {}",
-        "starling top".cyan().bold(),
-        render_summary(rows).normal()
-    ));
+    let title = "starling top".cyan().bold().to_string();
+    let summary = render_summary(rows);
+    let gap = width
+        .saturating_sub("starling top".len() + summary.len())
+        .max(1);
+    lines.push(format!("{}{}{}", title, " ".repeat(gap), summary.normal()));
     lines.push(format!("{}", "─".repeat(width.min(110)).bright_black()));
 
     for row in rows {
@@ -1216,8 +1369,14 @@ fn render_metrics(
     if live.tool_count > 0 {
         parts.push(format!("tools {}", live.tool_count));
     }
+    if live.skill_count > 0 {
+        parts.push(format!("skills {}", live.skill_count));
+    }
     if let Some(last_tool) = live.last_tool.as_deref().filter(|s| !s.is_empty()) {
         parts.push(format!("last {last_tool}"));
+    }
+    if let Some(last_skill) = live.last_skill.as_deref().filter(|s| !s.is_empty()) {
+        parts.push(format!("skill {last_skill}"));
     }
     if let Some(pid) = row.pid {
         parts.push(format!("pid {pid}"));
@@ -1329,8 +1488,10 @@ fn style_status(status: &str) -> ColoredString {
 /// detection to attach pid + live metrics where available.
 fn build_snapshot(
     catalog_filter: Option<&str>,
-    include_recent: bool,
-    pinned_limit: usize,
+    include_unpinned: bool,
+    session_limit: usize,
+    agent_filter: Option<MonitorAgent>,
+    sort: MonitorSort,
 ) -> Result<Vec<Row>> {
     reconcile_stale_runs();
     let _ = prune_stale_osc_state(now_ms());
@@ -1392,7 +1553,6 @@ fn build_snapshot(
         .collect();
     let mut pinned_rows: Vec<Row> = bookmarks
         .iter()
-        .take(pinned_limit)
         .map(|b| {
             let catalog = b
                 .space_ids
@@ -1423,11 +1583,12 @@ fn build_snapshot(
         .unwrap_or_default();
 
     enrich_rows_from_index(&mut pinned_rows, &indexed_sessions);
+    pinned_rows.retain(|row| provider_matches_agent(&row.provider, agent_filter));
     dedupe_rows_by_session_id(&mut pinned_rows);
 
     // 2) Recent unpinned sessions (from index, newest first)
     let mut rows: Vec<Row> = pinned_rows;
-    if include_recent {
+    if include_unpinned {
         if let Some(idx) = load_session_index() {
             let pinned_ids: std::collections::HashSet<String> = rows
                 .iter()
@@ -1436,8 +1597,9 @@ fn build_snapshot(
             let mut recent: Vec<Row> = idx
                 .sessions
                 .iter()
+                .filter(|s| provider_matches_agent(&s.provider, agent_filter))
                 .filter(|s| !pinned_ids.contains(&canonical_session_id(&s.session_id)))
-                .take(50)
+                .take(session_limit.max(50))
                 .map(|s| {
                     let bookmark = bookmark_meta.get(&canonical_session_id(&s.session_id));
                     Row {
@@ -1487,9 +1649,9 @@ fn build_snapshot(
         }
     }
 
-    if include_recent {
+    if include_unpinned {
         // Include running sessions that are not pinned and not in the recent
-        // slice only when unpinned sessions were explicitly requested.
+        // slice only when unpinned sessions are in scope.
         let mut seen: HashSet<String> = rows
             .iter()
             .map(|r| canonical_session_id(&r.session_id))
@@ -1497,6 +1659,9 @@ fn build_snapshot(
         for (sid, info) in detected {
             let sid_key = canonical_session_id(&sid);
             if seen.contains(&sid_key) {
+                continue;
+            }
+            if !provider_matches_agent(&info.provider, agent_filter) {
                 continue;
             }
             seen.insert(sid_key);
@@ -1513,6 +1678,8 @@ fn build_snapshot(
             });
         }
     }
+
+    sort_and_truncate_rows(&mut rows, session_limit, sort);
 
     Ok(rows)
 }
@@ -1566,8 +1733,10 @@ fn dedupe_rows_by_session_id(rows: &mut Vec<Row>) {
 
 fn watch_json(
     catalog_filter: Option<&str>,
-    include_recent: bool,
+    include_unpinned: bool,
     pinned_limit: usize,
+    agent_filter: Option<MonitorAgent>,
+    sort: MonitorSort,
 ) -> Result<()> {
     let interval_ms: u64 = WATCH_INTERVAL_MS;
     install_ctrlc_handler();
@@ -1575,7 +1744,13 @@ fn watch_json(
 
     while !ctrlc_flag() {
         clear_session_metrics_cache();
-        let rows = build_snapshot(catalog_filter, include_recent, pinned_limit)?;
+        let rows = build_snapshot(
+            catalog_filter,
+            include_unpinned,
+            pinned_limit,
+            agent_filter,
+            sort,
+        )?;
         let json = serde_json::to_string(&MonitorSnapshot::from_rows(&rows))?;
         if !write_stdout_line(&json)? {
             break;
@@ -1601,14 +1776,26 @@ fn write_stdout_line(line: &str) -> Result<bool> {
     }
 }
 
-fn watch(catalog_filter: Option<&str>, include_recent: bool, pinned_limit: usize) -> Result<()> {
+fn watch(
+    catalog_filter: Option<&str>,
+    include_unpinned: bool,
+    pinned_limit: usize,
+    agent_filter: Option<MonitorAgent>,
+    sort: MonitorSort,
+) -> Result<()> {
     let interval_ms: u64 = WATCH_INTERVAL_MS;
     install_ctrlc_handler();
     reset_cpu_sampler();
 
     while !ctrlc_flag() {
         clear_session_metrics_cache();
-        let rows = match build_snapshot(catalog_filter, include_recent, pinned_limit) {
+        let rows = match build_snapshot(
+            catalog_filter,
+            include_unpinned,
+            pinned_limit,
+            agent_filter,
+            sort,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("{}: snapshot error: {}", "error".red(), e);

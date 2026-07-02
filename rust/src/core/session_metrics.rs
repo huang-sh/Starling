@@ -23,6 +23,8 @@ const TAIL_BYTES: u64 = 65_536;
 const MAX_LINES: usize = 100_000;
 const MAX_TOKEN_HISTORY: usize = 32;
 const MAX_TOOL_TAIL: usize = 12;
+const MAX_SKILL_USAGE: usize = 16;
+const MAX_SKILL_TAIL: usize = 16;
 const MAX_CHAT_TAIL: usize = 6;
 const MAX_TOOL_ARG_LEN: usize = 60;
 const MAX_CHAT_TEXT_LEN: usize = 200;
@@ -56,6 +58,24 @@ pub struct ChatMessageEntry {
     pub text: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillUsageEntry {
+    pub name: String,
+    pub path: String,
+    pub count: u32,
+    pub explicit: u32,
+    pub implicit: u32,
+    pub last_used_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillCallEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: String,
+    pub timestamp_ms: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SessionLive {
     pub model: String,
@@ -64,6 +84,8 @@ pub struct SessionLive {
     pub ctx_pct: i64,
     pub last_tool: Option<String>,
     pub tool_count: u32,
+    pub last_skill: Option<String>,
+    pub skill_count: u32,
     pub last_activity_ms: u64,
     pub truncated: bool,
     pub started_at_ms: u64,
@@ -77,6 +99,8 @@ pub struct SessionLive {
     pub compaction_count: u32,
     pub current_task: String,
     pub tool_calls_tail: Vec<ToolCallEntry>,
+    pub skill_usage: Vec<SkillUsageEntry>,
+    pub skill_calls_tail: Vec<SkillCallEntry>,
     pub chat_tail: Vec<ChatMessageEntry>,
 }
 
@@ -358,6 +382,301 @@ struct ContentBlocks {
     tool_use: Vec<(Option<String>, String, Value)>,
 }
 
+#[derive(Debug, Clone)]
+struct SkillEvent {
+    name: String,
+    path: String,
+    kind: String,
+    timestamp_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct SkillUsageAccumulator {
+    name: String,
+    path: String,
+    count: u32,
+    explicit: u32,
+    implicit: u32,
+    last_used_ms: u64,
+}
+
+fn normalize_skill_event_kind(kind: &str) -> &str {
+    match kind {
+        "explicit" => "explicit",
+        "implicit" => "implicit",
+        _ => "implicit",
+    }
+}
+
+fn record_skill_event(
+    event: SkillEvent,
+    skill_usage: &mut HashMap<String, SkillUsageAccumulator>,
+    skill_calls_tail: &mut Vec<SkillCallEntry>,
+    last_skill: &mut Option<String>,
+    skill_count: &mut u32,
+) {
+    if event.name.trim().is_empty() {
+        return;
+    }
+    let kind = normalize_skill_event_kind(&event.kind).to_string();
+    let key = if event.path.is_empty() {
+        event.name.clone()
+    } else {
+        format!("{}|{}", event.name, event.path)
+    };
+    let entry = skill_usage
+        .entry(key)
+        .or_insert_with(|| SkillUsageAccumulator {
+            name: event.name.clone(),
+            path: event.path.clone(),
+            count: 0,
+            explicit: 0,
+            implicit: 0,
+            last_used_ms: 0,
+        });
+    entry.count = entry.count.saturating_add(1);
+    if kind == "explicit" {
+        entry.explicit = entry.explicit.saturating_add(1);
+    } else {
+        entry.implicit = entry.implicit.saturating_add(1);
+    }
+    if event.timestamp_ms >= entry.last_used_ms {
+        entry.last_used_ms = event.timestamp_ms;
+    }
+    *skill_count = skill_count.saturating_add(1);
+    *last_skill = Some(event.name.clone());
+    skill_calls_tail.push(SkillCallEntry {
+        name: event.name,
+        path: event.path,
+        kind,
+        timestamp_ms: event.timestamp_ms,
+    });
+    if skill_calls_tail.len() > MAX_SKILL_TAIL {
+        skill_calls_tail.remove(0);
+    }
+}
+
+fn extract_tag_value(body: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = body.find(&open)? + open.len();
+    let end = body[start..].find(&close)? + start;
+    let value = body[start..end].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn skill_name_from_path(path: &str) -> Option<String> {
+    let normalized = path
+        .trim()
+        .trim_matches(['"', '\'', '`'])
+        .replace('\\', "/");
+    let before_skill = normalized.strip_suffix("/SKILL.md").or_else(|| {
+        if normalized == "SKILL.md" {
+            Some("")
+        } else {
+            None
+        }
+    })?;
+    let name = before_skill
+        .rsplit('/')
+        .find(|part| !part.is_empty() && *part != "." && *part != "..")?;
+    Some(name.to_string())
+}
+
+fn extract_skill_blocks_from_text(text: &str, timestamp_ms: u64) -> Vec<SkillEvent> {
+    let mut events = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(relative_start) = text[search_from..].find("<skill>") {
+        let start = search_from + relative_start + "<skill>".len();
+        let Some(relative_end) = text[start..].find("</skill>") else {
+            break;
+        };
+        let end = start + relative_end;
+        let body = &text[start..end];
+        let path = extract_tag_value(body, "path").unwrap_or_default();
+        let name = extract_tag_value(body, "name")
+            .or_else(|| skill_name_from_path(&path))
+            .unwrap_or_default();
+        if !name.is_empty() {
+            events.push(SkillEvent {
+                name,
+                path,
+                kind: "explicit".to_string(),
+                timestamp_ms,
+            });
+        }
+        search_from = end + "</skill>".len();
+    }
+    events
+}
+
+fn push_content_texts_from_value(value: &Value, texts: &mut Vec<String>) {
+    match value {
+        Value::String(s) => texts.push(s.clone()),
+        Value::Array(arr) => {
+            for part in arr {
+                let Some(obj) = part.as_object() else {
+                    continue;
+                };
+                if let Some(s) = obj
+                    .get("text")
+                    .or_else(|| obj.get("content"))
+                    .and_then(|v| v.as_str())
+                {
+                    texts.push(s.to_string());
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_text_fragments(entry: &JsonlEntry) -> Vec<String> {
+    let mut texts = Vec::new();
+    let Some(obj) = entry.value().as_object() else {
+        return texts;
+    };
+    if let Some(content) = obj
+        .get("message")
+        .and_then(|v| v.as_object())
+        .and_then(|message| message.get("content"))
+    {
+        push_content_texts_from_value(content, &mut texts);
+    }
+    if let Some(content) = obj
+        .get("payload")
+        .and_then(|v| v.as_object())
+        .and_then(|payload| payload.get("content"))
+    {
+        push_content_texts_from_value(content, &mut texts);
+    }
+    texts
+}
+
+fn clean_skill_path_token(token: &str) -> String {
+    token
+        .trim()
+        .trim_matches(|ch: char| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '"' | '\'' | '`' | ')' | '(' | ']' | '[' | '}' | '{' | ',' | ';' | ':'
+                )
+        })
+        .to_string()
+}
+
+fn extract_skill_paths_from_text(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(relative_idx) = text[search_from..].find("SKILL.md") {
+        let idx = search_from + relative_idx;
+        let bytes = text.as_bytes();
+        let mut start = idx;
+        while start > 0 {
+            let ch = bytes[start - 1] as char;
+            if ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | '(' | '[' | '{' | '<') {
+                break;
+            }
+            start -= 1;
+        }
+        let mut end = idx + "SKILL.md".len();
+        while end < text.len() {
+            let ch = bytes[end] as char;
+            if ch.is_whitespace()
+                || matches!(ch, '"' | '\'' | '`' | ')' | ']' | '}' | '>' | ',' | ';')
+            {
+                break;
+            }
+            end += 1;
+        }
+        let path = clean_skill_path_token(&text[start..end]);
+        if path.ends_with("SKILL.md") {
+            paths.push(path);
+        }
+        search_from = idx + "SKILL.md".len();
+    }
+    paths
+}
+
+fn extract_skill_events_from_tool_use(
+    name: &str,
+    input: &Value,
+    timestamp_ms: u64,
+) -> Vec<SkillEvent> {
+    let mut candidates = Vec::new();
+    let low = name.to_ascii_lowercase();
+    if matches!(low.as_str(), "bash" | "exec_command" | "shell_command") {
+        if let Some(cmd) = input
+            .get("command")
+            .or_else(|| input.get("cmd"))
+            .and_then(|v| v.as_str())
+        {
+            candidates.extend(extract_skill_paths_from_text(cmd));
+        }
+    }
+    if let Some(path) = input
+        .get("file_path")
+        .or_else(|| input.get("path"))
+        .and_then(|v| v.as_str())
+    {
+        candidates.extend(extract_skill_paths_from_text(path));
+    }
+    candidates
+        .into_iter()
+        .filter_map(|path| {
+            let skill_name = skill_name_from_path(&path)?;
+            Some(SkillEvent {
+                name: skill_name,
+                path,
+                kind: "implicit".to_string(),
+                timestamp_ms,
+            })
+        })
+        .collect()
+}
+
+fn extract_skill_invocation_event(entry: &JsonlEntry, timestamp_ms: u64) -> Option<SkillEvent> {
+    let obj = entry.value().as_object()?;
+    let event_type = obj
+        .get("event_type")
+        .or_else(|| obj.get("type"))
+        .and_then(|v| v.as_str());
+    let payload = obj.get("payload").and_then(|v| v.as_object());
+    let payload_event_type = payload
+        .and_then(|p| p.get("event_type").or_else(|| p.get("type")))
+        .and_then(|v| v.as_str());
+    if event_type != Some("skill_invocation") && payload_event_type != Some("skill_invocation") {
+        return None;
+    }
+    let source = payload.unwrap_or(obj);
+    let params = source
+        .get("event_params")
+        .and_then(|v| v.as_object())
+        .or_else(|| source.get("params").and_then(|v| v.as_object()));
+    let name = source
+        .get("skill_name")
+        .or_else(|| source.get("skill"))
+        .and_then(|v| v.as_str())?
+        .trim()
+        .to_string();
+    let kind = params
+        .and_then(|p| p.get("invoke_type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("explicit")
+        .to_ascii_lowercase();
+    Some(SkillEvent {
+        name,
+        path: String::new(),
+        kind,
+        timestamp_ms,
+    })
+}
+
 fn extract_content_blocks(entry: &JsonlEntry) -> ContentBlocks {
     let mut out = ContentBlocks {
         text: vec![],
@@ -565,6 +884,8 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
     let mut last_usage: Option<AssistantUsage> = None;
     let mut last_tool: Option<String> = None;
     let mut tool_count: u32 = 0;
+    let mut last_skill: Option<String> = None;
+    let mut skill_count: u32 = 0;
     let mut started_at_ms: u64 = 0;
     let mut pending_since_ms: u64 = 0;
     let mut thinking_since_ms: u64 = 0;
@@ -577,6 +898,8 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
     let mut token_history: Vec<u64> = Vec::new();
     let mut context_history: Vec<u64> = Vec::new();
     let mut tool_calls_tail: Vec<ToolCallEntry> = Vec::new();
+    let mut skill_usage: HashMap<String, SkillUsageAccumulator> = HashMap::new();
+    let mut skill_calls_tail: Vec<SkillCallEntry> = Vec::new();
     let mut chat_tail: Vec<ChatMessageEntry> = Vec::new();
     let mut pending_tools: HashMap<String, PendingTool> = HashMap::new();
     let mut anonymous_tool_id: u64 = 0;
@@ -593,6 +916,27 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
         }
         if ts > latest_entry_ms {
             latest_entry_ms = ts;
+        }
+
+        if let Some(event) = extract_skill_invocation_event(entry, ts) {
+            record_skill_event(
+                event,
+                &mut skill_usage,
+                &mut skill_calls_tail,
+                &mut last_skill,
+                &mut skill_count,
+            );
+        }
+        for text in extract_text_fragments(entry) {
+            for event in extract_skill_blocks_from_text(&text, ts) {
+                record_skill_event(
+                    event,
+                    &mut skill_usage,
+                    &mut skill_calls_tail,
+                    &mut last_skill,
+                    &mut skill_count,
+                );
+            }
         }
 
         if let Some(usage) = extract_assistant_usage(entry) {
@@ -865,6 +1209,15 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
             last_tool = Some(last.1.clone());
             current_task = truncate(&extract_tool_use_arg(&last.1, &last.2), MAX_TOOL_ARG_LEN);
             for (id, name, input) in &tool_uses {
+                for event in extract_skill_events_from_tool_use(name, input, since_ms) {
+                    record_skill_event(
+                        event,
+                        &mut skill_usage,
+                        &mut skill_calls_tail,
+                        &mut last_skill,
+                        &mut skill_count,
+                    );
+                }
                 let arg = truncate(&extract_tool_use_arg(name, input), MAX_TOOL_ARG_LEN);
                 tool_calls_tail.push(ToolCallEntry {
                     name: name.clone(),
@@ -946,6 +1299,26 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
     } else {
         last_activity_ms
     };
+    let mut skill_usage_entries = skill_usage
+        .into_values()
+        .map(|entry| SkillUsageEntry {
+            name: entry.name,
+            path: entry.path,
+            count: entry.count,
+            explicit: entry.explicit,
+            implicit: entry.implicit,
+            last_used_ms: entry.last_used_ms,
+        })
+        .collect::<Vec<_>>();
+    skill_usage_entries.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| b.last_used_ms.cmp(&a.last_used_ms))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    if skill_usage_entries.len() > MAX_SKILL_USAGE {
+        skill_usage_entries.truncate(MAX_SKILL_USAGE);
+    }
 
     SessionLive {
         model,
@@ -953,6 +1326,8 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
         ctx_pct,
         last_tool,
         tool_count,
+        last_skill,
+        skill_count,
         last_activity_ms: effective_last_activity_ms,
         truncated,
         started_at_ms,
@@ -966,6 +1341,8 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
         compaction_count,
         current_task,
         tool_calls_tail,
+        skill_usage: skill_usage_entries,
+        skill_calls_tail,
         chat_tail,
     }
 }
@@ -1217,6 +1594,63 @@ mod tests {
         assert_eq!(live.pending_since_ms, 0);
         assert_eq!(live.current_task, "");
         assert_eq!(live.last_tool.as_deref(), Some("exec_command"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reduces_codex_explicit_skill_injection() {
+        clear_session_metrics_cache();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "starling-metrics-{}-codex-skill-explicit.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<skill>\n<name>openai-docs</name>\n<path>/home/me/.codex/skills/.system/openai-docs/SKILL.md</path>\nUse official docs.\n</skill>"}]}}"#,
+            ],
+        );
+        let live = get_session_live_metrics(&path);
+        assert_eq!(live.skill_count, 1);
+        assert_eq!(live.last_skill.as_deref(), Some("openai-docs"));
+        assert_eq!(live.skill_usage.len(), 1);
+        assert_eq!(live.skill_usage[0].name, "openai-docs");
+        assert_eq!(live.skill_usage[0].explicit, 1);
+        assert_eq!(live.skill_usage[0].implicit, 0);
+        assert_eq!(live.skill_calls_tail[0].kind, "explicit");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reduces_codex_implicit_skill_doc_read_from_exec_command() {
+        clear_session_metrics_cache();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "starling-metrics-{}-codex-skill-implicit.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_jsonl(
+            &path,
+            &[
+                r#"{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"sed -n '1,120p' /home/me/.codex/skills/starling/SKILL.md\"}"}}"#,
+            ],
+        );
+        let live = get_session_live_metrics(&path);
+        assert_eq!(live.tool_count, 1);
+        assert_eq!(live.skill_count, 1);
+        assert_eq!(live.last_skill.as_deref(), Some("starling"));
+        assert_eq!(live.skill_usage.len(), 1);
+        assert_eq!(live.skill_usage[0].name, "starling");
+        assert_eq!(live.skill_usage[0].explicit, 0);
+        assert_eq!(live.skill_usage[0].implicit, 1);
+        assert_eq!(live.skill_calls_tail[0].kind, "implicit");
         let _ = std::fs::remove_file(&path);
     }
 

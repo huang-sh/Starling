@@ -10,10 +10,10 @@
 
 Starling 用来启动、切换和组织 Claude Code 与 Codex 会话，支持模型配置、Catalog、项目视图、实时监控和 VS Code 集成。
 
-当前版本：**0.1.7**
+当前版本：**0.1.8**
 
 - npm：[`starling-ai`](https://www.npmjs.com/package/starling-ai)
-- GitHub Release：[`rust-v0.1.7`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.7)
+- GitHub Release：[`rust-v0.1.8`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.8)
 - VS Code 扩展：[`huangsh.starling-ai`](https://marketplace.visualstudio.com/items?itemName=huangsh.starling-ai)
 
 ## 功能
@@ -27,7 +27,7 @@ Starling 用来启动、切换和组织 Claude Code 与 Codex 会话，支持模
 - 在 `~/.starling/session-index.json` 维护本地索引，加速项目和 Catalog 视图。
 - 通过 `starling run` 启动 Claude Code 或 Codex，并把新会话自动归档到指定 Catalog。
 - 在 `~/.starling/settings` 下管理 Claude 和 Codex 的模型配置。
-- 通过类似 `top` 的终端视图监控 pinned sessions，区分 `running`、`waiting`、`idle`、`stopped` 状态。
+- 通过类似 `top` 的终端视图混合监控最活跃的 20 个 pinned 和 unpinned sessions，区分 `running`、`waiting`、`idle`、`stopped` 状态。
 - 使用 JSON 输出作为终端渲染和 VS Code 扩展共享的数据契约。
 - 配套 VS Code 扩展，提供 Catalog、Projects、Models 和 Monitor 视图。
 
@@ -54,7 +54,7 @@ Linux 和 macOS 下，npm 会安装一个小的 JavaScript 启动器，并自动
 相同的 native 压缩包和 sha256 文件也会附在 GitHub Release 中：
 
 ```text
-https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.7
+https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.8
 ```
 
 npm 安装时还会把 Starling skill 安装到：
@@ -92,12 +92,12 @@ starling session show <session-id>
 starling resume <session-id>
 ```
 
-监控 pinned sessions：
+监控实时 sessions：
 
 ```bash
 starling top
 starling top --watch
-starling top --recent
+starling top --pinned
 starling top --json
 ```
 
@@ -212,7 +212,7 @@ starling project ls --no-index
 
 ### Top
 
-`starling top` 是 Starling 的实时会话监控视图。默认显示 pinned sessions，并按会话状态排序：
+`starling top` 是 Starling 的实时会话监控视图。默认混合 pinned 和 unpinned sessions，并显示最活跃的前 20 个：
 
 1. `running`：Agent 正在处理任务。
 2. `waiting`：Agent 正在等待用户输入或权限确认。
@@ -222,11 +222,20 @@ starling project ls --no-index
 ```bash
 starling top
 starling top --watch
-starling top --recent
+starling top --pinned
+starling top --limit 40
+starling top --agent codex
+starling top --agent claude --sort cpu
+starling top --sort tokens
+starling top --sort cpu
 starling top --catalog paper-review
 starling top paper-review
 starling top --json
 ```
+
+Agent 过滤：`--agent claude` 或 `--agent codex`。
+
+排序模式：`activity`（默认）、`recent`、`tokens`、`created`、`memory`、`cpu`、`ctx`、`skills`、`tools`。
 
 默认终端视图由 npm CLI wrapper 渲染，数据来自 Rust core 输出的 JSON。`--json` 会返回原始 monitor snapshot，适合脚本、VS Code 扩展或其他前端使用。
 

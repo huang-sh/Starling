@@ -25,19 +25,19 @@ export function renderTopSnapshot(input: unknown, options: { width?: number; now
   const width = terminalWidth(options.width);
   const nowMs = options.now?.getTime() ?? Date.now();
   const lines: string[] = [];
-  const sortedRows = sortTopRows(rows);
+  const displayRows = snapshot.rows_ordered ? rows : sortTopRows(rows);
 
-  lines.push(renderDashboard(snapshot, rows, width, nowMs));
+  lines.push(renderDashboard(snapshot, displayRows, width, nowMs));
   lines.push("");
 
   if (rows.length === 0) {
     lines.push(ansi.yellow("No agent sessions to display."));
-    lines.push(ansi.dim("Tip: use --unpin to include unpinned sessions."));
+    lines.push(ansi.dim("Tip: start or pin an agent session, or remove filters."));
     return lines.join("\n");
   }
 
-  lines.push(renderPinnedTitle(sortedRows.length, snapshot.pinned_total));
-  lines.push(renderMonitorList(sortedRows, width, nowMs));
+  lines.push(renderMonitorTitle(displayRows.length, snapshot.pinned_total, snapshot.recent_total));
+  lines.push(renderMonitorList(displayRows, width, nowMs));
   return lines.join("\n");
 }
 
@@ -62,6 +62,7 @@ function renderDashboard(snapshot: MonitorSnapshot, rows: MonitorRow[], width: n
   const tokenIn = rows.reduce((sum, row) => sum + row.tokens_in, 0);
   const tokenOut = rows.reduce((sum, row) => sum + row.tokens_out, 0);
   const tokenCache = rows.reduce((sum, row) => sum + row.tokens_cache, 0);
+  const skillCount = rows.reduce((sum, row) => sum + row.skill_count, 0);
   const newest = rows.reduce((max, row) => Math.max(max, row.last_activity_ms), 0);
   const running = statusCounts.get("running") ?? 0;
   const stale = statusCounts.get("stale_running") ?? 0;
@@ -70,30 +71,36 @@ function renderDashboard(snapshot: MonitorSnapshot, rows: MonitorRow[], width: n
   const failure = statusCounts.get("failure") ?? 0;
   const idle = statusCounts.get("idle") ?? 0;
   const stopped = statusCounts.get("stopped") ?? 0;
-  const title = `${ansi.bold("Starling top")} ${ansi.gray(renderSummary(snapshot))}`;
+  const title = ansi.bold("Starling top");
   const clock = ansi.gray(formatClock(new Date(nowMs)));
-  const gap = Math.max(1, width - visible(title) - visible(clock));
+  const summary = ansi.gray(renderSummary(snapshot));
+  const right = `${clock}  ${summary}`;
+  const gap = Math.max(1, width - visible(title) - visible(right));
   const statusLine = statusChips(statusCounts);
   return [
-    `${title}${" ".repeat(gap)}${clock}`,
+    `${title}${" ".repeat(gap)}${right}`,
     meta([
       `tasks ${rows.length} total, ${snapshot.active} active, ${running} running, ${stale} stale, ${waiting} waiting, ${failure} failure, ${idle} idle, ${stopped} stopped`,
       aborted > 0 ? `${aborted} aborted` : false,
       `tokens ${compactNumber(tokenIn)}/${compactNumber(tokenOut)}/${compactNumber(tokenCache)}`,
       `last ${relativeTime(newest, nowMs) || "-"}`,
       statusLine || false,
+      skillCount > 0 ? `skills ${skillCount}` : false,
     ]),
   ].join("\n");
 }
 
-function renderPinnedTitle(shown: number, total: number): string {
-  if (shown < total) return ansi.bold(`Pinned (${shown} of ${total})`);
-  return ansi.bold(`Pinned (${total})`);
+function renderMonitorTitle(shown: number, pinnedTotal: number, recentTotal: number): string {
+  if (recentTotal > 0) {
+    return ansi.bold(`Sessions (${shown}; ${pinnedTotal} pinned, ${recentTotal} unpinned)`);
+  }
+  if (shown < pinnedTotal) return ansi.bold(`Pinned (${shown} of ${pinnedTotal})`);
+  return ansi.bold(`Pinned (${pinnedTotal})`);
 }
 
 function renderMonitorList(rows: MonitorRow[], width: number, nowMs: number): string {
-  const columns = topColumns(width);
-  const header = [
+  const columns = topColumns(width, rows.some((row) => row.skill_count > 0));
+  const header: Array<[string, number]> = [
     ["SID", columns.session],
     ["S", columns.status],
     ["AGT", columns.agent],
@@ -104,8 +111,9 @@ function renderMonitorList(rows: MonitorRow[], width: number, nowMs: number): st
     ["CTX", columns.ctx],
     ["TOK", columns.tokens],
     ["AGE", columns.age],
-    ["TASK", columns.task],
-  ] as const;
+  ];
+  if (columns.skill > 0) header.push(["SKILLS", columns.skill]);
+  header.push(["TASK", columns.task]);
   const lines = [
     ansi.inverse(header.map(([label, col]) => padVisible(ansi.bold(label), col)).join(" ")),
   ];
@@ -116,7 +124,7 @@ function renderMonitorList(rows: MonitorRow[], width: number, nowMs: number): st
 }
 
 function formatMonitorRow(row: MonitorRow, columns: TopColumns, nowMs: number, index: number): string {
-  const task = row.current_task.trim() || (row.last_tool ? `${row.last_tool}×${row.tool_count}` : row.title || "-");
+  const task = rowTask(row, columns.skill === 0);
   const cells = [
     padVisible(sessionCell(row), columns.session),
     padVisible(statusLetter(row.status), columns.status),
@@ -128,11 +136,31 @@ function formatMonitorRow(row: MonitorRow, columns: TopColumns, nowMs: number, i
     padVisible(ctxCell(row.ctx_pct, columns.ctx), columns.ctx),
     padVisible(tokenCell(row), columns.tokens),
     padVisible(relativeTime(row.last_activity_ms, nowMs) || "-", columns.age),
-    padVisible(taskCell(task, row), columns.task),
   ];
+  if (columns.skill > 0) cells.push(padVisible(skillCell(row), columns.skill));
+  cells.push(padVisible(taskCell(task, row), columns.task));
   const line = cells.join(" ");
   if (index % 2 === 1) return ansi.dim(line);
   return line;
+}
+
+function rowTask(row: MonitorRow, includeSkill: boolean): string {
+  const primary =
+    row.current_task.trim() ||
+    (row.last_tool ? `${row.last_tool}×${row.tool_count}` : "") ||
+    row.title ||
+    "";
+  const skill = includeSkill ? formatSkillSummary(row) : "";
+  if (primary && skill) return `${skill} · ${primary}`;
+  return primary || skill || "-";
+}
+
+function skillCell(row: MonitorRow): string {
+  return row.skill_count > 0 ? String(row.skill_count) : ansi.gray("-");
+}
+
+function formatSkillSummary(row: MonitorRow): string {
+  return row.skill_count > 0 ? `skills×${row.skill_count}` : "";
 }
 
 function shortSessionId(id: string): string {
@@ -199,17 +227,22 @@ interface TopColumns {
   ctx: number;
   tokens: number;
   age: number;
+  skill: number;
   task: number;
 }
 
-function topColumns(width: number): TopColumns {
+function topColumns(width: number, hasSkill: boolean): TopColumns {
+  const showSkill = hasSkill && width >= 136;
   const fixed = width >= 126
     ? { session: 14, status: 1, agent: 6, model: 13, pid: 7, cpu: 6, mem: 8, ctx: 12, tokens: 16, age: 8 }
     : width >= 104
       ? { session: 13, status: 1, agent: 5, model: 11, pid: 7, cpu: 6, mem: 7, ctx: 10, tokens: 13, age: 7 }
       : { session: 12, status: 1, agent: 6, model: 9, pid: 7, cpu: 7, mem: 6, ctx: 6, tokens: 11, age: 6 };
-  const used = Object.values(fixed).reduce((sum, col) => sum + col, 0) + Object.keys(fixed).length;
-  return { ...fixed, task: Math.max(12, width - used - 1) };
+  const skill = showSkill ? 6 : 0;
+  const fixedSum = Object.values(fixed).reduce((sum, col) => sum + col, 0) + skill;
+  const fixedColumns = Object.keys(fixed).length + (showSkill ? 1 : 0);
+  const used = fixedSum + fixedColumns;
+  return { ...fixed, skill, task: Math.max(12, width - used - 1) };
 }
 
 function padVisible(value: string, width: number): string {

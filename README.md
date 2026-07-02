@@ -10,10 +10,10 @@
 
 Launch, switch, and organize Claude Code and Codex sessions with model profiles, catalogs, project views, live monitoring, and VS Code integration.
 
-Current release: **0.1.7**
+Current release: **0.1.8**
 
 - npm: [`starling-ai`](https://www.npmjs.com/package/starling-ai)
-- GitHub Release: [`rust-v0.1.7`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.7)
+- GitHub Release: [`rust-v0.1.8`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.8)
 - VS Code extension: [`huangsh.starling-ai`](https://marketplace.visualstudio.com/items?itemName=huangsh.starling-ai)
 
 ## Features
@@ -27,7 +27,7 @@ Current release: **0.1.7**
 - Maintain a local session index at `~/.starling/session-index.json` for faster project and catalog views.
 - Launch Claude Code or Codex through `starling run` and automatically assign the created session to a catalog.
 - Manage Claude and Codex model profiles under `~/.starling/settings`.
-- Monitor pinned sessions with a top-style terminal view that separates `running`, `waiting`, `idle`, and `stopped` states.
+- Monitor the top 20 active pinned and unpinned sessions together with a top-style terminal view that separates `running`, `waiting`, `idle`, and `stopped` states.
 - Use JSON output as the stable data contract for terminal rendering and the VS Code extension.
 - Use the separate VS Code extension for Catalog, Projects, Models, and Monitor.
 
@@ -54,7 +54,7 @@ On Linux and macOS, npm installs the small JavaScript launcher plus the matching
 The same native archives and sha256 files are attached to the GitHub release:
 
 ```text
-https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.7
+https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.8
 ```
 
 The npm install step also installs the bundled Starling skill to:
@@ -92,12 +92,12 @@ Resume a session:
 starling resume <session-id>
 ```
 
-Monitor pinned sessions:
+Monitor live sessions:
 
 ```bash
 starling top
 starling top --watch
-starling top --recent
+starling top --pinned
 starling top --json
 ```
 
@@ -212,7 +212,7 @@ starling project ls --no-index
 
 ### Top
 
-`starling top` is the live session monitor. By default it shows pinned sessions and sorts them by session state:
+`starling top` is the live session monitor. By default it mixes pinned and unpinned sessions and shows the top 20 by activity:
 
 1. `running`: the agent is actively processing work.
 2. `waiting`: the agent is waiting for user input or approval.
@@ -222,11 +222,20 @@ starling project ls --no-index
 ```bash
 starling top
 starling top --watch
-starling top --recent
+starling top --pinned
+starling top --limit 40
+starling top --agent codex
+starling top --agent claude --sort cpu
+starling top --sort tokens
+starling top --sort cpu
 starling top --catalog paper-review
 starling top paper-review
 starling top --json
 ```
+
+Agent filters: `--agent claude` or `--agent codex`.
+
+Sort modes: `activity` (default), `recent`, `tokens`, `created`, `memory`, `cpu`, `ctx`, `skills`, and `tools`.
 
 The default terminal view is rendered by the npm CLI wrapper from JSON emitted by the Rust core. `--json` returns the raw monitor snapshot for scripts, the VS Code extension, or other frontends.
 
@@ -384,7 +393,7 @@ The Starling sidebar contains four views:
 - Catalog: hierarchical catalog tree, with sessions shown on request.
 - Projects: project directory tree with session counts.
 - Models: Claude and Codex model profile settings.
-- Monitor: pinned, active, and recent sessions with live status, context, token, CPU, memory, task, and PID details.
+- Monitor: pinned and unpinned sessions together with live status, context, token, CPU, memory, task, and PID details.
 
 The extension supports common right-click actions:
 
