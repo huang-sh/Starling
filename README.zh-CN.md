@@ -8,25 +8,25 @@
   <img src="assets/starling.png" alt="Starling logo" width="160">
 </p>
 
-Starling 用来启动、切换和组织 Claude Code 与 Codex 会话，支持模型配置、Catalog、项目视图、实时监控和 VS Code 集成。
+Starling 用来启动、切换和组织 Claude Code、Codex 与 Pi 会话，支持模型配置、Catalog、项目视图、实时监控和 VS Code 集成。
 
-当前版本：**0.1.8**
+当前版本：**0.1.9**
 
 - npm：[`starling-ai`](https://www.npmjs.com/package/starling-ai)
-- GitHub Release：[`rust-v0.1.8`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.8)
+- GitHub Release：[`rust-v0.1.9`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.9)
 - VS Code 扩展：[`huangsh.starling-ai`](https://marketplace.visualstudio.com/items?itemName=huangsh.starling-ai)
 
 ## 功能
 
-- 从本地 Claude Code 和 Codex 会话文件中发现历史会话。
+- 从本地 Claude Code、Codex 和 Pi 会话文件中发现历史会话。
 - 按 Catalog、项目目录或最近活动浏览会话。
 - 创建 `paper-review` 这类 Catalog，也支持按路径组织层级 Catalog。
 - 给会话添加标题、标签、笔记和 Catalog 归档信息。
-- 用一条命令恢复 Claude Code 或 Codex 会话。
+- 用一条命令恢复 Claude Code、Codex 或 Pi 会话。
 - 在会话文件提供信息时统计 token 使用量。
 - 在 `~/.starling/session-index.json` 维护本地索引，加速项目和 Catalog 视图。
-- 通过 `starling run` 启动 Claude Code 或 Codex，并把新会话自动归档到指定 Catalog。
-- 在 `~/.starling/settings` 下管理 Claude 和 Codex 的模型配置。
+- 通过 `starling run` 启动 Claude Code、Codex 或 Pi，并把新会话自动归档到指定 Catalog。
+- 在 `~/.starling/settings` 下管理 Claude、Codex 和 Pi 的模型配置。
 - 通过类似 `top` 的终端视图混合监控最活跃的 20 个 pinned 和 unpinned sessions，区分 `running`、`waiting`、`idle`、`stopped` 状态。
 - 使用 JSON 输出作为终端渲染和 VS Code 扩展共享的数据契约。
 - 配套 VS Code 扩展，提供 Catalog、Projects、Models 和 Monitor 视图。
@@ -54,7 +54,7 @@ Linux 和 macOS 下，npm 会安装一个小的 JavaScript 启动器，并自动
 相同的 native 压缩包和 sha256 文件也会附在 GitHub Release 中：
 
 ```text
-https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.8
+https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.9
 ```
 
 npm 安装时还会把 Starling skill 安装到：
@@ -62,6 +62,7 @@ npm 安装时还会把 Starling skill 安装到：
 ```text
 ~/.codex/skills/starling/SKILL.md
 ~/.claude/skills/starling/SKILL.md
+~/.pi/agent/skills/starling/SKILL.md
 ```
 
 如果安装时使用了 `--ignore-scripts` 禁用了 npm 生命周期脚本，可以手动安装 skill：
@@ -70,7 +71,7 @@ npm 安装时还会把 Starling skill 安装到：
 npm explore -g starling-ai -- npm run install:skill
 ```
 
-Starling 需要 Node.js 16 或更新版本。Claude Code 和 Codex 需要单独安装；Starling 负责发现、启动和恢复这些 Agent 的会话，但不内置 Agent 本身。
+Starling 需要 Node.js 16 或更新版本。Claude Code、Codex 和 Pi 需要单独安装；Starling 负责发现、启动和恢复这些 Agent 的会话，但不内置 Agent 本身。使用显式 `--session-id` 的 Pi 功能依赖 Pi 0.76 或更新版本。
 
 ## 快速开始
 
@@ -120,12 +121,23 @@ starling run -c paper-review codex
 starling run --setting ds -c paper-review claude
 ```
 
-Starling 自己的参数必须放在 Agent 名称之前。`-s` 是 `--setting` 的短别名，`-c` 是 `--catalog` 的短别名。`claude` 或 `codex` 后面的参数会原样传给对应 Agent：
+启动 Pi，并把新会话归档到 Catalog：
+
+```bash
+starling run -c paper-review pi
+```
+
+普通的 `starling run pi` 不会添加 session selector。Pi 按原生方式创建新 session ID，Starling runtime hook 会在启动后记录实际 ID。
+
+Starling 自己的参数必须放在 Agent 名称之前。`-s` 是 `--setting` 的短别名，`-c` 是 `--catalog` 的短别名。Agent 参数放在 `claude`、`codex` 或 `pi` 后面。Starling 可能额外注入 runtime hook，并把显式的已有 session selector 固定到已锁定的 transcript 路径：
 
 ```bash
 starling run --catalog paper-review codex exec "summarize this repo"
 starling run --catalog paper-review claude --dangerously-skip-permissions
+starling run --catalog paper-review pi --provider anthropic --model claude-sonnet-4-5
 ```
+
+Pi 没有内建的 MCP 配置契约，因此 Starling 的 `--mcp` 和 `--mcp-profile` 不支持 Pi；需要 MCP 集成时请使用 Pi extension。
 
 查看 Starling run 记录：
 
@@ -141,6 +153,7 @@ starling run status
 starling session ls
 starling session ls --all
 starling session ls --agent claude
+starling session ls --agent pi
 starling session ls --cataloged
 starling session ls --catalog paper-review
 starling session show <session-id>
@@ -152,6 +165,14 @@ starling session delete <session-id> --yes
 ```
 
 `starling ses` 是 `starling session` 的别名。
+
+恢复 Pi 会话时，Starling 使用 `pi --session <absolute-jsonl-path>`。Pi session ID 只在 cwd 内唯一；如果不同项目复用了同一 ID，Starling 会报告歧义而不会擅自选择项目，此时可把绝对 JSONL 路径直接传给 `starling resume`。Starling 查询自定义 Pi session ID 时仍区分大小写。
+
+`starling run pi --continue` 会在启动前解析并锁定当前项目最近的 transcript，再把启动目标固定为其绝对路径；如果项目尚无 transcript，Starling 会沿用 Pi“创建新会话”的语义，并预分配一个受锁的 session ID。Pi 的交互式 `--resume` 选择器无法在用户完成选择前锁定目标，因此受管的 `starling run pi --resume` 会明确拒绝；请改用 `starling resume <session-id-or-absolute-path>`。出于相同的互斥原因，受管 Pi 会话会阻止进程内的 `/new`、`/resume` 和 `/fork`；请先退出 Pi，再启动或恢复另一个受管会话。
+
+显式使用 `starling run pi --session <path>` 时，目标必须已是非空且有效的 Pi transcript（旧版 v1/v2 transcript 也可使用，Pi 可能在打开时迁移格式）。Pi 原生命令可以初始化不存在或零字节的显式路径，但这时启动前尚无 session ID 可供 Starling 加锁，因此受管启动会明确拒绝。需要安全创建新的受管会话时，请使用 `starling run pi --session-id <id>`；若必须指定确切路径，请先用 Pi 直接初始化一次，再交给 Starling 恢复。
+
+Linux 上，Pi 启动后会把进程命令行改为标题 `pi`。因此，对从 Starling 之外直接启动的 Pi，实时进程映射无法在启动稳定后可靠还原一次性的 `--session` 或 `--session-dir`。受管启动会携带明确的 hook/环境身份；若外部 Pi 的自定义根目录也必须被可靠监控，请用 `PI_CODING_AGENT_SESSION_DIR` 或 `settings.json` 做持久配置。
 
 也可以在 session 命名空间下管理 Catalog 归档：
 
@@ -195,6 +216,7 @@ starling catalog tag <catalog> tag1 tag2
 starling project ls
 starling project ls --all
 starling project ls --agent codex
+starling project ls --agent pi
 starling project show /path/to/project
 ```
 
@@ -226,6 +248,7 @@ starling top --pinned
 starling top --limit 40
 starling top --agent codex
 starling top --agent claude --sort cpu
+starling top --agent pi
 starling top --sort tokens
 starling top --sort cpu
 starling top --catalog paper-review
@@ -233,7 +256,7 @@ starling top paper-review
 starling top --json
 ```
 
-Agent 过滤：`--agent claude` 或 `--agent codex`。
+Agent 过滤：`--agent claude`、`--agent codex` 或 `--agent pi`。
 
 排序模式：`activity`（默认）、`recent`、`tokens`、`created`、`memory`、`cpu`、`ctx`、`skills`、`tools`。
 
@@ -246,6 +269,7 @@ Agent 过滤：`--agent claude` 或 `--agent codex`。
 ```bash
 starling run --setting glm-5.2 --catalog research/paper claude
 starling run --setting gpt-5.5 --catalog research/paper codex
+starling run --catalog research/paper pi
 starling run status
 starling run stop <run-id>
 ```
@@ -259,6 +283,7 @@ starling run stop <run-id>
 ```text
 ~/.starling/settings/claude
 ~/.starling/settings/codex
+~/.starling/settings/pi
 ```
 
 列出现有配置：
@@ -267,6 +292,7 @@ starling run stop <run-id>
 starling model ls
 starling model ls --agent claude
 starling model ls --agent codex
+starling model ls --agent pi
 ```
 
 创建 Claude 配置：
@@ -291,11 +317,28 @@ starling model add demo --agent codex \
 starling model delete demo --agent codex
 ```
 
+在 `~/.starling/settings/pi/research.json` 创建 Pi 配置：
+
+```json
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-5",
+  "thinking": "high"
+}
+```
+
+Pi 认证仍由 Pi 自己的认证/配置文件（例如 `~/.pi/agent/auth.json` 和 `~/.pi/agent/models.json`）或 provider 环境变量管理，不要把凭据写进 Starling Pi profile。
+
+```bash
+starling model delete research --agent pi
+```
+
 启动 Agent 时使用配置：
 
 ```bash
 starling run --setting demo --catalog paper-review codex
 starling run --setting ds --catalog paper-review claude
+starling run --setting research --catalog paper-review pi
 ```
 
 如果不传 `--setting`，Starling 会使用 Agent 自己的默认配置。
@@ -313,6 +356,8 @@ Starling 默认把自己的数据保存在 `~/.starling`：
       <profile>.json
     codex/
       <profile>.toml
+    pi/
+      <profile>.json
 ```
 
 可以通过 `STARLING_HOME` 临时指定 Starling 数据目录：
@@ -330,7 +375,7 @@ starling config show
 
 `STARLING_HOME` 的优先级最高，会覆盖保存的 CLI 设置。
 
-Starling 不会移动或重写 Claude Code 和 Codex 原始会话文件。它会从 Agent 自己的位置读取数据，例如 `~/.claude/projects` 和 `~/.codex/sessions`，并只把 Starling 元数据和模型配置保存在 Starling 数据目录下。
+Starling 不会移动或重写 Claude Code、Codex 和 Pi 的原始会话文件。它会从 Agent 自己的位置读取数据，例如 `~/.claude/projects`、`~/.codex/sessions` 和 `~/.pi/agent/sessions`，并只把 Starling 元数据和模型配置保存在 Starling 数据目录下。当启动 cwd 已知时，Starling 会遵循 Pi 的 `PI_CODING_AGENT_DIR`、`PI_CODING_AGENT_SESSION_DIR`、全局 `settings.json` 和项目级 `<cwd>/.pi/settings.json` 中的 `sessionDir` 设置。
 
 本地会话索引用来优化 CLI 和 VS Code 侧边栏的重复读取：
 
@@ -361,6 +406,8 @@ starling run status --json
 Claude profile 是 JSON 文件，Starling 会把它作为 settings 传给 Claude Code。
 
 Codex profile 使用 Codex 风格的 TOML。Starling 会把配置复制到临时 Codex profile 中运行，所以 `starling run --setting <name> codex` 不会覆盖用户默认的 `~/.codex/config.toml`。
+
+Pi profile 是包含 `provider`、`model` 和可选 `thinking` 字段的 JSON 文件。Starling 会在本次运行中把它们转换为 Pi 的 `--provider`、`--model` 和 `--thinking` 参数，不会覆盖 Pi 全局的 `~/.pi/agent/settings.json`。
 
 Codex profile 示例：
 
@@ -396,7 +443,7 @@ Starling 侧边栏包含四个视图：
 
 - Catalog：层级 Catalog 树，按需显示会话。
 - Projects：项目目录树和会话数量。
-- Models：Claude 和 Codex 模型配置。
+- Models：Claude、Codex 和 Pi 模型配置。
 - Monitor：pinned、active、recent sessions 的实时状态，包含 context、token、CPU、内存、任务和 PID 等信息。
 
 扩展支持常用右键操作：

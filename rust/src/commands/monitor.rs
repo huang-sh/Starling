@@ -12,14 +12,16 @@ use serde_json::Value;
 
 use crate::cli::{MonitorAgent, MonitorCommand, MonitorSort, TopAction, TopCommand};
 use crate::core::catalog_resolver::{catalog_path, resolve_catalog_reference};
-use crate::core::discovery::{canonical_session_id, match_session_id};
+use crate::core::discovery::{
+    canonical_session_id, match_session_id, session_scope_key, Provider as DiscoveryProvider,
+};
 use crate::core::osc_state::{
     clear_osc_state, normalize_status, prune_stale_osc_state, recent_context_state,
     recent_model_state, recent_osc_state, status_from_osc0_title, status_from_osc94_progress,
     status_from_osc_sequence, upsert_osc_state, OscSessionState,
 };
 use crate::core::process_metrics::{get_process_tree_metrics, reset_cpu_sampler};
-use crate::core::runs::{detect_running_sessions, reconcile_stale_runs};
+use crate::core::runs::{detect_running_sessions, reconcile_stale_runs, DetectedSession};
 use crate::core::session_display::short_session_id;
 use crate::core::session_index::load_session_index;
 use crate::core::session_metrics::{
@@ -115,6 +117,7 @@ fn monitor_agent_name(agent: MonitorAgent) -> &'static str {
     match agent {
         MonitorAgent::Claude => "claude",
         MonitorAgent::Codex => "codex",
+        MonitorAgent::Pi => "pi",
     }
 }
 
@@ -605,7 +608,7 @@ impl From<&Row> for RowJson {
         };
         RowJson {
             session_id: r.session_id.clone(),
-            canonical_session_id: canonical_session_id(&r.session_id),
+            canonical_session_id: canonical_session_id(&r.session_id, Some(&r.provider)),
             pinned: r.pinned,
             catalog: r.catalog.clone(),
             title: r.title.clone(),
@@ -1548,7 +1551,10 @@ fn build_snapshot(
                 .filter_map(|sid| spaces.iter().find(|s| &s.id == sid))
                 .map(|s| catalog_path(s, Some(&spaces)))
                 .next();
-            (canonical_session_id(&b.session_id), (title, catalog))
+            (
+                monitor_session_key(&b.provider, &b.session_id, &b.project_path, None),
+                (title, catalog),
+            )
         })
         .collect();
     let mut pinned_rows: Vec<Row> = bookmarks
@@ -1590,18 +1596,16 @@ fn build_snapshot(
     let mut rows: Vec<Row> = pinned_rows;
     if include_unpinned {
         if let Some(idx) = load_session_index() {
-            let pinned_ids: std::collections::HashSet<String> = rows
-                .iter()
-                .map(|r| canonical_session_id(&r.session_id))
-                .collect();
+            let pinned_ids: std::collections::HashSet<String> =
+                rows.iter().map(row_session_key).collect();
             let mut recent: Vec<Row> = idx
                 .sessions
                 .iter()
                 .filter(|s| provider_matches_agent(&s.provider, agent_filter))
-                .filter(|s| !pinned_ids.contains(&canonical_session_id(&s.session_id)))
+                .filter(|s| !pinned_ids.contains(&meta_session_key(s)))
                 .take(session_limit.max(50))
                 .map(|s| {
-                    let bookmark = bookmark_meta.get(&canonical_session_id(&s.session_id));
+                    let bookmark = bookmark_meta.get(&meta_session_key(s));
                     Row {
                         session_id: s.session_id.clone(),
                         provider: s.provider.clone(),
@@ -1631,13 +1635,20 @@ fn build_snapshot(
     // 3) Attach pid from running-agent detection
     let detected = detect_running_sessions();
     for row in rows.iter_mut() {
-        let row_key = canonical_session_id(&row.session_id);
-        let info = detected.get(&row.session_id).or_else(|| {
-            detected
-                .iter()
-                .find(|(sid, _)| canonical_session_id(sid) == row_key)
-                .map(|(_, info)| info)
-        });
+        let row_key = canonical_session_id(&row.session_id, Some(&row.provider));
+        let info = detected
+            .get(&row.session_id)
+            .and_then(|bucket| select_detected_for_row(row, bucket))
+            .or_else(|| {
+                detected.iter().find_map(|(sid, bucket)| {
+                    let id_matches = bucket
+                        .iter()
+                        .any(|info| canonical_session_id(sid, Some(&info.provider)) == row_key);
+                    id_matches
+                        .then(|| select_detected_for_row(row, bucket))
+                        .flatten()
+                })
+            });
         if let Some(info) = info {
             row.pid = info.pid;
             if row.file_path.is_none() {
@@ -1652,30 +1663,29 @@ fn build_snapshot(
     if include_unpinned {
         // Include running sessions that are not pinned and not in the recent
         // slice only when unpinned sessions are in scope.
-        let mut seen: HashSet<String> = rows
-            .iter()
-            .map(|r| canonical_session_id(&r.session_id))
-            .collect();
-        for (sid, info) in detected {
-            let sid_key = canonical_session_id(&sid);
-            if seen.contains(&sid_key) {
-                continue;
+        let mut seen: HashSet<String> = rows.iter().map(row_session_key).collect();
+        for (sid, infos) in detected {
+            for info in infos {
+                let project = info.project_path.clone().unwrap_or_default();
+                let sid_key =
+                    monitor_session_key(&info.provider, &sid, &project, info.file_path.as_deref());
+                if seen.contains(&sid_key) || !provider_matches_agent(&info.provider, agent_filter)
+                {
+                    continue;
+                }
+                seen.insert(sid_key);
+                rows.push(Row {
+                    session_id: sid.clone(),
+                    provider: info.provider,
+                    model: String::new(),
+                    project,
+                    title: "running session".to_string(),
+                    pinned: false,
+                    catalog: None,
+                    file_path: info.file_path,
+                    pid: info.pid,
+                });
             }
-            if !provider_matches_agent(&info.provider, agent_filter) {
-                continue;
-            }
-            seen.insert(sid_key);
-            rows.push(Row {
-                session_id: sid,
-                provider: info.provider,
-                model: String::new(),
-                project: info.project_path.unwrap_or_default(),
-                title: "running session".to_string(),
-                pinned: false,
-                catalog: None,
-                file_path: info.file_path,
-                pid: info.pid,
-            });
         }
     }
 
@@ -1686,7 +1696,7 @@ fn build_snapshot(
 
 fn enrich_rows_from_index(rows: &mut [Row], sessions: &[SessionMeta]) {
     for row in rows {
-        let Some(meta) = find_indexed_session(sessions, &row.session_id) else {
+        let Some(meta) = find_indexed_session(sessions, row) else {
             continue;
         };
         row.session_id = meta.session_id.clone();
@@ -1712,23 +1722,156 @@ fn enrich_rows_from_index(rows: &mut [Row], sessions: &[SessionMeta]) {
     }
 }
 
-fn find_indexed_session<'a>(
-    sessions: &'a [SessionMeta],
-    session_id: &str,
-) -> Option<&'a SessionMeta> {
-    sessions
+fn find_indexed_session<'a>(sessions: &'a [SessionMeta], row: &Row) -> Option<&'a SessionMeta> {
+    let key = row_session_key(row);
+    if let Some(meta) = sessions
         .iter()
-        .find(|s| s.session_id == session_id)
-        .or_else(|| {
-            sessions
-                .iter()
-                .find(|s| match_session_id(&s.session_id, session_id))
+        .find(|session| meta_session_key(session) == key)
+    {
+        return Some(meta);
+    }
+    let matches: Vec<&SessionMeta> = sessions
+        .iter()
+        .filter(|session| {
+            (row.provider.is_empty() || session.provider == row.provider)
+                && match_session_id(
+                    &session.session_id,
+                    &row.session_id,
+                    discovery_provider(&session.provider),
+                )
         })
+        .collect();
+    (matches.len() == 1).then(|| matches[0])
 }
 
 fn dedupe_rows_by_session_id(rows: &mut Vec<Row>) {
     let mut seen = HashSet::new();
-    rows.retain(|row| seen.insert(row.session_id.to_lowercase()));
+    rows.retain(|row| seen.insert(row_session_key(row)));
+}
+
+fn monitor_session_key(
+    provider: &str,
+    session_id: &str,
+    project_path: &str,
+    file_path: Option<&str>,
+) -> String {
+    if provider == "pi" && project_path.is_empty() {
+        return session_scope_key(provider, session_id, file_path.unwrap_or_default());
+    }
+    session_scope_key(provider, session_id, project_path)
+}
+
+fn row_session_key(row: &Row) -> String {
+    monitor_session_key(
+        &row.provider,
+        &row.session_id,
+        &row.project,
+        row.file_path.as_deref(),
+    )
+}
+
+fn meta_session_key(meta: &SessionMeta) -> String {
+    monitor_session_key(
+        &meta.provider,
+        &meta.session_id,
+        &meta.project_path,
+        Some(&meta.file_path),
+    )
+}
+
+fn select_detected_for_row<'a>(
+    row: &Row,
+    candidates: &'a [DetectedSession],
+) -> Option<&'a DetectedSession> {
+    let provider_matches = |candidate: &&DetectedSession| {
+        row.provider.is_empty() || candidate.provider == row.provider
+    };
+    if let Some(path) = row.file_path.as_deref() {
+        if let Some(candidate) = candidates
+            .iter()
+            .filter(provider_matches)
+            .find(|candidate| candidate.file_path.as_deref() == Some(path))
+        {
+            return Some(candidate);
+        }
+    }
+    if !row.project.is_empty() {
+        if let Some(candidate) = candidates
+            .iter()
+            .filter(provider_matches)
+            .find(|candidate| candidate.project_path.as_deref() == Some(row.project.as_str()))
+        {
+            return Some(candidate);
+        }
+    }
+    let matching: Vec<&DetectedSession> = candidates.iter().filter(provider_matches).collect();
+    (matching.len() == 1).then(|| matching[0])
+}
+
+fn discovery_provider(provider: &str) -> Option<DiscoveryProvider> {
+    match provider {
+        "claude" => Some(DiscoveryProvider::Claude),
+        "codex" => Some(DiscoveryProvider::Codex),
+        "pi" => Some(DiscoveryProvider::Pi),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod session_identity_tests {
+    use super::*;
+
+    fn pi_row(project: &str, file: &str) -> Row {
+        Row {
+            session_id: "SharedID".into(),
+            provider: "pi".into(),
+            model: String::new(),
+            project: project.into(),
+            title: String::new(),
+            pinned: false,
+            catalog: None,
+            file_path: Some(file.into()),
+            pid: None,
+        }
+    }
+
+    #[test]
+    fn monitor_keeps_same_pi_id_in_distinct_projects() {
+        let mut rows = vec![
+            pi_row("/work/a", "/sessions/a.jsonl"),
+            pi_row("/work/b", "/sessions/b.jsonl"),
+        ];
+
+        dedupe_rows_by_session_id(&mut rows);
+
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn detected_pi_process_is_selected_by_project() {
+        let row = pi_row("/work/b", "/sessions/b.jsonl");
+        let candidates = vec![
+            DetectedSession {
+                pid: Some(10),
+                provider: "pi".into(),
+                project_path: Some("/work/a".into()),
+                file_path: Some("/sessions/a.jsonl".into()),
+                home: None,
+            },
+            DetectedSession {
+                pid: Some(20),
+                provider: "pi".into(),
+                project_path: Some("/work/b".into()),
+                file_path: Some("/sessions/b.jsonl".into()),
+                home: None,
+            },
+        ];
+
+        assert_eq!(
+            select_detected_for_row(&row, &candidates).and_then(|entry| entry.pid),
+            Some(20)
+        );
+    }
 }
 
 fn watch_json(

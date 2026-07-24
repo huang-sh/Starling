@@ -11,7 +11,9 @@ use crate::core::format::format_bookmark_detail;
 use crate::core::id::generate_bookmark_id;
 use crate::core::session_display::short_session_id;
 use crate::core::store::{add_bookmark, BookmarkFilter};
-use crate::core::store::{find_bookmark, list_bookmarks, update_bookmark, BookmarkPatch};
+use crate::core::store::{
+    find_bookmark_for_session, list_bookmarks, update_bookmark, BookmarkPatch,
+};
 use crate::types::{Bookmark, SessionMeta};
 
 pub fn run(
@@ -49,7 +51,9 @@ pub fn run(
     };
 
     // Ensure bookmark
-    let bookmark = if let Some(b) = find_bookmark(&meta.session_id) {
+    let bookmark = if let Some(b) =
+        find_bookmark_for_session(&meta.provider, &meta.session_id, &meta.project_path)
+    {
         let mut patch = BookmarkPatch::default();
         let mut changed = false;
         if let Some(t) = title.as_deref() {
@@ -72,7 +76,12 @@ pub fn run(
         }
     } else if let Some(b) = list_bookmarks(BookmarkFilter::default())
         .into_iter()
-        .find(|b| canonical_session_id(&b.session_id) == meta.session_id)
+        .find(|b| {
+            b.provider == meta.provider
+                && (meta.provider != "pi" || b.project_path == meta.project_path)
+                && canonical_session_id(&b.session_id, Some(&b.provider))
+                    == canonical_session_id(&meta.session_id, Some(&meta.provider))
+        })
     {
         let mut patch = BookmarkPatch {
             session_id: Some(meta.session_id.clone()),
@@ -151,7 +160,8 @@ pub fn run(
         }
     }
 
-    let updated = find_bookmark(&meta.session_id).unwrap_or(bookmark);
+    let updated = find_bookmark_for_session(&meta.provider, &meta.session_id, &meta.project_path)
+        .unwrap_or(bookmark);
     if json {
         return super::print_json_result(
             "pin",

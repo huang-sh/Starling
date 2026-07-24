@@ -8,9 +8,9 @@ use colored::*;
 use crate::cli::*;
 use crate::constants::now_iso;
 use crate::core::catalog_resolver::{catalog_path, resolve_catalog_reference};
-use crate::core::discovery::canonical_session_id;
 use crate::core::discovery::{
-    find_session_by_id, find_session_candidates, find_sessions, Provider,
+    canonical_session_id, find_pi_session_by_path, find_session_by_id, find_sessions,
+    session_scope_key, Provider,
 };
 use crate::core::format::format_session_table;
 use crate::core::id::{generate_bookmark_id, generate_note_id};
@@ -24,7 +24,8 @@ use crate::core::session_index::{
     rebuild_session_index, remove_session_from_index, session_index_path,
 };
 use crate::core::store::{
-    find_bookmark, list_bookmarks, list_spaces, remove_bookmark, update_bookmark, BookmarkPatch,
+    find_bookmark, find_bookmark_for_session, list_bookmarks, list_spaces, remove_bookmark,
+    update_bookmark, BookmarkPatch,
 };
 use crate::types::RunRecord;
 use crate::types::{Bookmark, SessionMeta};
@@ -73,9 +74,10 @@ fn provider_from_opt(s: Option<&str>) -> Option<Provider> {
     match s {
         Some("claude") => Some(Provider::Claude),
         Some("codex") => Some(Provider::Codex),
+        Some("pi") => Some(Provider::Pi),
         Some(other) => {
             eprintln!(
-                "{}: unknown agent '{}' (expected claude or codex)",
+                "{}: unknown agent '{}' (expected claude, codex, or pi)",
                 "error".red(),
                 other
             );
@@ -89,6 +91,7 @@ fn provider_to_idx(p: Option<Provider>) -> Option<crate::core::session_index::Pr
     p.map(|p| match p {
         Provider::Claude => crate::core::session_index::Provider::Claude,
         Provider::Codex => crate::core::session_index::Provider::Codex,
+        Provider::Pi => crate::core::session_index::Provider::Pi,
     })
 }
 
@@ -113,6 +116,7 @@ fn indexed_session_list(
         let provider_name = match provider {
             Provider::Claude => "claude",
             Provider::Codex => "codex",
+            Provider::Pi => "pi",
         };
         sessions.retain(|s| s.provider == provider_name);
     }
@@ -224,7 +228,7 @@ fn find_catalog_sessions(
     }
     let _ = cataloged; // Same as filtering to non-empty space_ids
 
-    let wanted_session_ids: Vec<String> = bookmarks
+    let selected_bookmarks: Vec<&Bookmark> = bookmarks
         .iter()
         .filter(|b| !b.space_ids.is_empty())
         .filter(|b| {
@@ -233,24 +237,40 @@ fn find_catalog_sessions(
                 .map(|ids| ids.iter().any(|id| b.space_ids.contains(id)))
                 .unwrap_or(true)
         })
-        .map(|b| b.session_id.clone())
+        .collect();
+    let wanted_session_ids: Vec<String> = selected_bookmarks
+        .iter()
+        .map(|bookmark| bookmark.session_id.clone())
         .collect();
 
     let looked_up = lookup_indexed_sessions(&wanted_session_ids, provider_to_idx(provider));
     let mut sessions: Vec<SessionMeta> = looked_up.values().cloned().collect();
+    sessions.retain(|session| {
+        selected_bookmarks.iter().any(|bookmark| {
+            session_scope_key(
+                &bookmark.provider,
+                &bookmark.session_id,
+                &bookmark.project_path,
+            ) == session_scope_key(
+                &session.provider,
+                &session.session_id,
+                &session.project_path,
+            )
+        })
+    });
     sessions.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
     sessions
 }
 
 fn show_cmd(session_id: &str, json: bool) -> Result<()> {
-    let meta = match find_session_by_id(session_id) {
+    let meta = match resolve_session_meta(session_id) {
         Some(m) => m,
         None => {
             eprintln!("{}: session not found: {}", "error".red(), session_id);
             std::process::exit(1);
         }
     };
-    let bookmark = find_bookmark(&meta.session_id);
+    let bookmark = find_bookmark_for_session(&meta.provider, &meta.session_id, &meta.project_path);
     let spaces = list_spaces();
     let catalogs: Vec<String> = bookmark
         .as_ref()
@@ -403,11 +423,7 @@ fn lookup_cmd(session_ids: Vec<String>, agent: Option<String>, json: bool) -> Re
 }
 
 pub fn resolve_session_meta(session_id: &str) -> Option<SessionMeta> {
-    if let Some(meta) = find_session_by_id(session_id) {
-        return Some(meta);
-    }
-    let candidates = find_session_candidates(session_id);
-    candidates.into_iter().next()
+    find_pi_session_by_path(session_id).or_else(|| find_session_by_id(session_id))
 }
 
 fn ensure_session_bookmark(
@@ -415,12 +431,19 @@ fn ensure_session_bookmark(
     title: Option<&str>,
     tags: Option<Vec<String>>,
 ) -> Bookmark {
-    if let Some(existing) = find_bookmark(&meta.session_id) {
+    if let Some(existing) =
+        find_bookmark_for_session(&meta.provider, &meta.session_id, &meta.project_path)
+    {
         return existing;
     }
     if let Some(existing) = list_bookmarks(crate::core::store::BookmarkFilter::default())
         .into_iter()
-        .find(|b| canonical_session_id(&b.session_id) == meta.session_id)
+        .find(|b| {
+            b.provider == meta.provider
+                && (meta.provider != "pi" || b.project_path == meta.project_path)
+                && canonical_session_id(&b.session_id, Some(&b.provider))
+                    == canonical_session_id(&meta.session_id, Some(&meta.provider))
+        })
     {
         return update_bookmark(
             &existing.id,
@@ -624,7 +647,7 @@ fn delete_cmd(session_id: &str, yes: bool, json: bool) -> Result<()> {
         eprintln!("{}: failed to delete session file: {}", "error".red(), e);
         std::process::exit(1);
     }
-    let bookmark = find_bookmark(&meta.session_id);
+    let bookmark = find_bookmark_for_session(&meta.provider, &meta.session_id, &meta.project_path);
     if let Some(b) = &bookmark {
         remove_bookmark(&b.id);
     }

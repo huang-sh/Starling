@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { renderTopSnapshot } from "../lib/render/top.js";
+Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+delete process.env.NO_COLOR;
+const { renderTopSnapshot } = await import("../lib/render/top.js");
 
 function row(overrides = {}) {
   return {
@@ -194,4 +196,25 @@ test("renders a dedicated skill column on wide terminals", () => {
 
   assert.match(output, /SID\s+S\s+AGT\s+MODEL\s+PID\s+CPU\s+MEM\s+CTX\s+TOK\s+AGE\s+SKILLS\s+TASK/);
   assert.match(output, /\s2\s+exec_command×16/);
+});
+
+test("renders Pi as a first-class agent", () => {
+  const output = renderTopSnapshot({
+    pinned_total: 1,
+    recent_total: 0,
+    active: 1,
+    pinned: [
+      row({
+        session_id: "pi-agent-00-4000-8000-000000000000",
+        provider: "pi",
+        model: "claude-sonnet-4-5",
+        status: "running",
+        title: "Pi task",
+      }),
+    ],
+    recent: [],
+  }, { width: 132, now: new Date(10_000) });
+
+  assert.match(output, /\x1b\[36mpi\x1b\[39m/);
+  assert.match(stripAnsi(output), /Pi task/);
 });

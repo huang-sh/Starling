@@ -1,21 +1,21 @@
 ---
 name: starling-ai-agent
-description: "Use when working with Starling: launch, switch, and organize Claude Code and Codex sessions with model profiles, catalogs, project views, live monitoring, and VS Code integration."
+description: "Use when working with Starling: launch, switch, and organize Claude Code, Codex, and Pi sessions with model profiles, catalogs, project views, live monitoring, and VS Code integration."
 ---
 
 # Starling
 
-Starling launches, switches, and organizes Claude Code and Codex sessions with model profiles, catalogs, project views, live monitoring, and VS Code integration. Use it to start agent runs, resume prior sessions, group important sessions into catalogs, inspect project history, and check live session state.
+Starling launches, switches, and organizes Claude Code, Codex, and Pi sessions with model profiles, catalogs, project views, live monitoring, and VS Code integration. Use it to start agent runs, resume prior sessions, group important sessions into catalogs, inspect project history, and check live session state.
 
 This skill is an operating manual for agents using Starling. Do not treat it as Starling development or release documentation.
 
 ## Agent Rules
 
-- Prefer `starling` CLI commands over manually reading `~/.starling`, `~/.claude`, or `~/.codex`.
+- Prefer `starling` CLI commands over manually reading `~/.starling`, `~/.claude`, `~/.codex`, or `~/.pi`.
 - Do not delete sessions, remove catalog assignments, or edit model profiles unless the user explicitly asks.
-- Do not rewrite agent-owned data under `~/.claude` or `~/.codex`.
+- Do not rewrite agent-owned data under `~/.claude`, `~/.codex`, or `~/.pi`.
 - Use one plain catalog name in examples unless the task is specifically about catalog hierarchy.
-- Put Starling options before the agent name in `starling run`; pass agent-native arguments after `claude` or `codex`.
+- Put Starling options before the agent name in `starling run`; pass agent-native arguments after `claude`, `codex`, or `pi`.
 
 ## Catalogs
 
@@ -72,7 +72,9 @@ starling resume <session-id>
 
 ### Current Session
 
-When the user asks to operate on the current running Codex session, first check the environment:
+When the user asks to operate on the current running session, first check the agent-specific environment.
+
+For Codex:
 
 ```bash
 echo "$CODEX_THREAD_ID"
@@ -87,7 +89,22 @@ starling catalog add paper-review "$CODEX_THREAD_ID" --title "Current session"
 
 Do not guess the current session from `starling session ls`, recent file mtimes, or the latest rollout file when `CODEX_THREAD_ID` is available. Recent sessions may belong to unrelated running agents or benchmarks.
 
-If `CODEX_THREAD_ID` is not set, say that the current session ID is not directly exposed and ask the user for the session ID or another reliable identifier. Do not silently pick the newest session.
+For Pi, check both the session ID and the exact transcript path:
+
+Pi injects `PI_SESSION_ID` and `PI_SESSION_FILE` into its LLM-callable bash tool environment. They are not general environment variables on the parent Pi process or user `!`/`!!` shell commands.
+
+```bash
+printf 'id=%s\nfile=%s\n' "$PI_SESSION_ID" "$PI_SESSION_FILE"
+```
+
+If `PI_SESSION_ID` is set, treat it as the current Pi session ID. `PI_SESSION_FILE`, when set, is the authoritative transcript path:
+
+```bash
+starling session show "$PI_SESSION_ID"
+starling catalog add paper-review "$PI_SESSION_ID" --title "Current session"
+```
+
+If the relevant environment variable is not set, say that the current session ID is not directly exposed and ask the user for the session ID or another reliable identifier. Do not silently pick the newest session.
 
 Manage session metadata:
 
@@ -116,6 +133,7 @@ starling project ls
 starling project ls --all
 starling project ls --agent claude
 starling project ls --agent codex
+starling project ls --agent pi
 starling project show /path/to/project
 ```
 
@@ -144,13 +162,14 @@ starling top --pinned
 starling top --limit 40
 starling top --agent codex
 starling top --agent claude --sort cpu
+starling top --agent pi
 starling top --sort tokens
 starling top --sort cpu
 starling top --catalog paper-review
 starling top --json
 ```
 
-Top supports `--agent claude` and `--agent codex`.
+Top supports `--agent claude`, `--agent codex`, and `--agent pi`.
 
 Top sort modes are `activity` (default), `recent`, `tokens`, `created`, `memory`, `cpu`, `ctx`, `skills`, and `tools`.
 
@@ -169,17 +188,29 @@ starling config show
 
 ## Running Agents
 
-Starling arguments go before the agent name. Agent arguments go after the agent name and should be passed through unchanged.
+Starling arguments go before the agent name. Agent arguments go after the agent name. Managed Pi runs may additionally inject runtime hooks/session IDs and pin a dynamic session selector to the exact locked transcript path.
 
 ```bash
 starling run -c paper-review codex
 starling run -c paper-review codex exec "summarize this repo"
 starling run --setting ds -c paper-review claude
 starling run --catalog paper-review claude --dangerously-skip-permissions
+starling run -c paper-review pi
+starling run --catalog paper-review pi --provider anthropic --model claude-sonnet-4-5
 ```
 
 If `--setting` is omitted, Starling uses the agent's normal default configuration.
 `-c` is the short alias for `--catalog`.
+
+Pi does not expose a built-in MCP configuration contract. Do not use Starling's `--mcp` or `--mcp-profile` options with `pi`; use a user-configured Pi extension when MCP integration is required.
+
+A plain `starling run pi` passes no session selector; Pi creates the ID and Starling records it through the runtime hook. Pi features that explicitly use `--session-id` require Pi 0.76 or newer (`pi --version`).
+
+Use `starling run pi --continue` for the current project's latest Pi session. Starling pins an existing target to its absolute transcript path; if none exists, it creates a new session with a preallocated locked ID. Do not use the interactive Pi `--resume` picker through `starling run`: Starling rejects it because the selected transcript cannot be locked before launch. Use `starling resume <session-id-or-absolute-path>` instead. Managed Pi runs also block in-process `/new`, `/resume`, and `/fork`; exit Pi before starting or resuming another managed session.
+
+For managed `starling run pi --session <path>`, require an existing non-empty valid Pi transcript; legacy v1/v2 transcripts are allowed. Missing and zero-byte explicit paths are a deliberate managed limitation because they have no session ID to lock before spawn. Create new managed sessions with `--session-id`, or initialize the exact path with Pi directly before handing it to Starling.
+
+On Linux, prefer managed launches when an active Pi using a one-shot `--session` or `--session-dir` must be mapped reliably. Native Pi replaces its process command line with `pi` after startup, so an externally launched process no longer exposes those one-shot values; persist custom roots through `PI_CODING_AGENT_SESSION_DIR` or `settings.json` when launching Pi outside Starling.
 
 To put a run into a nested catalog, use a catalog path:
 
@@ -194,6 +225,7 @@ Profiles live under:
 ```text
 ~/.starling/settings/claude/<name>.json
 ~/.starling/settings/codex/<name>.toml
+~/.starling/settings/pi/<name>.json
 ```
 
 List profiles:
@@ -202,6 +234,7 @@ List profiles:
 starling model ls
 starling model ls --agent claude
 starling model ls --agent codex
+starling model ls --agent pi
 ```
 
 Create profiles only when the user asks:
@@ -210,9 +243,20 @@ Create profiles only when the user asks:
 starling model add ds --agent claude --model deepseek-v4-pro --base-url https://api.example.com --api-key "$API_KEY"
 starling model add demo --agent codex --model gpt-5.2 --base-url https://api.example.com/v1 --api-key "$OPENAI_API_KEY" --reasoning high --wire-api responses
 starling model delete demo --agent codex
+starling model delete research --agent pi
 ```
 
 Codex profiles use Codex-style TOML. For Chat Completions-only providers, add `api_format = "openai_chat"`.
+
+Pi profiles are JSON with `provider`, `model`, and optional `thinking` fields. Starling translates them to Pi's `--provider`, `--model`, and `--thinking` arguments for the run. Pi authentication remains in Pi-owned auth/config files such as `~/.pi/agent/auth.json` and `~/.pi/agent/models.json`, or in provider environment variables; do not copy credentials into a Starling Pi profile.
+
+```json
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-5",
+  "thinking": "high"
+}
+```
 
 ## VS Code Extension
 

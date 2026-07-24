@@ -14,5 +14,6 @@ pub mod runs;
 pub mod session;
 pub mod session_display;
 pub mod session_index;
+pub mod session_lock;
 pub mod session_metrics;
 pub mod store;

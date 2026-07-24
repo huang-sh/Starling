@@ -2,18 +2,20 @@
 //! Mirrors src/lib/processMap.ts.
 
 use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::constants::expand_home;
+use crate::constants::{expand_home, normalize_pi_path_input};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     Claude,
     Codex,
+    Pi,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -83,25 +85,75 @@ pub fn comm_might_be_agent(comm: &str) -> bool {
     if comm.is_empty() {
         return false;
     }
+    // Keep Pi exact: a prefix match would incorrectly classify common
+    // processes such as `pip`, `pipewire`, and `picom` as agent candidates.
+    if comm == "pi" {
+        return true;
+    }
     AGENT_COMM_PREFIXES
         .iter()
         .any(|p| comm == *p || comm.starts_with(p))
+}
+
+fn is_pi_cli_script(arg: &str) -> bool {
+    let normalized = arg.replace('\\', "/").to_ascii_lowercase();
+    normalized.ends_with("/pi.js")
+        || normalized.contains("/pi-coding-agent/dist/cli.js")
+        || normalized.ends_with("/packages/coding-agent/dist/cli.js")
+        || normalized.ends_with("/packages/coding-agent/src/cli.ts")
+}
+
+fn basename_lower(arg: &str) -> String {
+    Path::new(arg)
+        .file_name()
+        .map(|value| value.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+fn is_javascript_runtime(arg: &str) -> bool {
+    matches!(
+        basename_lower(arg).trim_end_matches(".exe"),
+        "node" | "nodejs" | "bun" | "deno"
+    )
 }
 
 /// Inspect a process's cmdline vector and return which provider it launched,
 /// if any. Matches the TS heuristic exactly: first 4 args by basename, then
 /// any arg by path suffix.
 pub fn provider_from_cmdline(args: &[String]) -> Option<Provider> {
-    for arg in args.iter().take(4) {
-        let base = Path::new(arg)
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
+    let executable = args.first().map(|arg| basename_lower(arg))?;
+    match executable.trim_end_matches(".exe") {
+        "claude" | "claude-code" => return Some(Provider::Claude),
+        "codex" => return Some(Provider::Codex),
+        "pi" => return Some(Provider::Pi),
+        _ => {}
+    }
+
+    // npm's `pi` executable is a symlink with a Node shebang, so Linux exposes
+    // it as `node /path/to/bin/pi ...` in /proc/<pid>/cmdline. Inspect the
+    // runtime's script position before scanning later arguments: prompts such
+    // as `codex` or `claude` must not override the real Pi executable.
+    if is_javascript_runtime(&args[0]) {
+        if let Some(script) = args.get(1) {
+            if basename_lower(script).trim_end_matches(".cmd") == "pi" || is_pi_cli_script(script) {
+                return Some(Provider::Pi);
+            }
+        }
+    }
+
+    for (index, arg) in args.iter().take(4).enumerate() {
+        let base = basename_lower(arg);
         if base == "claude" || base == "claude-code" {
             return Some(Provider::Claude);
         }
         if base == "codex" {
             return Some(Provider::Codex);
+        }
+        // A bare `pi` argument later in the command line may be ordinary user
+        // input. Only treat it as the binary when it is argv[0]. Node/Bun
+        // installations are recognized from their CLI script path below.
+        if index == 0 && base == "pi" {
+            return Some(Provider::Pi);
         }
     }
     for arg in args {
@@ -114,6 +166,9 @@ pub fn provider_from_cmdline(args: &[String]) -> Option<Provider> {
         }
         if lower.ends_with("/codex") || lower.contains("/codex.js") {
             return Some(Provider::Codex);
+        }
+        if is_pi_cli_script(arg) {
+            return Some(Provider::Pi);
         }
     }
     None
@@ -187,6 +242,16 @@ pub fn resolve_agent_home(provider: Provider, environ: &HashMap<String, String>)
                 dirs::home_dir().unwrap_or_default().join(".codex")
             }
         }
+        Provider::Pi => {
+            if let Some(v) = environ.get("PI_CODING_AGENT_DIR").filter(|s| !s.is_empty()) {
+                normalize_pi_path_input(v)
+            } else {
+                dirs::home_dir()
+                    .unwrap_or_default()
+                    .join(".pi")
+                    .join("agent")
+            }
+        }
     }
 }
 
@@ -194,6 +259,207 @@ pub fn session_root_for_home(provider: Provider, home: &Path) -> PathBuf {
     match provider {
         Provider::Claude => home.join("projects"),
         Provider::Codex => home.join("sessions"),
+        Provider::Pi => home.join("sessions"),
+    }
+}
+
+fn resolve_process_path(value: &str, cwd: Option<&Path>) -> PathBuf {
+    let path = expand_home(value.trim());
+    if path.is_absolute() {
+        path
+    } else if let Some(cwd) = cwd {
+        cwd.join(path)
+    } else {
+        path
+    }
+}
+
+fn resolve_pi_process_path(value: &str, cwd: Option<&Path>) -> PathBuf {
+    let path = normalize_pi_path_input(value);
+    if path.is_absolute() {
+        path
+    } else if let Some(cwd) = cwd {
+        cwd.join(path)
+    } else {
+        path
+    }
+}
+
+#[derive(Debug, Default)]
+struct PiProcessArgs<'a> {
+    session: Option<&'a str>,
+    session_id: Option<&'a str>,
+    session_dir: Option<&'a str>,
+}
+
+/// Mirror Pi's argv token ownership for the session fields process mapping
+/// needs. Native value options consume the next token even when it looks like
+/// a different flag; unknown and optional options use Pi's selective rules.
+fn parse_pi_process_args(args: &[String]) -> PiProcessArgs<'_> {
+    let mut parsed = PiProcessArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if pi_process_required_value_arg(arg) {
+            let Some(value) = args.get(index + 1).map(String::as_str) else {
+                index += 1;
+                continue;
+            };
+            match arg {
+                "--session" => parsed.session = Some(value),
+                "--session-id" => parsed.session_id = Some(value),
+                "--session-dir" => parsed.session_dir = Some(value),
+                _ => {}
+            }
+            index += 2;
+            continue;
+        }
+
+        let next = args.get(index + 1).map(String::as_str);
+        let consumes_optional_value = match arg {
+            "--print" | "-p" => next
+                .map(|value| {
+                    !value.starts_with('@') && (!value.starts_with('-') || value.starts_with("---"))
+                })
+                .unwrap_or(false),
+            "--list-models" => next
+                .map(|value| !value.starts_with('-') && !value.starts_with('@'))
+                .unwrap_or(false),
+            _ if pi_process_native_boolean_arg(arg) => false,
+            _ if arg.starts_with("--") && !arg.contains('=') => next
+                .map(|value| !value.starts_with('-') && !value.starts_with('@'))
+                .unwrap_or(false),
+            _ => false,
+        };
+        index += 1 + usize::from(consumes_optional_value);
+    }
+    parsed
+}
+
+fn pi_process_required_value_arg(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--mode"
+            | "--provider"
+            | "--model"
+            | "--api-key"
+            | "--system-prompt"
+            | "--append-system-prompt"
+            | "--name"
+            | "-n"
+            | "--session"
+            | "--session-id"
+            | "--fork"
+            | "--session-dir"
+            | "--models"
+            | "--tools"
+            | "-t"
+            | "--exclude-tools"
+            | "-xt"
+            | "--thinking"
+            | "--export"
+            | "--extension"
+            | "-e"
+            | "--skill"
+            | "--prompt-template"
+            | "--theme"
+    )
+}
+
+fn pi_process_native_boolean_arg(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--help"
+            | "-h"
+            | "--version"
+            | "-v"
+            | "--continue"
+            | "-c"
+            | "--resume"
+            | "-r"
+            | "--no-session"
+            | "--no-tools"
+            | "-nt"
+            | "--no-builtin-tools"
+            | "-nbt"
+            | "--no-extensions"
+            | "-ne"
+            | "--no-skills"
+            | "-ns"
+            | "--no-prompt-templates"
+            | "-np"
+            | "--no-themes"
+            | "--no-context-files"
+            | "-nc"
+            | "--verbose"
+            | "--approve"
+            | "-a"
+            | "--no-approve"
+            | "-na"
+            | "--offline"
+    )
+}
+
+fn extract_pi_session_dir(args: &[String]) -> Option<&str> {
+    parse_pi_process_args(args)
+        .session_dir
+        .filter(|value| !value.is_empty())
+}
+
+fn read_pi_session_dir_setting(path: &Path) -> Option<Option<String>> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let settings: Value = serde_json::from_str(&raw).ok()?;
+    let value = settings.as_object()?.get("sessionDir")?;
+    Some(
+        value
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+    )
+}
+
+fn configured_pi_session_dir(home: &Path, cwd: Option<&Path>) -> Option<String> {
+    let project = cwd.and_then(|cwd| read_pi_session_dir_setting(&cwd.join(".pi/settings.json")));
+    if let Some(project) = project {
+        return project;
+    }
+    read_pi_session_dir_setting(&home.join("settings.json")).flatten()
+}
+
+fn resolve_session_root(
+    provider: Provider,
+    home: &Path,
+    environ: &HashMap<String, String>,
+    args: &[String],
+    cwd: Option<&Path>,
+) -> (PathBuf, bool, bool) {
+    if provider != Provider::Pi {
+        return (session_root_for_home(provider, home), false, false);
+    }
+
+    let configured = extract_pi_session_dir(args)
+        .map(str::to_string)
+        .or_else(|| {
+            environ
+                .get("PI_CODING_AGENT_SESSION_DIR")
+                .filter(|value| !value.is_empty())
+                .cloned()
+        })
+        .or_else(|| configured_pi_session_dir(home, cwd));
+    match configured {
+        Some(value) => {
+            let normalized_configured = normalize_pi_path_input(&value);
+            let default_local_dir = cwd
+                .map(|cwd| {
+                    session_root_for_home(provider, home)
+                        .join(encode_pi_cwd(&cwd.to_string_lossy()))
+                })
+                .unwrap_or_default();
+            let filter_local_cwd =
+                normalized_configured.as_os_str() != default_local_dir.as_os_str();
+            (resolve_pi_process_path(&value, cwd), true, filter_local_cwd)
+        }
+        None => (session_root_for_home(provider, home), false, false),
     }
 }
 
@@ -203,11 +469,127 @@ pub fn encode_claude_cwd(cwd: &str) -> String {
     format!("-{}", parts.join("-"))
 }
 
+/// Pi encodes a resolved cwd as `--a-b-c--` for `/a/b/c`.
+pub fn encode_pi_cwd(cwd: &str) -> String {
+    let without_leading_separator = cwd
+        .strip_prefix('/')
+        .or_else(|| cwd.strip_prefix('\\'))
+        .unwrap_or(cwd);
+    let safe = without_leading_separator.replace(['/', '\\', ':'], "-");
+    format!("--{safe}--")
+}
+
+fn valid_pi_session_id(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphanumeric() {
+        return false;
+    }
+    let mut last = first;
+    for ch in chars {
+        if !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')) {
+            return false;
+        }
+        last = ch;
+    }
+    last.is_ascii_alphanumeric()
+}
+
+fn looks_like_pi_file_timestamp(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 24 {
+        return false;
+    }
+    for (index, byte) in bytes.iter().enumerate() {
+        let expected = match index {
+            4 | 7 | 13 | 16 | 19 => Some(b'-'),
+            10 => Some(b'T'),
+            23 => Some(b'Z'),
+            _ => None,
+        };
+        if let Some(expected) = expected {
+            if *byte != expected {
+                return false;
+            }
+        } else if !byte.is_ascii_digit() {
+            return false;
+        }
+    }
+    true
+}
+
+fn pi_session_id_from_file_stem(stem: &str) -> Option<String> {
+    let (timestamp, session_id) = stem.split_once('_')?;
+    if !looks_like_pi_file_timestamp(timestamp) || !valid_pi_session_id(session_id) {
+        return None;
+    }
+    Some(session_id.to_string())
+}
+
+const PI_MAX_SESSION_HEADER_SCAN_BYTES: usize = 1024 * 1024;
+
+fn read_pi_session_header(path: &Path) -> Option<(String, PathBuf)> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = BufReader::new(file).take((PI_MAX_SESSION_HEADER_SCAN_BYTES + 1) as u64);
+    let mut scanned_bytes = 0usize;
+    loop {
+        let mut physical_line = Vec::new();
+        let bytes_read = reader.read_until(b'\n', &mut physical_line).ok()?;
+        if bytes_read == 0 {
+            return None;
+        }
+        scanned_bytes = scanned_bytes.saturating_add(bytes_read);
+        if scanned_bytes > PI_MAX_SESSION_HEADER_SCAN_BYTES {
+            return None;
+        }
+        let line = String::from_utf8_lossy(&physical_line);
+        let Ok(header) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if header.get("type").and_then(Value::as_str) != Some("session") {
+            return None;
+        }
+        let session_id = header
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| valid_pi_session_id(id))?
+            .to_string();
+        let cwd = header.get("cwd").and_then(Value::as_str)?;
+        if cwd.is_empty() {
+            return None;
+        }
+        return Some((session_id, PathBuf::from(cwd)));
+    }
+}
+
+fn pi_session_id_from_file(path: &Path) -> Option<String> {
+    if let Some((session_id, _)) = read_pi_session_header(path) {
+        return Some(session_id);
+    }
+    if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
+        if let Some(session_id) = pi_session_id_from_file_stem(stem) {
+            return Some(session_id);
+        }
+    }
+    None
+}
+
+fn pi_project_path_from_file(path: &Path, fallback: Option<&Path>) -> Option<PathBuf> {
+    read_pi_session_header(path)
+        .map(|(_, cwd)| resolve_pi_process_path(&cwd.to_string_lossy(), fallback))
+        .or_else(|| fallback.map(Path::to_path_buf))
+}
+
 pub fn extract_session_id_from_path(file_path: &str) -> Option<String> {
     let name = Path::new(file_path)
         .file_stem()?
         .to_string_lossy()
         .to_string();
+    if let Some(session_id) = pi_session_id_from_file_stem(&name) {
+        return Some(session_id);
+    }
     // Bare UUID match
     let parts: Vec<&str> = name.split('-').collect();
     if parts.len() == 5 {
@@ -223,7 +605,8 @@ pub fn extract_session_id_from_path(file_path: &str) -> Option<String> {
     Some(name.to_lowercase())
 }
 
-/// True if file's basename is a bare UUID (Claude) or `rollout-...` (Codex).
+/// True if the basename is a Claude UUID, Codex `rollout-...`, or Pi
+/// `<timestamp>_<session-id>` transcript.
 pub fn is_session_file_path(file_path: &str) -> bool {
     let name = match Path::new(file_path).file_name() {
         Some(n) => n.to_string_lossy().to_string(),
@@ -232,6 +615,10 @@ pub fn is_session_file_path(file_path: &str) -> bool {
     let lower = name.to_lowercase();
     if !lower.ends_with(".jsonl") {
         return false;
+    }
+    let original_stem = &name[..name.len() - ".jsonl".len()];
+    if pi_session_id_from_file_stem(original_stem).is_some() {
+        return true;
     }
     let stem = &lower[..lower.len() - ".jsonl".len()];
     // Bare UUID
@@ -431,6 +818,7 @@ pub struct ResolverCache {
     pub root_dirs: HashMap<PathBuf, Vec<String>>,
     pub recent_jsonl: HashMap<PathBuf, Option<(PathBuf, u64)>>,
     pub recent_jsonl_flat: HashMap<PathBuf, Option<(PathBuf, u64)>>,
+    pub recent_pi_jsonl_by_cwd: HashMap<(PathBuf, PathBuf), Option<(PathBuf, u64)>>,
     pub file_index: HashMap<PathBuf, Option<HashMap<String, PathBuf>>>,
 }
 
@@ -494,8 +882,7 @@ fn build_file_index(root: &Path, dirs: &[String]) -> Option<HashMap<String, Path
         for entry in rd.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                let name = entry.file_name().to_string_lossy().to_lowercase();
-                index.insert(name, path);
+                index_session_file(&mut index, &path);
             }
         }
     }
@@ -512,12 +899,37 @@ fn build_file_index(root: &Path, dirs: &[String]) -> Option<HashMap<String, Path
         for entry in rd.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                let name = entry.file_name().to_string_lossy().to_lowercase();
-                index.insert(name, path);
+                index_session_file(&mut index, &path);
             }
         }
     }
     Some(index)
+}
+
+fn index_session_file(index: &mut HashMap<String, PathBuf>, path: &Path) {
+    let name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    index.insert(name.to_ascii_lowercase(), path.to_path_buf());
+    if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
+        if let Some(session_id) = pi_session_id_from_file_stem(stem) {
+            index.insert(format!("pi:{session_id}"), path.to_path_buf());
+        }
+    }
+}
+
+fn session_file_matches_id(path: &Path, target: &str) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    if name == format!("{target}.jsonl") {
+        return true;
+    }
+    if looks_like_uuid(target) && name.eq_ignore_ascii_case(&format!("{target}.jsonl")) {
+        return true;
+    }
+    pi_session_id_from_file(path).as_deref() == Some(target)
 }
 
 fn find_file_recursive(dir: &Path, target: &str, depth: u32) -> Option<PathBuf> {
@@ -528,7 +940,6 @@ fn find_file_recursive(dir: &Path, target: &str, depth: u32) -> Option<PathBuf> 
         Ok(r) => r,
         Err(_) => return None,
     };
-    let target_file = format!("{target}.jsonl");
     for entry in rd.flatten() {
         let path = entry.path();
         if path.file_name().map(|n| n == "subagents").unwrap_or(false) {
@@ -542,11 +953,10 @@ fn find_file_recursive(dir: &Path, target: &str, depth: u32) -> Option<PathBuf> 
             if let Some(found) = find_file_recursive(&path, target, depth + 1) {
                 return Some(found);
             }
-        } else {
-            let name = entry.file_name().to_string_lossy().to_lowercase();
-            if name == target_file {
-                return Some(path);
-            }
+        } else if path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+            && session_file_matches_id(&path, target)
+        {
+            return Some(path);
         }
     }
     None
@@ -558,8 +968,11 @@ pub fn find_session_file_by_id(
     session_id: &str,
     cache: Option<&mut ResolverCache>,
 ) -> Option<PathBuf> {
-    let target = session_id.to_lowercase();
-    let target_file = format!("{target}.jsonl");
+    let target = session_id.trim();
+    if target.is_empty() {
+        return None;
+    }
+    let target_file = format!("{}.jsonl", target.to_ascii_lowercase());
 
     if let Some(c) = cache {
         let needs_build = !c.file_index.contains_key(root);
@@ -581,10 +994,13 @@ pub fn find_session_file_by_id(
             c.file_index.insert(root.to_path_buf(), idx);
         }
         if let Some(Some(idx)) = c.file_index.get(root) {
+            if let Some(hit) = idx.get(&format!("pi:{target}")) {
+                return Some(hit.clone());
+            }
             if let Some(hit) = idx.get(&target_file) {
                 return Some(hit.clone());
             }
-            return find_file_recursive(root, &target, 0);
+            return find_file_recursive(root, target, 0);
         }
         return None;
     }
@@ -602,12 +1018,20 @@ pub fn find_session_file_by_id(
         if candidate.is_file() {
             return Some(candidate);
         }
+        let lower_candidate = entry.path().join(&target_file);
+        if lower_candidate.is_file() {
+            return Some(lower_candidate);
+        }
     }
     let direct = root.join(format!("{target}.jsonl"));
     if direct.is_file() {
         return Some(direct);
     }
-    find_file_recursive(root, &target, 0)
+    let lower_direct = root.join(&target_file);
+    if lower_direct.is_file() {
+        return Some(lower_direct);
+    }
+    find_file_recursive(root, target, 0)
 }
 
 fn most_recent_jsonl(dir: &Path) -> Option<(PathBuf, u64)> {
@@ -631,6 +1055,35 @@ fn most_recent_jsonl(dir: &Path) -> Option<(PathBuf, u64)> {
             .as_millis() as u64;
         best = match best {
             Some((_, bm)) if bm >= mtime => best,
+            _ => Some((path, mtime)),
+        };
+    }
+    best
+}
+
+fn most_recent_pi_jsonl_for_cwd(dir: &Path, cwd: &Path) -> Option<(PathBuf, u64)> {
+    let rd = std::fs::read_dir(dir).ok()?;
+    let mut best: Option<(PathBuf, u64)> = None;
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some((_, session_cwd)) = read_pi_session_header(&path) else {
+            continue;
+        };
+        if session_cwd != cwd {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        best = match best {
+            Some((_, best_mtime)) if best_mtime >= mtime => best,
             _ => Some((path, mtime)),
         };
     }
@@ -689,6 +1142,20 @@ fn cached_most_recent_jsonl(dir: &Path, cache: &mut ResolverCache) -> Option<(Pa
     result
 }
 
+fn cached_most_recent_pi_jsonl_for_cwd(
+    dir: &Path,
+    cwd: &Path,
+    cache: &mut ResolverCache,
+) -> Option<(PathBuf, u64)> {
+    let key = (dir.to_path_buf(), cwd.to_path_buf());
+    if let Some(hit) = cache.recent_pi_jsonl_by_cwd.get(&key) {
+        return hit.clone();
+    }
+    let result = most_recent_pi_jsonl_for_cwd(dir, cwd);
+    cache.recent_pi_jsonl_by_cwd.insert(key, result.clone());
+    result
+}
+
 fn cached_most_recent_jsonl_recursive(
     root: &Path,
     cache: &mut ResolverCache,
@@ -707,8 +1174,231 @@ struct ResolveContext<'a> {
     environ: HashMap<String, String>,
     home: PathBuf,
     root: PathBuf,
+    session_root_is_custom: bool,
+    pi_filter_local_cwd: bool,
     cwd: Option<PathBuf>,
     cache: &'a mut ResolverCache,
+}
+
+fn session_id_from_open_file(provider: Provider, path: &Path) -> Option<String> {
+    match provider {
+        Provider::Pi => pi_session_id_from_file(path),
+        Provider::Claude | Provider::Codex => {
+            let raw = path.to_string_lossy();
+            is_session_file_path(&raw)
+                .then(|| extract_session_id_from_path(&raw))
+                .flatten()
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PiProcessSessionInfo {
+    session_id: String,
+    project_path: PathBuf,
+    file_path: PathBuf,
+    logical_modified_ms: i64,
+}
+
+fn pi_process_file_mtime_ms(path: &Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(match modified.duration_since(std::time::UNIX_EPOCH) {
+        Ok(elapsed) => elapsed.as_millis().min(i64::MAX as u128) as i64,
+        Err(error) => -(error.duration().as_millis().min(i64::MAX as u128) as i64),
+    })
+}
+
+fn pi_process_iso_timestamp_ms(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|timestamp| timestamp.timestamp_millis())
+}
+
+fn pi_process_json_timestamp_ms(value: &Value) -> Option<i64> {
+    let value = value.as_f64()?;
+    value
+        .is_finite()
+        .then(|| value.clamp(i64::MIN as f64, i64::MAX as f64) as i64)
+}
+
+fn read_pi_process_session_info(path: &Path) -> Option<PiProcessSessionInfo> {
+    let file_mtime_ms = pi_process_file_mtime_ms(path)?;
+    let file = std::fs::File::open(path).ok()?;
+    let mut header_reader =
+        BufReader::new(file).take((PI_MAX_SESSION_HEADER_SCAN_BYTES + 1) as u64);
+    let mut scanned_header_bytes = 0usize;
+    let (session_id, project_path, header_timestamp_ms) = loop {
+        let mut physical_line = Vec::new();
+        let bytes_read = header_reader.read_until(b'\n', &mut physical_line).ok()?;
+        if bytes_read == 0 {
+            return None;
+        }
+        scanned_header_bytes = scanned_header_bytes.saturating_add(bytes_read);
+        if scanned_header_bytes > PI_MAX_SESSION_HEADER_SCAN_BYTES {
+            return None;
+        }
+        let line = String::from_utf8_lossy(&physical_line);
+        let Ok(entry) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if entry.get("type").and_then(Value::as_str) != Some("session") {
+            return None;
+        }
+        let id = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| valid_pi_session_id(id))?;
+        let cwd = entry
+            .get("cwd")
+            .and_then(Value::as_str)
+            .filter(|cwd| !cwd.is_empty())?;
+        let header_timestamp_ms = entry
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(pi_process_iso_timestamp_ms);
+        break (id.to_string(), PathBuf::from(cwd), header_timestamp_ms);
+    };
+
+    // Keep using the same buffered reader so bytes fetched past the header are
+    // not lost when the 1 MiB-limited header view is removed.
+    let mut reader = header_reader.into_inner();
+    let mut last_activity_ms: Option<i64> = None;
+    loop {
+        let mut physical_line = Vec::new();
+        let bytes_read = reader.read_until(b'\n', &mut physical_line).ok()?;
+        if bytes_read == 0 {
+            break;
+        }
+        let line = String::from_utf8_lossy(&physical_line);
+        let Ok(entry) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if entry.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        let Some(message) = entry.get("message").and_then(Value::as_object) else {
+            continue;
+        };
+        let role = message.get("role").and_then(Value::as_str);
+        if !matches!(role, Some("user" | "assistant")) || !message.contains_key("content") {
+            continue;
+        }
+        let activity_ms = message
+            .get("timestamp")
+            .and_then(pi_process_json_timestamp_ms)
+            .or_else(|| {
+                entry
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .and_then(pi_process_iso_timestamp_ms)
+            });
+        if let Some(activity_ms) = activity_ms {
+            last_activity_ms = Some(last_activity_ms.unwrap_or(0).max(activity_ms));
+        }
+    }
+
+    Some(PiProcessSessionInfo {
+        session_id,
+        project_path,
+        file_path: path.to_path_buf(),
+        logical_modified_ms: last_activity_ms
+            .filter(|timestamp| *timestamp > 0)
+            .or(header_timestamp_ms)
+            .unwrap_or(file_mtime_ms),
+    })
+}
+
+fn normalize_process_path_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn pi_process_cwd_matches(session_cwd: &Path, launch_cwd: &Path) -> bool {
+    let resolved = resolve_pi_process_path(&session_cwd.to_string_lossy(), Some(launch_cwd));
+    normalize_process_path_lexically(&resolved) == normalize_process_path_lexically(launch_cwd)
+}
+
+fn pi_process_sessions_in_dir(dir: &Path) -> Vec<PiProcessSessionInfo> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut sessions: Vec<_> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                return None;
+            }
+            read_pi_process_session_info(&path)
+        })
+        .collect();
+    sessions.sort_by(|left, right| {
+        right
+            .logical_modified_ms
+            .cmp(&left.logical_modified_ms)
+            .then_with(|| left.file_path.cmp(&right.file_path))
+    });
+    sessions
+}
+
+fn pi_process_local_sessions(ctx: &ResolveContext<'_>) -> Vec<PiProcessSessionInfo> {
+    let Some(cwd) = ctx.cwd.as_deref() else {
+        return Vec::new();
+    };
+    if ctx.session_root_is_custom {
+        let mut sessions = pi_process_sessions_in_dir(&ctx.root);
+        if ctx.pi_filter_local_cwd {
+            sessions.retain(|session| pi_process_cwd_matches(&session.project_path, cwd));
+        }
+        sessions
+    } else {
+        pi_process_sessions_in_dir(&ctx.root.join(encode_pi_cwd(&cwd.to_string_lossy())))
+    }
+}
+
+fn pi_exact_or_prefix_process_session<'a>(
+    sessions: &'a [PiProcessSessionInfo],
+    selector: &str,
+) -> Option<&'a PiProcessSessionInfo> {
+    sessions
+        .iter()
+        .find(|session| session.session_id == selector)
+        .or_else(|| {
+            sessions
+                .iter()
+                .find(|session| session.session_id.starts_with(selector))
+        })
+}
+
+fn resolve_pi_process_selector(
+    ctx: &ResolveContext<'_>,
+    selector: &str,
+) -> Option<PiProcessSessionInfo> {
+    let local = pi_process_local_sessions(ctx);
+    let index = pi_exact_or_prefix_process_session(&local, selector).and_then(|target| {
+        local
+            .iter()
+            .position(|candidate| candidate.file_path == target.file_path)
+    })?;
+    local.into_iter().nth(index)
+}
+
+fn resolve_pi_process_local_exact(
+    ctx: &ResolveContext<'_>,
+    session_id: &str,
+) -> Option<PiProcessSessionInfo> {
+    pi_process_local_sessions(ctx)
+        .into_iter()
+        .find(|session| session.session_id == session_id)
 }
 
 fn resolve_from_open_files(
@@ -718,22 +1408,208 @@ fn resolve_from_open_files(
 ) -> Option<MappedSession> {
     let files: Vec<PathBuf> = read_open_jsonl_files(pid)
         .into_iter()
-        .filter(|f| is_session_file_path(&f.to_string_lossy()))
+        .filter(|path| session_id_from_open_file(provider, path).is_some())
         .collect();
     if files.is_empty() {
         return None;
     }
     let in_root = files.iter().find(|f| f.starts_with(&ctx.root));
     let chosen = in_root.cloned().or_else(|| files.first().cloned())?;
-    let sid = extract_session_id_from_path(&chosen.to_string_lossy())?;
+    let sid = session_id_from_open_file(provider, &chosen)?;
+    let project_path = if provider == Provider::Pi {
+        pi_project_path_from_file(&chosen, ctx.cwd.as_deref())
+    } else {
+        ctx.cwd.clone()
+    };
     Some(MappedSession {
         pid,
         provider: Some(provider),
         session_id: Some(sid),
         file_path: Some(chosen.to_string_lossy().to_string()),
         home: Some(ctx.home.to_string_lossy().to_string()),
-        project_path: ctx.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
+        project_path: project_path.map(|path| path.to_string_lossy().to_string()),
         confidence: 100,
+    })
+}
+
+fn pi_session_arg(args: &[String]) -> Option<(&str, bool)> {
+    let parsed = parse_pi_process_args(args);
+    parsed
+        .session
+        .filter(|value| !value.is_empty())
+        .map(|value| (value, false))
+        .or_else(|| {
+            parsed
+                .session_id
+                .filter(|value| !value.is_empty())
+                .map(|value| (value, true))
+        })
+}
+
+fn resolve_from_pi_session_arg(
+    ctx: &mut ResolveContext,
+    args: &[String],
+    pid: u32,
+) -> Option<MappedSession> {
+    let (value, preallocated) = pi_session_arg(args)?;
+    let looks_like_path = value.contains('/') || value.contains('\\') || value.ends_with(".jsonl");
+    if looks_like_path {
+        let path = resolve_pi_process_path(value, ctx.cwd.as_deref());
+        let header = read_pi_session_header(&path);
+        let session_id = header
+            .as_ref()
+            .map(|(session_id, _)| session_id.clone())
+            .or_else(|| pi_session_id_from_file(&path))?;
+        let project_path = header
+            .map(|(_, session_cwd)| {
+                resolve_pi_process_path(&session_cwd.to_string_lossy(), ctx.cwd.as_deref())
+            })
+            .or_else(|| ctx.cwd.clone());
+        return Some(MappedSession {
+            pid,
+            provider: Some(Provider::Pi),
+            session_id: Some(session_id),
+            file_path: Some(path.to_string_lossy().to_string()),
+            home: Some(ctx.home.to_string_lossy().to_string()),
+            project_path: project_path.map(|path| path.to_string_lossy().to_string()),
+            confidence: 100,
+        });
+    }
+    if preallocated && !valid_pi_session_id(value) {
+        return None;
+    }
+    let target = if preallocated {
+        resolve_pi_process_local_exact(ctx, value)
+    } else {
+        resolve_pi_process_selector(ctx, value)
+    };
+    if let Some(target) = target {
+        return Some(MappedSession {
+            pid,
+            provider: Some(Provider::Pi),
+            session_id: Some(target.session_id),
+            file_path: Some(target.file_path.to_string_lossy().to_string()),
+            home: Some(ctx.home.to_string_lossy().to_string()),
+            project_path: Some(
+                resolve_pi_process_path(&target.project_path.to_string_lossy(), ctx.cwd.as_deref())
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            confidence: 100,
+        });
+    }
+    preallocated.then(|| MappedSession {
+        pid,
+        provider: Some(Provider::Pi),
+        session_id: Some(value.to_string()),
+        file_path: None,
+        home: Some(ctx.home.to_string_lossy().to_string()),
+        project_path: ctx
+            .cwd
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
+        confidence: 95,
+    })
+}
+
+fn hook_string<'a>(value: &'a Value, snake: &str, camel: &str) -> Option<&'a str> {
+    value
+        .get(snake)
+        .or_else(|| value.get(camel))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn resolve_from_starling_pi_env(
+    ctx: &mut ResolveContext,
+    args: &[String],
+    pid: u32,
+) -> Option<MappedSession> {
+    if let Some(hook_path) = ctx
+        .environ
+        .get("STARLING_PI_HOOK_FILE")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        let hook_path = resolve_process_path(hook_path, ctx.cwd.as_deref());
+        if let Ok(raw) = std::fs::read_to_string(hook_path) {
+            for line in raw.lines().rev() {
+                let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+                    continue;
+                };
+                let source = value
+                    .get("payload")
+                    .filter(|payload| payload.is_object())
+                    .unwrap_or(&value);
+                let Some(session_id) = hook_string(source, "session_id", "sessionId") else {
+                    continue;
+                };
+                if !valid_pi_session_id(session_id) {
+                    continue;
+                }
+                let event_cwd = source
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| resolve_process_path(value, ctx.cwd.as_deref()));
+                let transcript = hook_string(source, "transcript_path", "transcriptPath")
+                    .map(|path| {
+                        resolve_pi_process_path(path, event_cwd.as_deref().or(ctx.cwd.as_deref()))
+                    })
+                    .or_else(|| find_session_file_by_id(&ctx.root, session_id, Some(ctx.cache)));
+                let project_path = transcript
+                    .as_deref()
+                    .and_then(|path| {
+                        pi_project_path_from_file(path, event_cwd.as_deref().or(ctx.cwd.as_deref()))
+                    })
+                    .or(event_cwd)
+                    .or_else(|| ctx.cwd.clone());
+                return Some(MappedSession {
+                    pid,
+                    provider: Some(Provider::Pi),
+                    project_path: project_path.map(|path| path.to_string_lossy().to_string()),
+                    file_path: transcript.map(|path| path.to_string_lossy().to_string()),
+                    session_id: Some(session_id.to_string()),
+                    home: Some(ctx.home.to_string_lossy().to_string()),
+                    confidence: 110,
+                });
+            }
+        }
+    }
+
+    let session_id = ctx
+        .environ
+        .get("STARLING_SESSION_ID")
+        .map(|value| value.trim())
+        .filter(|value| valid_pi_session_id(value))?;
+    let transcript_from_arg = pi_session_arg(args).and_then(|(value, _)| {
+        let looks_like_path =
+            value.contains('/') || value.contains('\\') || value.ends_with(".jsonl");
+        if !looks_like_path {
+            return None;
+        }
+        let path = resolve_pi_process_path(value, ctx.cwd.as_deref());
+        read_pi_session_header(&path)
+            .filter(|(header_id, _)| header_id == session_id)
+            .map(|_| path)
+    });
+    let transcript = transcript_from_arg
+        .or_else(|| resolve_pi_process_local_exact(ctx, session_id).map(|target| target.file_path))
+        .or_else(|| find_session_file_by_id(&ctx.root, session_id, Some(ctx.cache)));
+    let project_path = transcript
+        .as_deref()
+        .and_then(|path| pi_project_path_from_file(path, ctx.cwd.as_deref()))
+        .or_else(|| ctx.cwd.clone());
+    Some(MappedSession {
+        pid,
+        provider: Some(Provider::Pi),
+        project_path: project_path.map(|path| path.to_string_lossy().to_string()),
+        file_path: transcript.map(|path| path.to_string_lossy().to_string()),
+        session_id: Some(session_id.to_string()),
+        home: Some(ctx.home.to_string_lossy().to_string()),
+        confidence: 105,
     })
 }
 
@@ -744,13 +1620,23 @@ fn resolve_from_resume(
     provider: Provider,
 ) -> Option<MappedSession> {
     let file = find_session_file_by_id(&ctx.root, uuid, Some(ctx.cache))?;
+    let session_id = if provider == Provider::Pi {
+        uuid.to_string()
+    } else {
+        uuid.to_lowercase()
+    };
+    let project_path = if provider == Provider::Pi {
+        pi_project_path_from_file(&file, ctx.cwd.as_deref())
+    } else {
+        ctx.cwd.clone()
+    };
     Some(MappedSession {
         pid,
         provider: Some(provider),
-        session_id: Some(uuid.to_lowercase()),
+        session_id: Some(session_id),
         file_path: Some(file.to_string_lossy().to_string()),
         home: Some(ctx.home.to_string_lossy().to_string()),
-        project_path: ctx.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
+        project_path: project_path.map(|path| path.to_string_lossy().to_string()),
         confidence: 100,
     })
 }
@@ -761,13 +1647,29 @@ fn resolve_from_cwd_mtime(
     pid: u32,
 ) -> Option<MappedSession> {
     let cwd = ctx.cwd.as_ref()?;
-    let encoded = encode_claude_cwd(&cwd.to_string_lossy());
-    let dir = ctx.root.join(encoded);
     let best = match provider {
-        Provider::Claude => cached_most_recent_jsonl(&dir, ctx.cache),
+        Provider::Claude => {
+            let dir = ctx.root.join(encode_claude_cwd(&cwd.to_string_lossy()));
+            cached_most_recent_jsonl(&dir, ctx.cache)
+        }
         Provider::Codex => cached_most_recent_jsonl_recursive(&ctx.root, ctx.cache),
+        Provider::Pi if ctx.session_root_is_custom && ctx.pi_filter_local_cwd => {
+            cached_most_recent_pi_jsonl_for_cwd(&ctx.root, cwd, ctx.cache)
+        }
+        Provider::Pi if ctx.session_root_is_custom => {
+            cached_most_recent_jsonl(&ctx.root, ctx.cache)
+        }
+        Provider::Pi => {
+            let dir = ctx.root.join(encode_pi_cwd(&cwd.to_string_lossy()));
+            cached_most_recent_jsonl(&dir, ctx.cache)
+        }
     }?;
-    let sid = extract_session_id_from_path(&best.0.to_string_lossy())?;
+    let sid = match provider {
+        Provider::Pi => pi_session_id_from_file(&best.0),
+        Provider::Claude | Provider::Codex => {
+            extract_session_id_from_path(&best.0.to_string_lossy())
+        }
+    }?;
     Some(MappedSession {
         pid,
         provider: Some(provider),
@@ -847,6 +1749,43 @@ fn should_replace_mapping(existing: &MappedSession, candidate: &MappedSession) -
     candidate.confidence > existing.confidence
 }
 
+fn same_mapping_identity(existing: &MappedSession, candidate: &MappedSession) -> bool {
+    if existing.provider != Some(Provider::Pi) || candidate.provider != Some(Provider::Pi) {
+        return existing.provider == candidate.provider;
+    }
+    if let (Some(existing_path), Some(candidate_path)) = (
+        existing.file_path.as_deref(),
+        candidate.file_path.as_deref(),
+    ) {
+        return existing_path == candidate_path;
+    }
+    if let (Some(existing_project), Some(candidate_project)) = (
+        existing.project_path.as_deref(),
+        candidate.project_path.as_deref(),
+    ) {
+        return existing_project == candidate_project;
+    }
+    existing.pid == candidate.pid
+}
+
+fn insert_session_mapping(
+    result: &mut HashMap<String, Vec<MappedSession>>,
+    session_id: String,
+    candidate: MappedSession,
+) {
+    let bucket = result.entry(session_id).or_default();
+    if let Some(index) = bucket
+        .iter()
+        .position(|existing| same_mapping_identity(existing, &candidate))
+    {
+        if should_replace_mapping(&bucket[index], &candidate) {
+            bucket[index] = candidate;
+        }
+    } else {
+        bucket.push(candidate);
+    }
+}
+
 fn resolve_process(
     proc_pid: u32,
     proc_provider: Provider,
@@ -861,14 +1800,22 @@ fn resolve_process(
     visited.insert(proc_pid);
 
     let environ = read_environ(proc_pid);
-    let home = resolve_agent_home(proc_provider, &environ);
-    let root = session_root_for_home(proc_provider, &home);
     let cwd = read_cwd(proc_pid);
+    let mut home = resolve_agent_home(proc_provider, &environ);
+    if proc_provider == Provider::Pi && !home.is_absolute() {
+        if let Some(cwd) = cwd.as_deref() {
+            home = cwd.join(home);
+        }
+    }
+    let (root, session_root_is_custom, pi_filter_local_cwd) =
+        resolve_session_root(proc_provider, &home, &environ, proc_args, cwd.as_deref());
 
     let mut ctx = ResolveContext {
         environ,
         home,
         root,
+        session_root_is_custom,
+        pi_filter_local_cwd,
         cwd,
         cache,
     };
@@ -881,13 +1828,32 @@ fn resolve_process(
             return Some(m);
         }
     }
+    // Managed Pi launches expose a hook stream and preallocated session ID in
+    // their environment. These are more precise than fd/mtime heuristics.
+    if proc_provider == Provider::Pi {
+        if ctx
+            .environ
+            .get("STARLING_PI_NO_SESSION")
+            .map(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        if let Some(m) = resolve_from_starling_pi_env(&mut ctx, proc_args, proc_pid) {
+            return Some(m);
+        }
+    }
 
     // 1. fd scan first (cheap, almost always works)
     if let Some(m) = resolve_from_open_files(&mut ctx, proc_provider, proc_pid) {
         return Some(m);
     }
-    // 2. --resume <uuid>
-    if let Some(uuid) = extract_resume_uuid(proc_args) {
+    // 2. Explicit resume/session arguments.
+    if proc_provider == Provider::Pi {
+        if let Some(m) = resolve_from_pi_session_arg(&mut ctx, proc_args, proc_pid) {
+            return Some(m);
+        }
+    } else if let Some(uuid) = extract_resume_uuid(proc_args) {
         if let Some(m) = resolve_from_resume(&mut ctx, &uuid, proc_pid, proc_provider) {
             return Some(m);
         }
@@ -921,9 +1887,9 @@ fn resolve_process(
     resolve_from_cwd_mtime(&mut ctx, proc_provider, proc_pid)
 }
 
-/// Map every running claude/codex process to its session. Linux-only.
-pub fn map_processes_to_sessions() -> HashMap<String, MappedSession> {
-    let mut result: HashMap<String, MappedSession> = HashMap::new();
+/// Map every running Claude, Codex, or Pi process to its session. Linux-only.
+pub fn map_processes_to_sessions() -> HashMap<String, Vec<MappedSession>> {
+    let mut result: HashMap<String, Vec<MappedSession>> = HashMap::new();
     if !is_linux() {
         return result;
     }
@@ -958,12 +1924,7 @@ pub fn map_processes_to_sessions() -> HashMap<String, MappedSession> {
             if m.pid == 0 {
                 m.pid = pid;
             }
-            match result.get(&sid) {
-                Some(existing) if !should_replace_mapping(existing, &m) => {}
-                _ => {
-                    result.insert(sid, m);
-                }
-            }
+            insert_session_mapping(&mut result, sid, m);
         }
     }
     result
@@ -1011,6 +1972,25 @@ pub fn map_process_tree_to_session_since(root_pid: u32, since_ms: u64) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_test_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "starling-process-map-{label}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    fn write_pi_session(path: &Path, session_id: &str, cwd: &Path) {
+        std::fs::write(
+            path,
+            format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"{session_id}\",\"timestamp\":\"2026-07-24T12:34:56.789Z\",\"cwd\":\"{}\"}}\n",
+                cwd.to_string_lossy()
+            ),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn parses_proc_stat_basic() {
@@ -1062,6 +2042,10 @@ mod tests {
             provider_from_cmdline(&["/usr/bin/codex".into()]),
             Some(Provider::Codex)
         );
+        assert_eq!(
+            provider_from_cmdline(&["/usr/local/bin/pi".into()]),
+            Some(Provider::Pi)
+        );
         assert_eq!(provider_from_cmdline(&["/usr/bin/ls".into()]), None);
     }
 
@@ -1074,6 +2058,51 @@ mod tests {
         assert_eq!(
             provider_from_cmdline(&["node".into(), "/x/y/z/codex.js".into(), "--foo".into()]),
             Some(Provider::Codex)
+        );
+        assert_eq!(
+            provider_from_cmdline(&[
+                "node".into(),
+                "/opt/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js".into(),
+            ]),
+            Some(Provider::Pi)
+        );
+        assert_eq!(
+            provider_from_cmdline(&[
+                "bun".into(),
+                "/data/dev/pi/packages/coding-agent/dist/cli.js".into(),
+            ]),
+            Some(Provider::Pi)
+        );
+        assert_eq!(
+            provider_from_cmdline(&[
+                "/usr/bin/node".into(),
+                "/opt/lib/node_modules/@earendil-works/pi-coding-agent/bin/pi".into(),
+                "--mode".into(),
+                "rpc".into(),
+            ]),
+            Some(Provider::Pi)
+        );
+        assert_eq!(
+            provider_from_cmdline(&[
+                "node".into(),
+                "/opt/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js".into(),
+                "-p".into(),
+                "codex".into(),
+            ]),
+            Some(Provider::Pi)
+        );
+        assert_eq!(
+            provider_from_cmdline(&[
+                "node".into(),
+                "/opt/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js".into(),
+                "-p".into(),
+                "claude".into(),
+            ]),
+            Some(Provider::Pi)
+        );
+        assert_eq!(
+            provider_from_cmdline(&["python".into(), "script.py".into(), "pi".into()]),
+            None
         );
     }
 
@@ -1116,6 +2145,8 @@ mod tests {
             environ: HashMap::new(),
             home: dir.clone(),
             root: dir.clone(),
+            session_root_is_custom: false,
+            pi_filter_local_cwd: false,
             cwd: Some(PathBuf::from("/fallback")),
             cache: &mut cache,
         };
@@ -1172,11 +2203,27 @@ mod tests {
     }
 
     #[test]
+    fn encode_pi_cwd_matches_pi_layout() {
+        assert_eq!(encode_pi_cwd("/home/user/project"), "--home-user-project--");
+        assert_eq!(encode_pi_cwd("/"), "----");
+        assert_eq!(
+            encode_pi_cwd(r"C:\Users\me\project"),
+            "--C--Users-me-project--"
+        );
+    }
+
+    #[test]
     fn session_file_path_basics() {
         assert!(is_session_file_path(
             "/x/y/a1b2c3d4-e5f6-7890-abcd-ef1234567890.jsonl"
         ));
         assert!(is_session_file_path("/x/y/rollout-2026-01-01-abc.jsonl"));
+        assert!(is_session_file_path(
+            "/x/y/2026-07-24T12-34-56-789Z_PiSession_01.jsonl"
+        ));
+        assert!(!is_session_file_path(
+            "/x/y/not-a-pi-timestamp_PiSession_01.jsonl"
+        ));
         assert!(!is_session_file_path("/x/y/history.jsonl"));
         assert!(!is_session_file_path("/x/y/todos.jsonl"));
         assert!(!is_session_file_path("/x/y/abc.txt"));
@@ -1191,6 +2238,10 @@ mod tests {
         assert_eq!(
             extract_session_id_from_path("/p/rollout-abc.jsonl"),
             Some("rollout-abc".into())
+        );
+        assert_eq!(
+            extract_session_id_from_path("/p/2026-07-24T12-34-56-789Z_CaseSensitive_ID.1.jsonl"),
+            Some("CaseSensitive_ID.1".into())
         );
     }
 
@@ -1238,6 +2289,8 @@ mod tests {
             environ: HashMap::new(),
             home: root.clone(),
             root: root.clone(),
+            session_root_is_custom: false,
+            pi_filter_local_cwd: false,
             cwd: Some(cwd),
             cache: &mut cache,
         };
@@ -1266,6 +2319,8 @@ mod tests {
             environ: HashMap::new(),
             home: root.clone(),
             root: root.clone(),
+            session_root_is_custom: false,
+            pi_filter_local_cwd: false,
             cwd: Some(cwd),
             cache: &mut cache,
         };
@@ -1280,10 +2335,640 @@ mod tests {
     }
 
     #[test]
+    fn resolves_pi_session_root_precedence_and_project_setting() {
+        let dir = temp_test_dir("pi-roots");
+        let home = dir.join("agent");
+        let cwd = dir.join("workspace");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(cwd.join(".pi")).unwrap();
+
+        let empty_env = HashMap::new();
+        let (root, custom, filter_cwd) =
+            resolve_session_root(Provider::Pi, &home, &empty_env, &[], Some(&cwd));
+        assert_eq!(root, home.join("sessions"));
+        assert!(!custom);
+        assert!(!filter_cwd);
+
+        std::fs::write(
+            home.join("settings.json"),
+            r#"{"sessionDir":"global-sessions"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(".pi/settings.json"),
+            r#"{"sessionDir":"project-sessions"}"#,
+        )
+        .unwrap();
+        let (root, custom, filter_cwd) =
+            resolve_session_root(Provider::Pi, &home, &empty_env, &[], Some(&cwd));
+        assert_eq!(root, cwd.join("project-sessions"));
+        assert!(custom);
+        assert!(filter_cwd);
+
+        let mut env = HashMap::new();
+        env.insert(
+            "PI_CODING_AGENT_SESSION_DIR".into(),
+            "/tmp/pi-env-sessions".into(),
+        );
+        let (root, custom, filter_cwd) =
+            resolve_session_root(Provider::Pi, &home, &env, &[], Some(&cwd));
+        assert_eq!(root, PathBuf::from("/tmp/pi-env-sessions"));
+        assert!(custom);
+        assert!(filter_cwd);
+
+        let args = vec!["pi".into(), "--session-dir".into(), "cli-sessions".into()];
+        let (root, custom, filter_cwd) =
+            resolve_session_root(Provider::Pi, &home, &env, &args, Some(&cwd));
+        assert_eq!(root, cwd.join("cli-sessions"));
+        assert!(custom);
+        assert!(filter_cwd);
+
+        let repeated_args = vec![
+            "pi".into(),
+            "--session-dir".into(),
+            "first".into(),
+            "--session-dir".into(),
+            "second".into(),
+        ];
+        let (root, custom, filter_cwd) =
+            resolve_session_root(Provider::Pi, &home, &env, &repeated_args, Some(&cwd));
+        assert_eq!(root, cwd.join("second"));
+        assert!(custom);
+        assert!(filter_cwd);
+
+        let consumed_session_dir = vec![
+            "pi".into(),
+            "--system-prompt".into(),
+            "--session-dir".into(),
+        ];
+        let (root, custom, filter_cwd) =
+            resolve_session_root(Provider::Pi, &home, &env, &consumed_session_dir, Some(&cwd));
+        assert_eq!(root, PathBuf::from("/tmp/pi-env-sessions"));
+        assert!(custom);
+        assert!(filter_cwd);
+
+        // Pi's parser does not support the `--flag=value` form. Do not map a
+        // process to a directory Pi itself ignored.
+        let invalid_args = vec!["pi".into(), "--session-dir=ignored".into()];
+        let (root, custom, filter_cwd) =
+            resolve_session_root(Provider::Pi, &home, &env, &invalid_args, Some(&cwd));
+        assert_eq!(root, PathBuf::from("/tmp/pi-env-sessions"));
+        assert!(custom);
+        assert!(filter_cwd);
+
+        std::fs::write(cwd.join(".pi/settings.json"), r#"{"sessionDir":""}"#).unwrap();
+        let (root, custom, filter_cwd) =
+            resolve_session_root(Provider::Pi, &home, &empty_env, &[], Some(&cwd));
+        assert_eq!(root, home.join("sessions"));
+        assert!(!custom);
+        assert!(!filter_cwd);
+
+        let default_local = home
+            .join("sessions")
+            .join(encode_pi_cwd(&cwd.to_string_lossy()));
+        let explicit_default = vec![
+            "pi".into(),
+            "--session-dir".into(),
+            default_local.to_string_lossy().to_string(),
+        ];
+        let (root, custom, filter_cwd) = resolve_session_root(
+            Provider::Pi,
+            &home,
+            &empty_env,
+            &explicit_default,
+            Some(&cwd),
+        );
+        assert_eq!(root, default_local);
+        assert!(custom);
+        assert!(!filter_cwd);
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn pi_default_cwd_fallback_uses_encoded_project_dir_and_preserves_id_case() {
+        let dir = temp_test_dir("pi-default-cwd");
+        let home = dir.join("agent");
+        let root = home.join("sessions");
+        let cwd = dir.join("workspace");
+        let project_sessions = root.join(encode_pi_cwd(&cwd.to_string_lossy()));
+        std::fs::create_dir_all(&project_sessions).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let transcript = project_sessions.join("2026-07-24T12-34-56-789Z_CaseSensitive_01.jsonl");
+        write_pi_session(&transcript, "CaseSensitive_01", &cwd);
+
+        let mut cache = ResolverCache::default();
+        let mut ctx = ResolveContext {
+            environ: HashMap::new(),
+            home,
+            root,
+            session_root_is_custom: false,
+            pi_filter_local_cwd: false,
+            cwd: Some(cwd),
+            cache: &mut cache,
+        };
+        let mapped = resolve_from_cwd_mtime(&mut ctx, Provider::Pi, 1234).unwrap();
+        assert_eq!(mapped.session_id.as_deref(), Some("CaseSensitive_01"));
+        assert_eq!(
+            mapped.file_path.as_deref(),
+            Some(transcript.to_string_lossy().as_ref())
+        );
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn pi_custom_session_root_is_scanned_directly() {
+        let dir = temp_test_dir("pi-custom-root");
+        let home = dir.join("agent");
+        let root = dir.join("custom-sessions");
+        let cwd = dir.join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let transcript = root.join("2026-07-24T12-34-56-789Z_CustomRoot_ID.jsonl");
+        write_pi_session(&transcript, "CustomRoot_ID", &cwd);
+        let unrelated = root.join("2026-07-24T12-35-56-789Z_Unrelated_ID.jsonl");
+        write_pi_session(&unrelated, "Unrelated_ID", Path::new("/other/project"));
+
+        let mut cache = ResolverCache::default();
+        let mut ctx = ResolveContext {
+            environ: HashMap::new(),
+            home,
+            root,
+            session_root_is_custom: true,
+            pi_filter_local_cwd: true,
+            cwd: Some(cwd),
+            cache: &mut cache,
+        };
+        let mapped = resolve_from_cwd_mtime(&mut ctx, Provider::Pi, 4321).unwrap();
+        assert_eq!(mapped.session_id.as_deref(), Some("CustomRoot_ID"));
+        assert_eq!(
+            mapped.file_path.as_deref(),
+            Some(transcript.to_string_lossy().as_ref())
+        );
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn pi_explicit_default_session_dir_does_not_filter_header_cwd() {
+        let dir = temp_test_dir("pi-explicit-default-root");
+        let home = dir.join("agent");
+        let cwd = dir.join("workspace");
+        let root = home
+            .join("sessions")
+            .join(encode_pi_cwd(&cwd.to_string_lossy()));
+        std::fs::create_dir_all(&root).unwrap();
+        let transcript = root.join("moved.jsonl");
+        write_pi_session(&transcript, "MovedSession_ID", Path::new("/former/project"));
+
+        let mut cache = ResolverCache::default();
+        let mut ctx = ResolveContext {
+            environ: HashMap::new(),
+            home,
+            root,
+            session_root_is_custom: true,
+            pi_filter_local_cwd: false,
+            cwd: Some(cwd),
+            cache: &mut cache,
+        };
+        let mapped = resolve_from_cwd_mtime(&mut ctx, Provider::Pi, 4322).unwrap();
+        assert_eq!(mapped.session_id.as_deref(), Some("MovedSession_ID"));
+        assert_eq!(
+            mapped.file_path.as_deref(),
+            Some(transcript.to_string_lossy().as_ref())
+        );
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn finds_pi_timestamp_session_by_exact_case_sensitive_id() {
+        let dir = temp_test_dir("pi-id-lookup");
+        let root = dir.join("sessions");
+        let project = root.join("--work-project--");
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript = project.join("2026-07-24T12-34-56-789Z_MixedCase_01.jsonl");
+        write_pi_session(&transcript, "MixedCase_01", Path::new("/work/project"));
+
+        let mut cache = ResolverCache::default();
+        assert_eq!(
+            find_session_file_by_id(&root, "MixedCase_01", Some(&mut cache)),
+            Some(transcript)
+        );
+        assert_eq!(
+            find_session_file_by_id(&root, "mixedcase_01", Some(&mut cache)),
+            None
+        );
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn pi_header_reader_rejects_an_oversized_first_record() {
+        let dir = temp_test_dir("pi-large-header");
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("oversized.jsonl");
+        std::fs::write(
+            &transcript,
+            vec![b'x'; PI_MAX_SESSION_HEADER_SCAN_BYTES + 1],
+        )
+        .unwrap();
+
+        assert!(read_pi_session_header(&transcript).is_none());
+        assert!(read_pi_process_session_info(&transcript).is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn resolves_managed_pi_hook_and_skips_malformed_tail_line() {
+        let dir = temp_test_dir("pi-hook");
+        let home = dir.join("agent");
+        let root = home.join("sessions");
+        let cwd = dir.join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let transcript = root.join("2026-07-24T12-34-56-789Z_HookedSession_01.jsonl");
+        write_pi_session(&transcript, "HookedSession_01", &cwd);
+        let hook = dir.join("pi-hook.jsonl");
+        std::fs::write(
+            &hook,
+            format!(
+                "{{\"event\":\"session_start\",\"payload\":{{\"sessionId\":\"HookedSession_01\",\"transcriptPath\":\"{}\",\"cwd\":\"{}\"}}}}\nnot-json\n",
+                transcript.to_string_lossy(),
+                cwd.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let mut environ = HashMap::new();
+        environ.insert(
+            "STARLING_PI_HOOK_FILE".into(),
+            hook.to_string_lossy().to_string(),
+        );
+        environ.insert("STARLING_SESSION_ID".into(), "FallbackSession_01".into());
+        let mut cache = ResolverCache::default();
+        let mut ctx = ResolveContext {
+            environ,
+            home,
+            root,
+            session_root_is_custom: false,
+            pi_filter_local_cwd: false,
+            cwd: Some(cwd.clone()),
+            cache: &mut cache,
+        };
+        let mapped = resolve_from_starling_pi_env(&mut ctx, &[], 2468).unwrap();
+        assert_eq!(mapped.session_id.as_deref(), Some("HookedSession_01"));
+        assert_eq!(mapped.provider, Some(Provider::Pi));
+        assert_eq!(
+            mapped.project_path.as_deref(),
+            Some(cwd.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            mapped.file_path.as_deref(),
+            Some(transcript.to_string_lossy().as_ref())
+        );
+        assert_eq!(mapped.confidence, 110);
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn resolves_pi_preallocated_session_id_without_lowercasing() {
+        let dir = temp_test_dir("pi-session-hint");
+        let home = dir.join("agent");
+        let root = home.join("sessions");
+        let project = root.join("--work-project--");
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript = project.join("2026-07-24T12-34-56-789Z_PreAllocated_ID.jsonl");
+        write_pi_session(&transcript, "PreAllocated_ID", Path::new("/work/project"));
+
+        let mut environ = HashMap::new();
+        environ.insert("STARLING_SESSION_ID".into(), "PreAllocated_ID".into());
+        let mut cache = ResolverCache::default();
+        let launch_cwd = PathBuf::from("/different/launch/project");
+        let mut ctx = ResolveContext {
+            environ,
+            home,
+            root,
+            session_root_is_custom: false,
+            pi_filter_local_cwd: false,
+            cwd: Some(launch_cwd),
+            cache: &mut cache,
+        };
+        let mapped = resolve_from_starling_pi_env(&mut ctx, &[], 1357).unwrap();
+        assert_eq!(mapped.session_id.as_deref(), Some("PreAllocated_ID"));
+        assert_eq!(mapped.project_path.as_deref(), Some("/work/project"));
+        assert_eq!(
+            mapped.file_path.as_deref(),
+            Some(transcript.to_string_lossy().as_ref())
+        );
+        assert_eq!(mapped.confidence, 105);
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn resolves_pi_explicit_session_path_from_header() {
+        let dir = temp_test_dir("pi-explicit-session");
+        let home = dir.join("agent");
+        let root = home.join("sessions");
+        let cwd = dir.join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let transcript = cwd.join("named-session.jsonl");
+        write_pi_session(&transcript, "NamedSession_ID", &cwd);
+
+        let args = vec![
+            "pi".into(),
+            "--session".into(),
+            transcript.to_string_lossy().to_string(),
+        ];
+        let mut cache = ResolverCache::default();
+        let mut ctx = ResolveContext {
+            environ: HashMap::new(),
+            home,
+            root,
+            session_root_is_custom: false,
+            pi_filter_local_cwd: false,
+            cwd: Some(cwd),
+            cache: &mut cache,
+        };
+        let mapped = resolve_from_pi_session_arg(&mut ctx, &args, 9753).unwrap();
+        assert_eq!(mapped.session_id.as_deref(), Some("NamedSession_ID"));
+        assert_eq!(
+            mapped.file_path.as_deref(),
+            Some(transcript.to_string_lossy().as_ref())
+        );
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn pi_process_args_respect_native_value_token_ownership() {
+        let consumed_session = vec![
+            "pi".into(),
+            "--system-prompt".into(),
+            "--session".into(),
+            "prompt".into(),
+        ];
+        assert!(pi_session_arg(&consumed_session).is_none());
+
+        let consumed_path = vec![
+            "pi".into(),
+            "--model".into(),
+            "--session".into(),
+            "path.jsonl".into(),
+        ];
+        assert!(pi_session_arg(&consumed_path).is_none());
+
+        let consumed_session_dir = vec![
+            "pi".into(),
+            "--model".into(),
+            "--session-dir".into(),
+            "--session-id".into(),
+            "Owned_ID".into(),
+        ];
+        assert!(extract_pi_session_dir(&consumed_session_dir).is_none());
+        assert_eq!(
+            pi_session_arg(&consumed_session_dir),
+            Some(("Owned_ID", true))
+        );
+
+        let empty_last_wins = vec![
+            "pi".into(),
+            "--session".into(),
+            "Earlier".into(),
+            "--session".into(),
+            "".into(),
+            "--session-id".into(),
+            "Fallback_ID".into(),
+        ];
+        assert_eq!(
+            pi_session_arg(&empty_last_wins),
+            Some(("Fallback_ID", true))
+        );
+    }
+
+    #[test]
+    fn pi_process_selector_prefers_current_project_before_global_matches() {
+        let dir = temp_test_dir("pi-local-selector");
+        let home = dir.join("agent");
+        let root = home.join("sessions");
+        let current_cwd = dir.join("current-project");
+        let other_cwd = dir.join("other-project");
+        let current_dir = root.join(encode_pi_cwd(&current_cwd.to_string_lossy()));
+        let other_dir = root.join(encode_pi_cwd(&other_cwd.to_string_lossy()));
+        std::fs::create_dir_all(&current_dir).unwrap();
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let current = current_dir.join("current.jsonl");
+        let other = other_dir.join("other.jsonl");
+        write_pi_session(&current, "SharedPrefix_Current", &current_cwd);
+        write_pi_session(&other, "SharedPrefix_Other", &other_cwd);
+
+        let args = vec!["pi".into(), "--session".into(), "SharedPrefix".into()];
+        let mut cache = ResolverCache::default();
+        let mut ctx = ResolveContext {
+            environ: HashMap::new(),
+            home,
+            root,
+            session_root_is_custom: false,
+            pi_filter_local_cwd: false,
+            cwd: Some(current_cwd.clone()),
+            cache: &mut cache,
+        };
+        let mapped = resolve_from_pi_session_arg(&mut ctx, &args, 9755).unwrap();
+
+        assert_eq!(mapped.session_id.as_deref(), Some("SharedPrefix_Current"));
+        assert_eq!(
+            mapped.file_path.as_deref(),
+            Some(current.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            mapped.project_path.as_deref(),
+            Some(current_cwd.to_string_lossy().as_ref())
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn pi_process_prefix_uses_message_activity_instead_of_file_mtime() {
+        let dir = temp_test_dir("pi-logical-selector");
+        let home = dir.join("agent");
+        let root = home.join("sessions");
+        let cwd = dir.join("project");
+        let local = root.join(encode_pi_cwd(&cwd.to_string_lossy()));
+        std::fs::create_dir_all(&local).unwrap();
+        let logically_newer = local.join("newer-activity.jsonl");
+        let newer_header = format!(
+            "{{\"type\":\"session\",\"version\":3,\"id\":\"Activity_Newer\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"cwd\":\"{}\"}}\n",
+            cwd.to_string_lossy()
+        );
+        std::fs::write(
+            &logically_newer,
+            format!(
+                "{newer_header}{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"new\",\"timestamp\":2000}}}}\n"
+            ),
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let newer_mtime = local.join("newer-mtime.jsonl");
+        let older_header = format!(
+            "{{\"type\":\"session\",\"version\":3,\"id\":\"Activity_Older\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"cwd\":\"{}\"}}\n",
+            cwd.to_string_lossy()
+        );
+        std::fs::write(
+            &newer_mtime,
+            format!(
+                "{older_header}{{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"content\":[],\"timestamp\":1000}}}}\n"
+            ),
+        )
+        .unwrap();
+        assert!(
+            pi_process_file_mtime_ms(&newer_mtime) >= pi_process_file_mtime_ms(&logically_newer)
+        );
+
+        let args = vec!["pi".into(), "--session".into(), "Activity_".into()];
+        let mut cache = ResolverCache::default();
+        let mut ctx = ResolveContext {
+            environ: HashMap::new(),
+            home,
+            root,
+            session_root_is_custom: false,
+            pi_filter_local_cwd: false,
+            cwd: Some(cwd),
+            cache: &mut cache,
+        };
+        let mapped = resolve_from_pi_session_arg(&mut ctx, &args, 9756).unwrap();
+
+        assert_eq!(mapped.session_id.as_deref(), Some("Activity_Newer"));
+        assert_eq!(
+            mapped.file_path.as_deref(),
+            Some(logically_newer.to_string_lossy().as_ref())
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pi_process_map_uses_last_file_url_selector_and_header_project() {
+        let dir = temp_test_dir("pi-file-url-session");
+        let home = dir.join("agent");
+        let root = home.join("sessions");
+        let launch_cwd = dir.join("launch-workspace");
+        let header_cwd = dir.join("header-workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&launch_cwd).unwrap();
+        std::fs::create_dir_all(&header_cwd).unwrap();
+        let transcript = dir.join("named session.jsonl");
+        write_pi_session(&transcript, "FileUrlSession_ID", &header_cwd);
+        let file_url = format!("file://{}", transcript.to_string_lossy()).replace(' ', "%20");
+        let args = vec![
+            "pi".into(),
+            "--session".into(),
+            "ignored.jsonl".into(),
+            "--session".into(),
+            file_url,
+        ];
+
+        let mut cache = ResolverCache::default();
+        let mut ctx = ResolveContext {
+            environ: HashMap::new(),
+            home,
+            root,
+            session_root_is_custom: false,
+            pi_filter_local_cwd: false,
+            cwd: Some(launch_cwd),
+            cache: &mut cache,
+        };
+        let mapped = resolve_from_pi_session_arg(&mut ctx, &args, 9754).unwrap();
+
+        assert_eq!(mapped.session_id.as_deref(), Some("FileUrlSession_ID"));
+        assert_eq!(
+            mapped.file_path.as_deref(),
+            Some(transcript.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            mapped.project_path.as_deref(),
+            Some(header_cwd.to_string_lossy().as_ref())
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn resolves_pi_session_id_before_transcript_exists() {
+        let dir = temp_test_dir("pi-new-session-id");
+        let home = dir.join("agent");
+        let root = home.join("sessions");
+        let cwd = dir.join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let args = vec!["pi".into(), "--session-id".into(), "NewSession_ID".into()];
+
+        let mut cache = ResolverCache::default();
+        let mut ctx = ResolveContext {
+            environ: HashMap::new(),
+            home,
+            root,
+            session_root_is_custom: false,
+            pi_filter_local_cwd: false,
+            cwd: Some(cwd),
+            cache: &mut cache,
+        };
+        let mapped = resolve_from_pi_session_arg(&mut ctx, &args, 8642).unwrap();
+        assert_eq!(mapped.session_id.as_deref(), Some("NewSession_ID"));
+        assert!(mapped.file_path.is_none());
+        assert_eq!(mapped.confidence, 95);
+
+        let invalid_equals = vec!["pi".into(), "--session-id=Ignored_ID".into()];
+        assert!(resolve_from_pi_session_arg(&mut ctx, &invalid_equals, 8642).is_none());
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn pi_process_map_keeps_same_id_in_distinct_projects() {
+        let mapped = |pid, project: &str, file: &str, confidence| MappedSession {
+            pid,
+            provider: Some(Provider::Pi),
+            project_path: Some(project.into()),
+            file_path: Some(file.into()),
+            session_id: Some("SharedID".into()),
+            home: None,
+            confidence,
+        };
+        let mut sessions = HashMap::new();
+        insert_session_mapping(
+            &mut sessions,
+            "SharedID".into(),
+            mapped(10, "/work/a", "/sessions/a.jsonl", 80),
+        );
+        insert_session_mapping(
+            &mut sessions,
+            "SharedID".into(),
+            mapped(20, "/work/b", "/sessions/b.jsonl", 90),
+        );
+        insert_session_mapping(
+            &mut sessions,
+            "SharedID".into(),
+            mapped(30, "/work/a", "/sessions/a.jsonl", 110),
+        );
+
+        let bucket = sessions.get("SharedID").unwrap();
+        assert_eq!(bucket.len(), 2);
+        assert!(bucket.iter().any(|entry| entry.pid == 20));
+        assert!(bucket.iter().any(|entry| entry.pid == 30));
+        assert!(!bucket.iter().any(|entry| entry.pid == 10));
+    }
+
+    #[test]
     fn comm_filter() {
         assert!(comm_might_be_agent("claude"));
+        assert!(comm_might_be_agent("pi"));
         assert!(comm_might_be_agent("node"));
         assert!(comm_might_be_agent("bash"));
+        assert!(!comm_might_be_agent("pip"));
+        assert!(!comm_might_be_agent("pipewire"));
         assert!(!comm_might_be_agent("chrome"));
         assert!(!comm_might_be_agent(""));
     }
@@ -1299,6 +2984,11 @@ mod tests {
         env.insert("CODEX_HOME".into(), "~/.codex_xyz".into());
         let home = resolve_agent_home(Provider::Codex, &env);
         assert!(home.to_string_lossy().ends_with(".codex_xyz"));
+
+        let mut env = HashMap::new();
+        env.insert("PI_CODING_AGENT_DIR".into(), "/tmp/.pi-agent-xyz".into());
+        let home = resolve_agent_home(Provider::Pi, &env);
+        assert_eq!(home, PathBuf::from("/tmp/.pi-agent-xyz"));
     }
 }
 

@@ -8,8 +8,9 @@ use serde::Deserialize;
 
 use crate::cli::*;
 use crate::constants::{
-    cli_config_path, default_claude_settings_dir, default_codex_settings_dir, default_runs_path,
-    default_starling_home, default_store_path, starling_home_source, StarlingHomeSource,
+    cli_config_path, default_claude_settings_dir, default_codex_settings_dir,
+    default_pi_settings_dir, default_runs_path, default_starling_home, default_store_path,
+    starling_home_source, StarlingHomeSource,
 };
 
 #[derive(Debug, Default, Deserialize, serde::Serialize)]
@@ -67,6 +68,7 @@ fn show(json: bool) -> Result<()> {
         "runsPath": default_runs_path().to_string_lossy(),
         "settingsClaudePath": default_claude_settings_dir().to_string_lossy(),
         "settingsCodexPath": default_codex_settings_dir().to_string_lossy(),
+        "settingsPiPath": default_pi_settings_dir().to_string_lossy(),
     });
     if json {
         println!("{}", serde_json::to_string_pretty(&payload)?);

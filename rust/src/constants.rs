@@ -17,13 +17,119 @@ fn home_dir() -> PathBuf {
 /// Expand a leading `~/` to the user's home directory. Plain `~` becomes the
 /// home dir verbatim. Bare paths are returned as-is.
 pub fn expand_home(value: &str) -> PathBuf {
+    expand_home_from(value, &home_dir(), cfg!(windows))
+}
+
+fn expand_home_from(value: &str, home: &Path, windows: bool) -> PathBuf {
     if value == "~" {
-        return home_dir();
+        return home.to_path_buf();
     }
     if let Some(rest) = value.strip_prefix("~/") {
-        return home_dir().join(rest);
+        return home.join(rest);
+    }
+    if windows {
+        if let Some(rest) = value.strip_prefix("~\\") {
+            return home.join(rest);
+        }
     }
     PathBuf::from(value)
+}
+
+fn percent_decode_file_url_path(value: &str, windows: bool) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let high = *bytes.get(index + 1)?;
+        let low = *bytes.get(index + 2)?;
+        let hex = |byte: u8| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        };
+        let byte = hex(high)? * 16 + hex(low)?;
+        // Node rejects encoded `/` on every platform and encoded `\\` only
+        // when it is a Windows path separator. On POSIX a backslash is an
+        // ordinary filename character.
+        if byte == b'/' || (windows && byte == b'\\') {
+            return None;
+        }
+        decoded.push(byte);
+        index += 3;
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn pi_file_url_to_path(value: &str, windows: bool) -> Option<PathBuf> {
+    let remainder = value.strip_prefix("file://")?;
+    let end = remainder.find(['?', '#']).unwrap_or(remainder.len());
+    let remainder = &remainder[..end];
+    let (authority, url_path) = if remainder.starts_with('/') {
+        ("", remainder)
+    } else {
+        let slash = remainder.find('/')?;
+        (&remainder[..slash], &remainder[slash..])
+    };
+    let decoded = percent_decode_file_url_path(url_path, windows)?;
+
+    if windows {
+        if !authority.is_empty() && !authority.eq_ignore_ascii_case("localhost") {
+            return Some(PathBuf::from(format!(
+                r"\\{}\{}",
+                authority,
+                decoded.trim_start_matches('/').replace('/', r"\")
+            )));
+        }
+        let drive_path = decoded
+            .strip_prefix('/')
+            .filter(|path| path.as_bytes().get(1) == Some(&b':'))
+            .unwrap_or(&decoded);
+        return Some(PathBuf::from(drive_path.replace('/', r"\")));
+    }
+
+    if !authority.is_empty() && !authority.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
+    Some(PathBuf::from(decoded))
+}
+
+/// Pi's `normalizePath()` expands home-relative paths and converts `file://`
+/// URLs with Node's `fileURLToPath()` semantics.
+pub fn normalize_pi_path_input(value: &str) -> PathBuf {
+    if value.starts_with("file://") {
+        if let Some(path) = pi_file_url_to_path(value, cfg!(windows)) {
+            return path;
+        }
+    }
+    expand_home(value)
+}
+
+#[cfg(any(windows, test))]
+fn strip_windows_verbatim_prefix(value: &str) -> String {
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    value.strip_prefix(r"\\?\").unwrap_or(value).to_string()
+}
+
+/// Convert Rust's Windows `canonicalize()` representation to the ordinary
+/// drive/UNC spelling returned by Node's `process.cwd()` and `path.resolve()`.
+/// Other platforms are unchanged.
+pub fn pi_node_compatible_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        return PathBuf::from(strip_windows_verbatim_prefix(&path.to_string_lossy()));
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
 }
 
 fn env_trim(key: &str) -> Option<String> {
@@ -137,6 +243,10 @@ pub fn default_codex_settings_dir() -> PathBuf {
     default_starling_settings_dir().join("codex")
 }
 
+pub fn default_pi_settings_dir() -> PathBuf {
+    default_starling_settings_dir().join("pi")
+}
+
 pub fn default_codex_home() -> PathBuf {
     home_dir().join(".codex")
 }
@@ -155,6 +265,198 @@ pub fn resolve_codex_home() -> PathBuf {
         Some(val) => expand_home(&val),
         None => home_dir().join(".codex"),
     }
+}
+
+/// `PI_CODING_AGENT_DIR` if set, else `~/.pi/agent`.
+pub fn resolve_pi_agent_dir() -> PathBuf {
+    match std::env::var("PI_CODING_AGENT_DIR")
+        .ok()
+        .filter(|value| !value.is_empty())
+    {
+        Some(val) => normalize_pi_path_input(&val),
+        None => home_dir().join(".pi").join("agent"),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PiSettingsFile {
+    #[serde(rename = "sessionDir")]
+    session_dir: Option<String>,
+}
+
+/// Pi's effective session root. Mirrors Pi's precedence for process-wide
+/// settings: `PI_CODING_AGENT_SESSION_DIR`, then `settings.json#sessionDir`,
+/// then `<PI_CODING_AGENT_DIR>/sessions`.
+///
+/// Pi also accepts a per-launch `--session-dir`; Starling accounts for that
+/// while preparing/observing a managed launch rather than treating it as a
+/// global discovery root.
+pub fn resolve_pi_session_root() -> PathBuf {
+    if let Some(val) = std::env::var("PI_CODING_AGENT_SESSION_DIR")
+        .ok()
+        .filter(|value| !value.is_empty())
+    {
+        return normalize_pi_path_input(&val);
+    }
+
+    let agent_dir = resolve_pi_agent_dir();
+    let settings_path = agent_dir.join("settings.json");
+    if let Ok(raw) = std::fs::read_to_string(settings_path) {
+        if let Ok(settings) = serde_json::from_str::<PiSettingsFile>(&raw) {
+            if let Some(value) = settings.session_dir.filter(|value| !value.is_empty()) {
+                return normalize_pi_path_input(&value);
+            }
+        }
+    }
+    agent_dir.join("sessions")
+}
+
+/// The directories and cwd-filtering rules Pi uses for a concrete launch.
+///
+/// With no configured `sessionDir`, Pi stores the current project's sessions
+/// in an encoded child of `<agent-dir>/sessions` and `listAll()` scans each
+/// immediate project child. With any configured `sessionDir`, both local and
+/// all-project listing scan that directory directly. Pi only filters local
+/// results by header cwd when the configured directory string differs from the
+/// default encoded directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PiLaunchSessionLayout {
+    pub session_root: PathBuf,
+    pub local_dir: PathBuf,
+    pub configured: bool,
+    pub filter_local_cwd: bool,
+}
+
+pub fn resolve_pi_session_layout_for_launch(
+    cwd: &Path,
+    cli_session_dir: Option<&str>,
+) -> PiLaunchSessionLayout {
+    let agent_dir = resolve_pi_agent_dir();
+    let env_session_dir = std::env::var("PI_CODING_AGENT_SESSION_DIR")
+        .ok()
+        .filter(|value| !value.is_empty());
+    resolve_pi_session_layout_from_sources(
+        cwd,
+        cli_session_dir,
+        env_session_dir.as_deref(),
+        &agent_dir,
+    )
+}
+
+fn pi_encoded_cwd(cwd: &Path) -> String {
+    let value = cwd.to_string_lossy();
+    let without_leading_separator = value
+        .strip_prefix('/')
+        .or_else(|| value.strip_prefix('\\'))
+        .unwrap_or(&value);
+    let safe = without_leading_separator.replace(['/', '\\', ':'], "-");
+    format!("--{safe}--")
+}
+
+fn normalize_path_components(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn resolve_pi_session_layout_from_sources(
+    cwd: &Path,
+    cli_session_dir: Option<&str>,
+    env_session_dir: Option<&str>,
+    agent_dir: &Path,
+) -> PiLaunchSessionLayout {
+    let launch_cwd = if cwd.is_absolute() {
+        cwd.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|current| current.join(cwd))
+            .unwrap_or_else(|_| cwd.to_path_buf())
+    };
+    let launch_cwd = normalize_path_components(&pi_node_compatible_path(&launch_cwd));
+    let resolved_agent_dir = if agent_dir.is_absolute() {
+        agent_dir.to_path_buf()
+    } else {
+        launch_cwd.join(agent_dir)
+    };
+    let resolved_agent_dir = normalize_path_components(&resolved_agent_dir);
+    let default_root = resolved_agent_dir.join("sessions");
+    let default_local_dir = default_root.join(pi_encoded_cwd(&launch_cwd));
+
+    let configured_value = resolve_pi_session_value_from_sources(
+        &launch_cwd,
+        cli_session_dir,
+        env_session_dir,
+        &resolved_agent_dir,
+    );
+    let Some(configured_value) = configured_value else {
+        return PiLaunchSessionLayout {
+            session_root: default_root,
+            local_dir: default_local_dir,
+            configured: false,
+            filter_local_cwd: false,
+        };
+    };
+
+    // `normalizePath()` expands `~` but does not make a relative path absolute.
+    // Preserve that representation for Pi's filterCwd comparison, while using
+    // the launch cwd to obtain the physical directory Starling must scan.
+    let normalized_configured = normalize_pi_path_input(&configured_value);
+    // Pi compares these as JavaScript strings, not as normalized filesystem
+    // paths. Preserve spelling differences such as a trailing separator: they
+    // intentionally enable header-cwd filtering in Pi.
+    let filter_local_cwd = normalized_configured.as_os_str() != default_local_dir.as_os_str();
+    let session_root = if normalized_configured.is_absolute() {
+        normalized_configured
+    } else {
+        launch_cwd.join(normalized_configured)
+    };
+    PiLaunchSessionLayout {
+        local_dir: session_root.clone(),
+        session_root,
+        configured: true,
+        filter_local_cwd,
+    }
+}
+
+fn resolve_pi_session_value_from_sources(
+    cwd: &Path,
+    cli_session_dir: Option<&str>,
+    env_session_dir: Option<&str>,
+    agent_dir: &Path,
+) -> Option<String> {
+    // `Some(None)` means the file explicitly clears sessionDir with an empty
+    // or non-string value. Pi deep-merges project settings over global settings,
+    // so that must not fall through to the global value.
+    let setting_at = |path: &Path| -> Option<Option<String>> {
+        let raw = std::fs::read_to_string(path).ok()?;
+        let settings = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+        let object = settings.as_object()?;
+        let value = object.get("sessionDir")?;
+        Some(
+            value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+        )
+    };
+    if let Some(value) = cli_session_dir.filter(|value| !value.is_empty()) {
+        return Some(value.to_string());
+    }
+    if let Some(value) = env_session_dir.filter(|value| !value.is_empty()) {
+        return Some(value.to_string());
+    }
+    if let Some(project_value) = setting_at(&cwd.join(".pi/settings.json")) {
+        return project_value;
+    }
+    setting_at(&agent_dir.join("settings.json")).flatten()
 }
 
 /// `<CLAUDE_CONFIG_DIR>/projects`.
@@ -195,6 +497,13 @@ pub fn codex_session_roots() -> Vec<PathBuf> {
     }
 
     roots
+}
+
+/// Pi stores one encoded-cwd directory beneath this root by default. A custom
+/// `sessionDir` is itself the root and may contain session files directly, so
+/// consumers must scan recursively and also accept flat JSONL files.
+pub fn pi_session_roots() -> Vec<PathBuf> {
+    vec![resolve_pi_session_root()]
 }
 
 /// Env-aware single-root alias — the first of `claude_session_roots()`.
@@ -246,6 +555,51 @@ mod tests {
         assert_eq!(expand_home("~"), home);
         assert_eq!(expand_home("~/foo"), home.join("foo"));
         assert_eq!(expand_home("/abs/path"), PathBuf::from("/abs/path"));
+        assert_eq!(
+            expand_home_from(r"~\foo", Path::new(r"C:\Users\tester"), true),
+            PathBuf::from(r"C:\Users\tester").join("foo")
+        );
+        assert_eq!(
+            expand_home_from(r"~\foo", Path::new("/home/tester"), false),
+            PathBuf::from(r"~\foo")
+        );
+    }
+
+    #[test]
+    fn strips_windows_verbatim_paths_for_pi_node_compatibility() {
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"\\?\C:\work\project"),
+            r"C:\work\project"
+        );
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"\\?\UNC\server\share\project"),
+            r"\\server\share\project"
+        );
+    }
+
+    #[test]
+    fn converts_pi_file_urls_for_unix_and_windows() {
+        assert_eq!(
+            pi_file_url_to_path("file:///tmp/pi%20sessions/a.jsonl", false),
+            Some(PathBuf::from("/tmp/pi sessions/a.jsonl"))
+        );
+        assert_eq!(
+            pi_file_url_to_path("file:///C:/Users/test/pi%20sessions", true),
+            Some(PathBuf::from(r"C:\Users\test\pi sessions"))
+        );
+        assert_eq!(
+            pi_file_url_to_path("file://server/share/pi.jsonl", true),
+            Some(PathBuf::from(r"\\server\share\pi.jsonl"))
+        );
+        assert_eq!(
+            pi_file_url_to_path("file:///tmp/pi%5Csessions", false),
+            Some(PathBuf::from(r"/tmp/pi\sessions"))
+        );
+        assert_eq!(
+            pi_file_url_to_path("file:///tmp/pi%2Fsessions", false),
+            None
+        );
+        assert_eq!(pi_file_url_to_path("file:///C:/pi%5Csessions", true), None);
     }
 
     #[test]
@@ -272,6 +626,121 @@ mod tests {
         assert!(roots.len() >= 2);
         assert!(roots[0].ends_with("sessions"));
         assert!(roots[1].ends_with("archived_sessions"));
+    }
+
+    #[test]
+    fn pi_root_is_a_sessions_directory_by_default() {
+        if std::env::var_os("PI_CODING_AGENT_DIR").is_none()
+            && std::env::var_os("PI_CODING_AGENT_SESSION_DIR").is_none()
+            && !home_dir().join(".pi/agent/settings.json").exists()
+        {
+            assert!(resolve_pi_session_root().ends_with(".pi/agent/sessions"));
+        }
+    }
+
+    #[test]
+    fn pi_launch_root_prefers_project_local_session_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "starling-pi-project-settings-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let project = root.join("project");
+        let agent = root.join("agent");
+        std::fs::create_dir_all(project.join(".pi")).unwrap();
+        std::fs::create_dir_all(&agent).unwrap();
+        std::fs::write(
+            project.join(".pi/settings.json"),
+            r#"{"sessionDir":"project-sessions"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            agent.join("settings.json"),
+            r#"{"sessionDir":"global-sessions"}"#,
+        )
+        .unwrap();
+
+        let resolved = resolve_pi_session_layout_from_sources(&project, None, None, &agent);
+
+        assert_eq!(resolved.session_root, project.join("project-sessions"));
+        assert_eq!(resolved.local_dir, project.join("project-sessions"));
+        assert!(resolved.configured);
+        assert!(resolved.filter_local_cwd);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn pi_default_launch_layout_uses_only_the_encoded_project_child() {
+        let root = std::env::temp_dir().join(format!(
+            "starling-pi-default-layout-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let project = root.join("project");
+        let agent = root.join("agent");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let resolved = resolve_pi_session_layout_from_sources(&project, None, None, &agent);
+
+        assert_eq!(resolved.session_root, agent.join("sessions"));
+        assert_eq!(
+            resolved.local_dir,
+            agent.join("sessions").join(pi_encoded_cwd(&project))
+        );
+        assert!(!resolved.configured);
+        assert!(!resolved.filter_local_cwd);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn pi_empty_project_session_dir_clears_the_global_override() {
+        let root = std::env::temp_dir().join(format!(
+            "starling-pi-cleared-layout-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let project = root.join("project");
+        let agent = root.join("agent");
+        std::fs::create_dir_all(project.join(".pi")).unwrap();
+        std::fs::create_dir_all(&agent).unwrap();
+        std::fs::write(project.join(".pi/settings.json"), r#"{"sessionDir":""}"#).unwrap();
+        std::fs::write(
+            agent.join("settings.json"),
+            r#"{"sessionDir":"global-sessions"}"#,
+        )
+        .unwrap();
+
+        let resolved = resolve_pi_session_layout_from_sources(&project, None, None, &agent);
+
+        assert_eq!(resolved.session_root, agent.join("sessions"));
+        assert_eq!(
+            resolved.local_dir,
+            agent.join("sessions").join(pi_encoded_cwd(&project))
+        );
+        assert!(!resolved.configured);
+        assert!(!resolved.filter_local_cwd);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn pi_configured_default_dir_with_trailing_separator_still_filters_cwd() {
+        let root = std::env::temp_dir().join(format!(
+            "starling-pi-spelled-layout-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let project = root.join("project");
+        let agent = root.join("agent");
+        std::fs::create_dir_all(&project).unwrap();
+        let default_local = agent.join("sessions").join(pi_encoded_cwd(&project));
+        let configured = format!(
+            "{}{sep}",
+            default_local.display(),
+            sep = std::path::MAIN_SEPARATOR
+        );
+
+        let resolved =
+            resolve_pi_session_layout_from_sources(&project, Some(&configured), None, &agent);
+
+        assert!(resolved.configured);
+        assert!(resolved.filter_local_cwd);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

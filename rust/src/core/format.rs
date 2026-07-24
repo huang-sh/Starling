@@ -63,10 +63,11 @@ pub fn format_session_table(
 
     for s in sessions {
         let short_id = short_session_id(&s.session_id);
-        let agent = if s.provider == "codex" {
-            "codex"
-        } else {
-            "claude"
+        let agent = match s.provider.as_str() {
+            "claude" => "claude",
+            "codex" => "codex",
+            "pi" => "pi",
+            other => other,
         };
         let short_project = if s.project_path.is_empty() {
             "-".to_string()

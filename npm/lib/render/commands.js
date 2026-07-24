@@ -321,7 +321,8 @@ function renderModelList(rows) {
         group.push(row);
         groups.set(agent, group);
     }
-    const order = ["claude", "codex", ...Array.from(groups.keys()).filter((key) => key !== "claude" && key !== "codex").sort()];
+    const knownAgents = ["claude", "codex", "pi"];
+    const order = [...knownAgents, ...Array.from(groups.keys()).filter((key) => !knownAgents.includes(key)).sort()];
     const sections = [];
     for (const agent of order) {
         const group = groups.get(agent);
@@ -563,6 +564,7 @@ function configEntries(row) {
         ["Runs", formatValue(row.runsPath)],
         ["Claude settings", formatValue(row.settingsClaudePath)],
         ["Codex settings", formatValue(row.settingsCodexPath)],
+        ["Pi settings", formatValue(row.settingsPiPath)],
     ];
 }
 function shortId(id) {

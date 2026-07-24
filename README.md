@@ -8,25 +8,25 @@
   <img src="assets/starling.png" alt="Starling logo" width="160">
 </p>
 
-Launch, switch, and organize Claude Code and Codex sessions with model profiles, catalogs, project views, live monitoring, and VS Code integration.
+Launch, switch, and organize Claude Code, Codex, and Pi sessions with model profiles, catalogs, project views, live monitoring, and VS Code integration.
 
-Current release: **0.1.8**
+Current release: **0.1.9**
 
 - npm: [`starling-ai`](https://www.npmjs.com/package/starling-ai)
-- GitHub Release: [`rust-v0.1.8`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.8)
+- GitHub Release: [`rust-v0.1.9`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.9)
 - VS Code extension: [`huangsh.starling-ai`](https://marketplace.visualstudio.com/items?itemName=huangsh.starling-ai)
 
 ## Features
 
-- Discover Claude Code and Codex sessions from local session files.
+- Discover Claude Code, Codex, and Pi sessions from local session files.
 - Browse sessions by catalog, project, or recent activity.
 - Create catalogs such as `paper-review`, with optional hierarchical paths when needed.
 - Add session metadata, titles, tags, notes, and catalog assignments.
-- Resume Claude Code and Codex sessions from one command.
+- Resume Claude Code, Codex, and Pi sessions from one command.
 - Track token usage when it is available in the session file.
 - Maintain a local session index at `~/.starling/session-index.json` for faster project and catalog views.
-- Launch Claude Code or Codex through `starling run` and automatically assign the created session to a catalog.
-- Manage Claude and Codex model profiles under `~/.starling/settings`.
+- Launch Claude Code, Codex, or Pi through `starling run` and automatically assign the created session to a catalog.
+- Manage Claude, Codex, and Pi model profiles under `~/.starling/settings`.
 - Monitor the top 20 active pinned and unpinned sessions together with a top-style terminal view that separates `running`, `waiting`, `idle`, and `stopped` states.
 - Use JSON output as the stable data contract for terminal rendering and the VS Code extension.
 - Use the separate VS Code extension for Catalog, Projects, Models, and Monitor.
@@ -54,7 +54,7 @@ On Linux and macOS, npm installs the small JavaScript launcher plus the matching
 The same native archives and sha256 files are attached to the GitHub release:
 
 ```text
-https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.8
+https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.9
 ```
 
 The npm install step also installs the bundled Starling skill to:
@@ -62,6 +62,7 @@ The npm install step also installs the bundled Starling skill to:
 ```text
 ~/.codex/skills/starling/SKILL.md
 ~/.claude/skills/starling/SKILL.md
+~/.pi/agent/skills/starling/SKILL.md
 ```
 
 If npm lifecycle scripts were disabled with `--ignore-scripts`, install the skill manually from the package directory:
@@ -70,7 +71,7 @@ If npm lifecycle scripts were disabled with `--ignore-scripts`, install the skil
 npm explore -g starling-ai -- npm run install:skill
 ```
 
-Starling requires Node.js 16 or newer. Claude Code and/or Codex must be installed separately if you want Starling to discover, launch, or resume those agents.
+Starling requires Node.js 16 or newer. Claude Code, Codex, and/or Pi must be installed separately if you want Starling to discover, launch, or resume those agents. Pi features that use an explicit `--session-id` require Pi 0.76 or newer.
 
 ## Quick Start
 
@@ -120,12 +121,23 @@ Launch Claude Code with a Starling config profile:
 starling run --setting ds -c paper-review claude
 ```
 
-Starling options must be placed before the agent name. `-s` is the short alias for `--setting`; `-c` is the short alias for `--catalog`. Everything after `claude` or `codex` is passed directly to that agent:
+Launch Pi and assign the new session to a catalog:
+
+```bash
+starling run -c paper-review pi
+```
+
+A plain `starling run pi` does not add a session selector. Pi creates the new session ID normally, and the Starling runtime hook records that ID after startup.
+
+Starling options must be placed before the agent name. `-s` is the short alias for `--setting`; `-c` is the short alias for `--catalog`. Agent arguments go after `claude`, `codex`, or `pi`. Starling may add its runtime hook and pin an explicit existing-session selector to the locked transcript path:
 
 ```bash
 starling run --catalog paper-review codex exec "summarize this repo"
 starling run --catalog paper-review claude --dangerously-skip-permissions
+starling run --catalog paper-review pi --provider anthropic --model claude-sonnet-4-5
 ```
+
+Pi does not expose a built-in MCP configuration contract. Starling's `--mcp` and `--mcp-profile` options are not supported for Pi; use a Pi extension when MCP integration is required.
 
 Show Starling run records:
 
@@ -141,6 +153,7 @@ starling run status
 starling session ls
 starling session ls --all
 starling session ls --agent claude
+starling session ls --agent pi
 starling session ls --cataloged
 starling session ls --catalog paper-review
 starling session show <session-id>
@@ -152,6 +165,14 @@ starling session delete <session-id> --yes
 ```
 
 `starling ses` is an alias for `starling session`.
+
+Starling resumes Pi sessions with `pi --session <absolute-jsonl-path>`. Because Pi IDs are scoped to a cwd, Starling reports an ambiguity instead of choosing the wrong project when an ID is reused. Pass the absolute JSONL path to `starling resume` to disambiguate. Custom Pi session IDs remain case-sensitive in Starling lookups.
+
+`starling run pi --continue` resolves and locks the current project's latest transcript before launch, then pins the launch to its absolute path. If the project has no transcript yet, Starling preserves Pi's create-new fallback with a preallocated, locked session ID. Pi's interactive `--resume` picker cannot be locked before the user selects a transcript, so managed `starling run pi --resume` is rejected; use `starling resume <session-id-or-absolute-path>` instead. For the same reason, managed Pi runs block in-process `/new`, `/resume`, and `/fork`; exit Pi before starting or resuming another managed session.
+
+For an explicit `starling run pi --session <path>`, the path must already be a non-empty, valid Pi transcript (legacy v1/v2 transcripts are accepted and Pi may migrate them). Native Pi can initialize a missing or zero-byte explicit path, but Starling rejects that case because no session ID exists to lock before spawn. Use `starling run pi --session-id <id>` for a safely locked new managed session, or initialize the exact path once with Pi directly and then resume it through Starling.
+
+On Linux, Pi replaces its process command line with the title `pi` after startup. Live mapping of Pi processes launched outside Starling therefore cannot reliably recover one-shot `--session` or `--session-dir` values after startup. Managed launches carry explicit hook/environment identity; for reliable monitoring of an external custom root, configure it persistently with `PI_CODING_AGENT_SESSION_DIR` or `settings.json`.
 
 Catalog assignment can also be managed from the session namespace:
 
@@ -195,6 +216,7 @@ Catalog names may repeat when they live under different parents. Use a path such
 starling project ls
 starling project ls --all
 starling project ls --agent codex
+starling project ls --agent pi
 starling project show /path/to/project
 ```
 
@@ -226,6 +248,7 @@ starling top --pinned
 starling top --limit 40
 starling top --agent codex
 starling top --agent claude --sort cpu
+starling top --agent pi
 starling top --sort tokens
 starling top --sort cpu
 starling top --catalog paper-review
@@ -233,7 +256,7 @@ starling top paper-review
 starling top --json
 ```
 
-Agent filters: `--agent claude` or `--agent codex`.
+Agent filters: `--agent claude`, `--agent codex`, or `--agent pi`.
 
 Sort modes: `activity` (default), `recent`, `tokens`, `created`, `memory`, `cpu`, `ctx`, `skills`, and `tools`.
 
@@ -246,6 +269,7 @@ The default terminal view is rendered by the npm CLI wrapper from JSON emitted b
 ```bash
 starling run --setting glm-5.2 --catalog research/paper claude
 starling run --setting gpt-5.5 --catalog research/paper codex
+starling run --catalog research/paper pi
 starling run status
 starling run stop <run-id>
 ```
@@ -259,6 +283,7 @@ Model profiles are stored under:
 ```text
 ~/.starling/settings/claude
 ~/.starling/settings/codex
+~/.starling/settings/pi
 ```
 
 List current and Starling-managed profiles:
@@ -267,6 +292,7 @@ List current and Starling-managed profiles:
 starling model ls
 starling model ls --agent claude
 starling model ls --agent codex
+starling model ls --agent pi
 ```
 
 Create a Claude profile:
@@ -291,11 +317,28 @@ starling model add demo --agent codex \
 starling model delete demo --agent codex
 ```
 
+Create a Pi profile as `~/.starling/settings/pi/research.json`:
+
+```json
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-5",
+  "thinking": "high"
+}
+```
+
+Pi authentication remains in Pi-owned auth/config files such as `~/.pi/agent/auth.json` and `~/.pi/agent/models.json`, or in provider environment variables. Do not put credentials in a Starling Pi profile.
+
+```bash
+starling model delete research --agent pi
+```
+
 Use a profile when launching an agent:
 
 ```bash
 starling run --setting demo --catalog paper-review codex
 starling run --setting ds --catalog paper-review claude
+starling run --setting research --catalog paper-review pi
 ```
 
 If `--setting` is not provided, Starling uses the agent's normal default configuration.
@@ -313,6 +356,8 @@ Starling stores its own data in `~/.starling` by default:
       <profile>.json
     codex/
       <profile>.toml
+    pi/
+      <profile>.json
 ```
 
 Set `STARLING_HOME` to use a different Starling data directory:
@@ -330,7 +375,7 @@ starling config show
 
 `STARLING_HOME` still has the highest priority and overrides the saved CLI setting for that process.
 
-Starling does not move or rewrite the original Claude Code and Codex session files. It reads them from the agent-owned locations, such as `~/.claude/projects` and `~/.codex/sessions`, and stores only Starling metadata and profiles under the Starling data directory.
+Starling does not move or rewrite the original Claude Code, Codex, or Pi session files. It reads them from agent-owned locations such as `~/.claude/projects`, `~/.codex/sessions`, and `~/.pi/agent/sessions`, and stores only Starling metadata and profiles under the Starling data directory. Starling honors Pi's `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, global `settings.json`, and project-local `<cwd>/.pi/settings.json` `sessionDir` settings when the launch cwd is known.
 
 The local session index is optimized for repeated CLI and VS Code sidebar reads:
 
@@ -362,6 +407,8 @@ Claude profiles are JSON files that Starling passes to Claude Code as settings.
 
 Codex profiles are Codex-style TOML files. Starling copies them into a temporary Codex profile for the run, so `starling run --setting <name> codex` does not overwrite the user's default `~/.codex/config.toml`.
 
+Pi profiles are JSON files with `provider`, `model`, and optional `thinking` fields. Starling translates them to Pi's `--provider`, `--model`, and `--thinking` arguments for that run without overwriting Pi's global `~/.pi/agent/settings.json`.
+
 Example Codex profile:
 
 ```toml
@@ -392,7 +439,7 @@ The Starling sidebar contains four views:
 
 - Catalog: hierarchical catalog tree, with sessions shown on request.
 - Projects: project directory tree with session counts.
-- Models: Claude and Codex model profile settings.
+- Models: Claude, Codex, and Pi model profile settings.
 - Monitor: pinned and unpinned sessions together with live status, context, token, CPU, memory, task, and PID details.
 
 The extension supports common right-click actions:

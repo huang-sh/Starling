@@ -172,6 +172,7 @@ pub fn list_runs(filter: Option<ListFilter>) -> Vec<RunRecord> {
             runs.retain(|r| match (p.as_str(), &r.provider) {
                 ("claude", crate::types::RunProvider::Claude) => true,
                 ("codex", crate::types::RunProvider::Codex) => true,
+                ("pi", crate::types::RunProvider::Pi) => true,
                 _ => false,
             });
         }
@@ -297,28 +298,36 @@ pub struct DetectedSession {
     pub home: Option<String>,
 }
 
-/// Scan running claude/codex processes and map each to its session. In-memory —
+fn detected_provider_name(provider: crate::core::process_map::Provider) -> &'static str {
+    match provider {
+        crate::core::process_map::Provider::Claude => "claude",
+        crate::core::process_map::Provider::Codex => "codex",
+        crate::core::process_map::Provider::Pi => "pi",
+    }
+}
+
+/// Scan running Claude, Codex, and Pi processes and map each to its session. In-memory —
 /// does not write runs.json. Linux-only (empty elsewhere).
-pub fn detect_running_sessions() -> HashMap<String, DetectedSession> {
+pub fn detect_running_sessions() -> HashMap<String, Vec<DetectedSession>> {
     let mapped = map_processes_to_sessions();
     let mut detected = HashMap::new();
-    for (session_id, info) in mapped {
+    for (session_id, infos) in mapped {
         detected.insert(
             session_id,
-            DetectedSession {
-                pid: if info.pid > 0 { Some(info.pid) } else { None },
-                provider: info
-                    .provider
-                    .map(|p| match p {
-                        crate::core::process_map::Provider::Claude => "claude",
-                        crate::core::process_map::Provider::Codex => "codex",
-                    })
-                    .unwrap_or_default()
-                    .to_string(),
-                project_path: info.project_path,
-                file_path: info.file_path,
-                home: info.home,
-            },
+            infos
+                .into_iter()
+                .map(|info| DetectedSession {
+                    pid: if info.pid > 0 { Some(info.pid) } else { None },
+                    provider: info
+                        .provider
+                        .map(detected_provider_name)
+                        .unwrap_or_default()
+                        .to_string(),
+                    project_path: info.project_path,
+                    file_path: info.file_path,
+                    home: info.home,
+                })
+                .collect(),
         );
     }
     detected
@@ -415,6 +424,57 @@ mod tests {
         });
     }
 
+    #[test]
+    fn list_runs_filters_pi_provider() {
+        with_temp_store(|| {
+            let path = test_runs_path("starling-runs-pi-filter-test.json");
+            std::env::set_var("STARLING_RUNS", &path);
+            let _ = std::fs::remove_file(&path);
+
+            let mut pi_run = mk_run(
+                "pi-run",
+                Some("PiSession_01"),
+                RunStatus::Running,
+                "2026-03-01T00:00:00Z",
+            );
+            pi_run.provider = crate::types::RunProvider::Pi;
+            create_run(pi_run);
+            create_run(mk_run(
+                "claude-run",
+                Some("claude-session"),
+                RunStatus::Running,
+                "2026-03-02T00:00:00Z",
+            ));
+
+            let runs = list_runs(Some(ListFilter {
+                provider: Some("pi".into()),
+                ..Default::default()
+            }));
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].run_id, "pi-run");
+            assert_eq!(runs[0].provider, crate::types::RunProvider::Pi);
+
+            let _ = std::fs::remove_file(&path);
+            std::env::remove_var("STARLING_RUNS");
+        });
+    }
+
+    #[test]
+    fn detected_provider_name_includes_pi() {
+        assert_eq!(
+            detected_provider_name(crate::core::process_map::Provider::Claude),
+            "claude"
+        );
+        assert_eq!(
+            detected_provider_name(crate::core::process_map::Provider::Codex),
+            "codex"
+        );
+        assert_eq!(
+            detected_provider_name(crate::core::process_map::Provider::Pi),
+            "pi"
+        );
+    }
+
     fn test_runs_path(name: &str) -> PathBuf {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-data");
         let _ = std::fs::create_dir_all(&dir);
@@ -439,25 +499,31 @@ mod tests {
 
     #[test]
     fn summarize_counts_bookmarks() {
-        let b = vec![Bookmark {
-            id: "starling_0001".into(),
-            provider: "claude".into(),
-            session_id: "s1".into(),
-            title: "t".into(),
-            category: "c".into(),
-            tags: vec![],
-            project_path: "/p".into(),
-            first_prompt: "".into(),
-            notes: vec![],
-            space_ids: vec![],
-            created_at: "t".into(),
-            updated_at: "t".into(),
-        }];
-        // No runs file → unknown status for s1
-        std::env::set_var("STARLING_RUNS", "/tmp/does-not-exist-summary.json");
-        let _ = std::fs::remove_file("/tmp/does-not-exist-summary.json");
-        let s = summarize_run_status(&b, false);
-        assert!(s.contains("·1") || s == "·", "got: {s}");
-        std::env::remove_var("STARLING_RUNS");
+        with_temp_store(|| {
+            let path = test_runs_path("starling-runs-summary-test.json");
+            std::env::set_var("STARLING_RUNS", &path);
+            let _ = std::fs::remove_file(&path);
+
+            let b = vec![Bookmark {
+                id: "starling_0001".into(),
+                provider: "claude".into(),
+                session_id: "s1".into(),
+                title: "t".into(),
+                category: "c".into(),
+                tags: vec![],
+                project_path: "/p".into(),
+                first_prompt: "".into(),
+                notes: vec![],
+                space_ids: vec![],
+                created_at: "t".into(),
+                updated_at: "t".into(),
+            }];
+            // No runs file → unknown status for s1
+            let s = summarize_run_status(&b, false);
+            assert!(s.contains("·1") || s == "·", "got: {s}");
+
+            let _ = std::fs::remove_file(&path);
+            std::env::remove_var("STARLING_RUNS");
+        });
     }
 }

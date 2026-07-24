@@ -27,8 +27,13 @@ fn provider_from_opt(s: Option<&str>) -> Option<IdxProvider> {
     match s {
         Some("claude") => Some(IdxProvider::Claude),
         Some("codex") => Some(IdxProvider::Codex),
+        Some("pi") => Some(IdxProvider::Pi),
         Some(other) => {
-            eprintln!("{}: unknown agent '{}'", "error".red(), other);
+            eprintln!(
+                "{}: unknown agent '{}' (expected claude, codex, or pi)",
+                "error".red(),
+                other
+            );
             std::process::exit(2);
         }
         None => None,

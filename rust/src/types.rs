@@ -115,6 +115,7 @@ pub struct RunRecord {
 pub enum RunProvider {
     Claude,
     Codex,
+    Pi,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

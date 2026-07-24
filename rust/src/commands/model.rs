@@ -8,6 +8,7 @@ use colored::*;
 use crate::cli::*;
 use crate::constants::{
     default_claude_settings_dir, default_codex_home, default_codex_settings_dir,
+    default_pi_settings_dir, resolve_pi_agent_dir,
 };
 
 pub fn handle(cmd: ModelCommand) -> Result<()> {
@@ -31,15 +32,21 @@ fn list(json: bool, agent: Option<String>) -> Result<()> {
     } else {
         Vec::new()
     };
+    let pi_rows = if filter.map(|a| a == "pi").unwrap_or(true) {
+        collect_pi_configs()
+    } else {
+        Vec::new()
+    };
 
     if json {
         let mut rows = claude_rows.clone();
         rows.extend(codex_rows.clone());
+        rows.extend(pi_rows.clone());
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
 
-    if claude_rows.is_empty() && codex_rows.is_empty() {
+    if claude_rows.is_empty() && codex_rows.is_empty() && pi_rows.is_empty() {
         println!("{}", "No model configurations found.".yellow());
         return Ok(());
     }
@@ -55,6 +62,13 @@ fn list(json: bool, agent: Option<String>) -> Result<()> {
         println!("{}", "Codex".bold());
         println!("{}", render_table(&codex_rows));
     }
+    if !pi_rows.is_empty() {
+        if !claude_rows.is_empty() || !codex_rows.is_empty() {
+            println!();
+        }
+        println!("{}", "Pi".bold());
+        println!("{}", render_table(&pi_rows));
+    }
     Ok(())
 }
 
@@ -62,8 +76,13 @@ fn normalize_agent(agent: Option<&str>) -> Option<&str> {
     match agent {
         Some("claude") => Some("claude"),
         Some("codex") => Some("codex"),
+        Some("pi") => Some("pi"),
         Some(other) => {
-            eprintln!("{}: unknown agent '{}'", "error".red(), other);
+            eprintln!(
+                "{}: unknown agent '{}' (expected claude, codex, or pi)",
+                "error".red(),
+                other
+            );
             std::process::exit(2);
         }
         None => None,
@@ -108,6 +127,20 @@ fn collect_codex_configs() -> Vec<ModelRow> {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
         rows.push(summarize_codex_toml(&f, "profile", &name));
+    }
+    rows
+}
+
+fn collect_pi_configs() -> Vec<ModelRow> {
+    let mut rows = Vec::new();
+    let current = resolve_pi_agent_dir().join("settings.json");
+    rows.push(summarize_pi_json(&current, "current", "current"));
+    for f in list_profile_files(&default_pi_settings_dir()) {
+        let name = f
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        rows.push(summarize_pi_json(&f, "profile", &name));
     }
     rows
 }
@@ -174,6 +207,42 @@ fn summarize_codex_toml(path: &std::path::Path, scope: &str, name: &str) -> Mode
     };
     ModelRow {
         agent: "codex".into(),
+        name: name.to_string(),
+        scope: scope.to_string(),
+        source: path.to_string_lossy().to_string(),
+        exists,
+        model,
+        auth,
+    }
+}
+
+fn summarize_pi_json(path: &std::path::Path, scope: &str, name: &str) -> ModelRow {
+    let exists = path.exists();
+    let (model, auth) = if exists {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .map(|value| {
+                let model = value
+                    .get("defaultModel")
+                    .or_else(|| value.get("model"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let provider = value
+                    .get("defaultProvider")
+                    .or_else(|| value.get("provider"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                (model, provider)
+            })
+            .unwrap_or_default()
+    } else {
+        (String::new(), String::new())
+    };
+    ModelRow {
+        agent: "pi".into(),
         name: name.to_string(),
         scope: scope.to_string(),
         source: path.to_string_lossy().to_string(),
@@ -285,6 +354,11 @@ fn delete(name: &str, agent: Option<&str>, json: bool) -> Result<()> {
             matches.push(("codex", path));
         }
     }
+    if agent.map(|a| a == "pi").unwrap_or(true) {
+        for path in profile_paths_for_name(&default_pi_settings_dir(), name) {
+            matches.push(("pi", path));
+        }
+    }
 
     if matches.is_empty() {
         eprintln!("{}: model profile not found: {}", "error".red(), name);
@@ -292,7 +366,7 @@ fn delete(name: &str, agent: Option<&str>, json: bool) -> Result<()> {
     }
     if matches.len() > 1 {
         eprintln!(
-            "{}: model profile name is ambiguous; pass --agent claude or --agent codex",
+            "{}: model profile name is ambiguous; pass --agent claude, codex, or pi",
             "error".red()
         );
         std::process::exit(2);

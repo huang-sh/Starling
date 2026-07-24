@@ -322,7 +322,7 @@ fn show(name: &str, json: bool) -> Result<()> {
     println!("  Created:     {}", space.created_at);
     println!("  Sessions:    {}", bookmarks.len());
     for b in &bookmarks {
-        let session_id = canonical_session_id(&b.session_id);
+        let session_id = canonical_session_id(&b.session_id, Some(&b.provider));
         println!(
             "    {} {} {}",
             b.id.cyan(),

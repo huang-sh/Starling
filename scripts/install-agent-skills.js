@@ -16,6 +16,7 @@ const source = join(packageRoot, "skills", "starling", "SKILL.md");
 const targets = [
   join(installHome, ".codex", "skills", "starling", "SKILL.md"),
   join(installHome, ".claude", "skills", "starling", "SKILL.md"),
+  join(installHome, ".pi", "agent", "skills", "starling", "SKILL.md"),
 ];
 const claudeSettingsPath = join(installHome, ".claude", "settings.json");
 const defaultHookFile = join(installHome, ".starling", "run-hooks", "default-claude.jsonl");
@@ -34,7 +35,7 @@ const claudeHookEvents = [
 
 try {
   if (!existsSync(source)) {
-    console.warn(`[starling] Codex skill not found in package: ${source}`);
+    console.warn(`[starling] Starling skill not found in package: ${source}`);
   } else {
     for (const target of targets) {
       mkdirSync(dirname(target), { recursive: true });

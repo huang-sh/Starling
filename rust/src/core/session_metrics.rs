@@ -141,7 +141,13 @@ struct CodexTokenCount {
 }
 
 fn as_num(value: &Value) -> u64 {
-    value.as_f64().map(|f| f as u64).unwrap_or(0)
+    let number = value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|raw| raw.parse::<f64>().ok()));
+    number
+        .filter(|number| number.is_finite() && *number >= 0.0)
+        .map(|number| number as u64)
+        .unwrap_or(0)
 }
 
 fn extract_assistant_usage(entry: &JsonlEntry) -> Option<AssistantUsage> {
@@ -155,26 +161,35 @@ fn extract_assistant_usage(entry: &JsonlEntry) -> Option<AssistantUsage> {
     let pick = |keys: &[&str]| -> u64 {
         for k in keys {
             if let Some(v) = usage.get(*k) {
-                if v.is_number() {
+                if v.is_number() || v.is_string() {
                     return as_num(v);
                 }
             }
         }
         0
     };
-    let input = pick(&["input_tokens", "inputTokens"]) + pick(&["prompt_tokens", "promptTokens"]);
+    let input =
+        pick(&["input_tokens", "inputTokens", "input"]) + pick(&["prompt_tokens", "promptTokens"]);
     let output = pick(&[
         "output_tokens",
         "outputTokens",
         "completion_tokens",
         "completionTokens",
+        "output",
     ]);
-    let cache_creation = pick(&["cache_creation_input_tokens", "cacheCreationInputTokens"]);
+    let cache_creation = pick(&[
+        "cache_creation_input_tokens",
+        "cacheCreationInputTokens",
+        "cache_write_input_tokens",
+        "cacheWriteInputTokens",
+        "cacheWrite",
+    ]);
     let cache_read = pick(&[
         "cache_read_input_tokens",
         "cacheReadInputTokens",
         "cached_input_tokens",
         "cachedInputTokens",
+        "cacheRead",
     ]);
     if input == 0 && output == 0 && cache_creation == 0 && cache_read == 0 {
         return None;
@@ -191,7 +206,7 @@ fn extract_usage_from_object(usage: &serde_json::Map<String, Value>) -> Option<A
     let pick = |keys: &[&str]| -> u64 {
         for k in keys {
             if let Some(v) = usage.get(*k) {
-                if v.is_number() {
+                if v.is_number() || v.is_string() {
                     return as_num(v);
                 }
             }
@@ -256,7 +271,10 @@ fn extract_codex_token_count(entry: &JsonlEntry) -> Option<CodexTokenCount> {
 
 fn extract_model(entry: &JsonlEntry) -> Option<String> {
     let obj = entry.value().as_object()?;
-    let direct = obj.get("model").and_then(|v| v.as_str());
+    let direct = obj
+        .get("model")
+        .and_then(Value::as_str)
+        .or_else(|| obj.get("modelId").and_then(Value::as_str));
     if let Some(d) = direct {
         if !d.starts_with('<') && d != "synthetic" {
             return Some(d.to_string());
@@ -300,7 +318,7 @@ fn extract_model(entry: &JsonlEntry) -> Option<String> {
 }
 
 fn extract_model_from_entries(entries: &[JsonlEntry]) -> Option<String> {
-    entries.iter().find_map(extract_model)
+    entries.iter().filter_map(extract_model).last()
 }
 
 fn extract_tool_use_arg(name: &str, input: &Value) -> String {
@@ -322,7 +340,12 @@ fn extract_tool_use_arg(name: &str, input: &Value) -> String {
             return p.to_string();
         }
     }
-    if let Some(fp) = obj.get("file_path").and_then(|v| v.as_str()) {
+    if let Some(fp) = obj
+        .get("file_path")
+        .and_then(Value::as_str)
+        .or_else(|| obj.get("filePath").and_then(Value::as_str))
+        .or_else(|| obj.get("path").and_then(Value::as_str))
+    {
         return fp.to_string();
     }
     if let Some(sat) = obj.get("subagent_type").and_then(|v| v.as_str()) {
@@ -339,17 +362,28 @@ fn parse_entry_timestamp(entry: &JsonlEntry) -> u64 {
         Some(o) => o,
         None => return 0,
     };
-    let ts = match obj.get("timestamp") {
-        Some(v) => v,
-        None => return 0,
-    };
-    if let Some(s) = ts.as_str() {
-        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(s) {
-            return parsed.timestamp_millis() as u64;
+    if let Some(ts) = obj.get("timestamp") {
+        if let Some(s) = ts.as_str() {
+            if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(s) {
+                return parsed.timestamp_millis() as u64;
+            }
+        } else if let Some(n) = ts.as_f64() {
+            return if n > 1e12 {
+                n as u64
+            } else {
+                (n * 1000.0) as u64
+            };
         }
-        return 0;
     }
-    if let Some(n) = ts.as_f64() {
+
+    // Pi messages also carry a Unix-millisecond timestamp inside `message`.
+    // Use it as a fallback when an outer entry timestamp is absent or malformed.
+    if let Some(n) = obj
+        .get("message")
+        .and_then(Value::as_object)
+        .and_then(|message| message.get("timestamp"))
+        .and_then(Value::as_f64)
+    {
         return if n > 1e12 {
             n as u64
         } else {
@@ -694,6 +728,12 @@ fn extract_content_blocks(entry: &JsonlEntry) -> ContentBlocks {
         Some(m) => m,
         None => return out,
     };
+    if msg.get("role").and_then(Value::as_str) == Some("toolResult") {
+        out.tool_result = true;
+        if let Some(id) = msg.get("toolCallId").and_then(Value::as_str) {
+            out.tool_result_ids.push(id.to_string());
+        }
+    }
     match msg.get("content") {
         Some(Value::String(s)) => {
             if looks_like_interruption(s) {
@@ -714,15 +754,23 @@ fn extract_content_blocks(entry: &JsonlEntry) -> ContentBlocks {
                         }
                     } else if t == Some("thinking") {
                         out.thinking = true;
-                    } else if t == Some("tool_use") {
+                    } else if t == Some("tool_use") || t == Some("toolCall") {
                         if let Some(name) = p.get("name").and_then(|v| v.as_str()) {
                             let id = p.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
-                            let input = p.get("input").cloned().unwrap_or(Value::Null);
+                            let input = p
+                                .get("input")
+                                .or_else(|| p.get("arguments"))
+                                .cloned()
+                                .unwrap_or(Value::Null);
                             out.tool_use.push((id, name.to_string(), input));
                         }
-                    } else if t == Some("tool_result") {
+                    } else if t == Some("tool_result") || t == Some("toolResult") {
                         out.tool_result = true;
-                        if let Some(id) = p.get("tool_use_id").and_then(|v| v.as_str()) {
+                        if let Some(id) = p
+                            .get("tool_use_id")
+                            .or_else(|| p.get("toolCallId"))
+                            .and_then(|v| v.as_str())
+                        {
                             out.tool_result_ids.push(id.to_string());
                         }
                         if let Some(s) = p.get("content").and_then(|v| v.as_str()) {
@@ -839,7 +887,7 @@ fn message_stop_reason(entry: &JsonlEntry) -> Option<&str> {
     entry
         .value()
         .get("message")
-        .and_then(|v| v.get("stop_reason"))
+        .and_then(|v| v.get("stop_reason").or_else(|| v.get("stopReason")))
         .and_then(|v| v.as_str())
 }
 
@@ -847,7 +895,7 @@ fn message_has_null_stop_reason(entry: &JsonlEntry) -> bool {
     entry
         .value()
         .get("message")
-        .and_then(|v| v.get("stop_reason"))
+        .and_then(|v| v.get("stop_reason").or_else(|| v.get("stopReason")))
         .is_some_and(Value::is_null)
 }
 
@@ -903,12 +951,13 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
     let mut chat_tail: Vec<ChatMessageEntry> = Vec::new();
     let mut pending_tools: HashMap<String, PendingTool> = HashMap::new();
     let mut anonymous_tool_id: u64 = 0;
+    let mut explicit_compaction_count: u32 = 0;
 
     for entry in entries {
-        if model.is_empty() {
-            if let Some(m) = extract_model(entry) {
-                model = m;
-            }
+        // Pi records explicit model changes and may switch models mid-session;
+        // the latest valid model is the useful live value for every provider.
+        if let Some(m) = extract_model(entry) {
+            model = m;
         }
         let ts = parse_entry_timestamp(entry);
         if started_at_ms == 0 && ts > 0 {
@@ -916,6 +965,9 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
         }
         if ts > latest_entry_ms {
             latest_entry_ms = ts;
+        }
+        if entry.type_str() == Some("compaction") {
+            explicit_compaction_count = explicit_compaction_count.saturating_add(1);
         }
 
         if let Some(event) = extract_skill_invocation_event(entry, ts) {
@@ -975,13 +1027,22 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
             is_codex_response_item && codex_payload_type == Some("function_call_output");
         let is_codex_message = is_codex_response_item && codex_payload_type == Some("message");
         let is_codex_reasoning = is_codex_response_item && codex_payload_type == Some("reasoning");
+        let nested_message_role = entry
+            .value()
+            .get("message")
+            .and_then(Value::as_object)
+            .and_then(|message| message.get("role"))
+            .and_then(Value::as_str);
+        let is_pi_message = entry_type == Some("message") && nested_message_role.is_some();
         let is_assistant = entry_type == Some("assistant")
             || entry_type == Some("function_call")
-            || is_codex_message;
+            || is_codex_message
+            || (is_pi_message && nested_message_role == Some("assistant"));
         let is_user = entry_type == Some("user")
             || entry_type == Some("human")
             || entry_type == Some("function_call_output")
-            || is_codex_function_output;
+            || is_codex_function_output
+            || (is_pi_message && matches!(nested_message_role, Some("user") | Some("toolResult")));
 
         let mut tool_uses: Vec<(Option<String>, String, Value)> = Vec::new();
         if is_codex_event {
@@ -1047,11 +1108,46 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
             }
             if is_assistant {
                 thinking_since_ms = 0;
-                if !tool_uses.is_empty() {
-                    let activity_ms = if ts > 0 { ts } else { last_activity_ms };
+                let activity_ms = if ts > 0 { ts } else { last_activity_ms };
+                let pi_failure =
+                    is_pi_message && matches!(stop_reason, Some("error") | Some("aborted"));
+                let pi_completed =
+                    is_pi_message && matches!(stop_reason, Some("stop") | Some("length"));
+                if pi_failure {
+                    tool_uses.clear();
+                    pending_tools.clear();
+                    pending_since_ms = 0;
+                    thinking_since_ms = 0;
+                    current_task.clear();
+                    activity_status = Some("aborted".to_string());
+                    activity_signal = Some(
+                        if stop_reason == Some("error") {
+                            "pi_assistant_error"
+                        } else {
+                            "pi_assistant_aborted"
+                        }
+                        .to_string(),
+                    );
+                    activity_since_ms = activity_ms;
+                } else if !tool_uses.is_empty() {
                     pending_since_ms = activity_ms;
                     activity_status = Some("running".to_string());
-                    activity_signal = Some("claude_tool_use".to_string());
+                    activity_signal = Some(
+                        if is_pi_message {
+                            "pi_tool_call"
+                        } else {
+                            "claude_tool_use"
+                        }
+                        .to_string(),
+                    );
+                    activity_since_ms = activity_ms;
+                } else if pi_completed {
+                    pending_tools.clear();
+                    pending_since_ms = 0;
+                    thinking_since_ms = 0;
+                    current_task.clear();
+                    activity_status = Some("idle".to_string());
+                    activity_signal = Some("pi_assistant_message".to_string());
                     activity_since_ms = activity_ms;
                 } else if !blocks.text.is_empty() {
                     if pending_tools.is_empty() {
@@ -1059,15 +1155,27 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
                         current_task.clear();
                     }
                     if stop_reason_in_progress {
-                        let activity_ms = if ts > 0 { ts } else { last_activity_ms };
                         thinking_since_ms = activity_ms;
                         activity_status = Some("running".to_string());
-                        activity_signal = Some("claude_assistant_in_progress".to_string());
+                        activity_signal = Some(
+                            if is_pi_message {
+                                "pi_assistant_in_progress"
+                            } else {
+                                "claude_assistant_in_progress"
+                            }
+                            .to_string(),
+                        );
                         activity_since_ms = activity_ms;
                     } else if pending_tools.is_empty() {
-                        let activity_ms = if ts > 0 { ts } else { last_activity_ms };
                         activity_status = Some("idle".to_string());
-                        activity_signal = Some("claude_assistant_message".to_string());
+                        activity_signal = Some(
+                            if is_pi_message {
+                                "pi_assistant_message"
+                            } else {
+                                "claude_assistant_message"
+                            }
+                            .to_string(),
+                        );
                         activity_since_ms = activity_ms;
                     }
                 } else if blocks.thinking {
@@ -1075,10 +1183,16 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
                         pending_since_ms = 0;
                         current_task.clear();
                     }
-                    let activity_ms = if ts > 0 { ts } else { last_activity_ms };
                     thinking_since_ms = activity_ms;
                     activity_status = Some("running".to_string());
-                    activity_signal = Some("claude_thinking".to_string());
+                    activity_signal = Some(
+                        if is_pi_message {
+                            "pi_thinking"
+                        } else {
+                            "claude_thinking"
+                        }
+                        .to_string(),
+                    );
                     activity_since_ms = activity_ms;
                 }
                 for t in blocks.text {
@@ -1102,7 +1216,14 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
                 if blocks.interrupted {
                     pending_tools.clear();
                     activity_status = Some("aborted".to_string());
-                    activity_signal = Some("claude_request_interrupted".to_string());
+                    activity_signal = Some(
+                        if is_pi_message {
+                            "pi_request_interrupted"
+                        } else {
+                            "claude_request_interrupted"
+                        }
+                        .to_string(),
+                    );
                     activity_since_ms = if ts > 0 { ts } else { last_activity_ms };
                 }
                 let has_human_prompt = !blocks.tool_result
@@ -1150,11 +1271,25 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
                         activity_since_ms = if ts > 0 { ts } else { last_activity_ms };
                     } else if blocks.tool_result && !blocks.interrupted {
                         activity_status = Some("running".to_string());
-                        activity_signal = Some("claude_tool_result".to_string());
+                        activity_signal = Some(
+                            if is_pi_message {
+                                "pi_tool_result"
+                            } else {
+                                "claude_tool_result"
+                            }
+                            .to_string(),
+                        );
                         activity_since_ms = if ts > 0 { ts } else { last_activity_ms };
                     } else if has_human_prompt {
                         activity_status = Some("running".to_string());
-                        activity_signal = Some("claude_user_prompt".to_string());
+                        activity_signal = Some(
+                            if is_pi_message {
+                                "pi_user_prompt"
+                            } else {
+                                "claude_user_prompt"
+                            }
+                            .to_string(),
+                        );
                         activity_since_ms = if ts > 0 { ts } else { last_activity_ms };
                     }
                 }
@@ -1283,16 +1418,21 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
         }
     }
 
-    let mut compaction_count: u32 = 0;
-    if context_history.len() >= 2 {
+    let mut inferred_compaction_count: u32 = 0;
+    if explicit_compaction_count == 0 && context_history.len() >= 2 {
         for i in 1..context_history.len() {
             let prev = context_history[i - 1];
             let cur = context_history[i];
             if prev > 0 && (cur as f64) < (prev as f64) * (1.0 - COMPACTION_DROP_RATIO) {
-                compaction_count += 1;
+                inferred_compaction_count = inferred_compaction_count.saturating_add(1);
             }
         }
     }
+    let compaction_count = if explicit_compaction_count > 0 {
+        explicit_compaction_count
+    } else {
+        inferred_compaction_count
+    };
 
     let effective_last_activity_ms = if latest_entry_ms > 0 {
         latest_entry_ms
@@ -2155,6 +2295,80 @@ mod tests {
             Some("claude_assistant_message")
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reduces_pi_v3_nested_usage_models_tools_and_compaction() {
+        let entries = parse_jsonl_text(
+            r#"
+not-json
+{"type":"session","version":3,"id":"Pi.Case_A-7","timestamp":"2026-01-01T00:00:00Z","cwd":"/work/proj"}
+{"type":"future_entry","id":"future","timestamp":"2026-01-01T00:00:00.500Z","data":{"anything":true}}
+{"type":"model_change","id":"m1","parentId":null,"timestamp":"2026-01-01T00:00:01Z","provider":"anthropic","modelId":"claude-old"}
+{"type":"message","id":"u1","parentId":"m1","timestamp":"2026-01-01T00:00:02Z","message":{"role":"user","content":"run the checks","timestamp":1767225602000}}
+{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-01-01T00:00:03Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"checking"},{"type":"toolCall","id":"call-1","name":"bash","arguments":{"command":"cargo test"}}],"provider":"anthropic","model":"claude-old","usage":{"input":100,"output":20,"cacheRead":30,"cacheWrite":10,"totalTokens":160,"cost":{}},"stopReason":"toolUse","timestamp":1767225603000}}
+{"type":"message","id":"t1","parentId":"a1","timestamp":"2026-01-01T00:00:04Z","message":{"role":"toolResult","toolCallId":"call-1","toolName":"bash","content":[{"type":"text","text":"ok"}],"usage":{"input":3,"output":1,"cacheRead":0,"cacheWrite":2,"totalTokens":6,"cost":{}},"isError":false,"timestamp":1767225604000}}
+{"type":"compaction","id":"c1","parentId":"t1","timestamp":"2026-01-01T00:00:05Z","summary":"summary","firstKeptEntryId":"u1","tokensBefore":120000,"usage":{"input":5,"output":2,"cacheRead":1,"cacheWrite":1,"totalTokens":9,"cost":{}}}
+{"type":"model_change","id":"m2","parentId":"c1","timestamp":"2026-01-01T00:00:06Z","provider":"openai","modelId":"gpt-5.5"}
+{"type":"message","id":"a2","parentId":"m2","timestamp":"2026-01-01T00:00:07Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"provider":"openai","model":"gpt-5.5","usage":{"input":"50","output":"10","cacheRead":"8","cacheWrite":"2","totalTokens":"70","cost":{}},"stopReason":"stop","timestamp":1767225607000}}
+"#,
+            MAX_LINES,
+        );
+
+        let live = reduce_entries(&entries, 0, false);
+        assert_eq!(live.model, "gpt-5.5");
+        assert_eq!(live.tokens.input, 158);
+        assert_eq!(live.tokens.output, 33);
+        assert_eq!(live.tokens.cache, 54);
+        assert_eq!(live.tokens.total, 191);
+        assert_eq!(live.tool_count, 1);
+        assert_eq!(live.last_tool.as_deref(), Some("bash"));
+        assert_eq!(live.pending_since_ms, 0);
+        assert_eq!(live.current_task, "");
+        assert_eq!(live.compaction_count, 1);
+        assert_eq!(live.activity_status.as_deref(), Some("idle"));
+        assert_eq!(
+            live.activity_signal.as_deref(),
+            Some("pi_assistant_message")
+        );
+        assert_eq!(live.chat_tail.len(), 2);
+        assert_eq!(live.chat_tail[0].role, ChatRole::User);
+        assert_eq!(live.chat_tail[0].text, "run the checks");
+        assert_eq!(live.chat_tail[1].role, ChatRole::Assistant);
+        assert_eq!(live.chat_tail[1].text, "done");
+    }
+
+    #[test]
+    fn pi_tool_result_clears_matching_pending_call() {
+        let entries = parse_jsonl_text(
+            r#"{"type":"message","id":"a1","parentId":null,"timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-1","name":"bash","arguments":{"command":"cargo test"}}],"provider":"anthropic","model":"claude-sonnet","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{}},"stopReason":"toolUse","timestamp":1767225600000}}
+{"type":"message","id":"t1","parentId":"a1","message":{"role":"toolResult","toolCallId":"call-1","toolName":"bash","content":[{"type":"text","text":"passed"}],"isError":false,"timestamp":1767225601000}}"#,
+            MAX_LINES,
+        );
+
+        let live = reduce_entries(&entries, 0, false);
+        assert_eq!(live.tool_count, 1);
+        assert_eq!(live.last_tool.as_deref(), Some("bash"));
+        assert_eq!(live.pending_since_ms, 0);
+        assert_eq!(live.current_task, "");
+        assert_eq!(live.activity_status.as_deref(), Some("running"));
+        assert_eq!(live.activity_signal.as_deref(), Some("pi_tool_result"));
+        // The second entry exercises Pi's nested Unix-millisecond timestamp fallback.
+        assert_eq!(live.last_activity_ms, 1_767_225_601_000);
+    }
+
+    #[test]
+    fn pi_error_stop_reason_marks_session_aborted() {
+        let entries = parse_jsonl_text(
+            r#"{"type":"message","id":"a1","parentId":null,"timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"provider failed"}],"provider":"openai","model":"gpt-5","usage":{"input":10,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":10,"cost":{}},"stopReason":"error","errorMessage":"network error","timestamp":1767225600000}}"#,
+            MAX_LINES,
+        );
+
+        let live = reduce_entries(&entries, 0, false);
+        assert_eq!(live.activity_status.as_deref(), Some("aborted"));
+        assert_eq!(live.activity_signal.as_deref(), Some("pi_assistant_error"));
+        assert_eq!(live.pending_since_ms, 0);
+        assert_eq!(live.thinking_since_ms, 0);
     }
 
     #[test]

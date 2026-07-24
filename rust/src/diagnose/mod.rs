@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 pub enum Provider {
     Claude,
     Codex,
+    Pi,
 }
 
 /// A parsed agent spec from the `provider:profile` CLI syntax.
@@ -28,7 +29,7 @@ pub struct AgentSpec {
 /// Parse a `provider:profile` spec string.
 /// `claude:` → Claude with empty profile (agent default config).
 /// `claude:ds` → Claude with profile "ds".
-/// A bare provider name (e.g. "claude", "codex") = default config.
+/// A bare provider name (e.g. "claude", "codex", "pi") = default config.
 pub fn parse_agent_spec(spec: &str) -> Result<AgentSpec> {
     let trimmed = spec.trim();
     if trimmed.is_empty() {
@@ -43,9 +44,10 @@ pub fn parse_agent_spec(spec: &str) -> Result<AgentSpec> {
     let provider = match provider_str {
         "claude" => Provider::Claude,
         "codex" => Provider::Codex,
+        "pi" => Provider::Pi,
         other => {
             return Err(anyhow!(
-                "Invalid agent spec \"{}\": unknown provider \"{}\". Allowed: claude, codex.",
+                "Invalid agent spec \"{}\": unknown provider \"{}\". Allowed: claude, codex, pi.",
                 spec,
                 other
             ))
@@ -63,6 +65,7 @@ pub fn spec_label(spec: &AgentSpec) -> String {
     let p = match spec.provider {
         Provider::Claude => "claude",
         Provider::Codex => "codex",
+        Provider::Pi => "pi",
     };
     if spec.profile.is_empty() {
         format!("{}:default", p)
@@ -172,7 +175,8 @@ const CAPTURE_STDOUT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const CAPTURE_STDERR_MAX_BYTES: usize = 64 * 1024;
 const CAPTURE_SIGKILL_GRACE_MS: u64 = 5000;
 
-/// Run a single non-interactive agent invocation (`claude -p` or `codex exec`)
+/// Run a single non-interactive agent invocation (`claude -p`, `codex exec`,
+/// or `pi -p --no-session`)
 /// capturing stdout/stderr with a timeout. Profile application is a stub —
 /// for now the bare agent binary is invoked. (Phase 7 baseline.)
 pub fn run_agent_capture(
@@ -184,6 +188,7 @@ pub fn run_agent_capture(
     let bin = match spec.provider {
         Provider::Claude => "claude",
         Provider::Codex => "codex",
+        Provider::Pi => "pi",
     };
 
     let mut cmd = match spec.provider {
@@ -195,6 +200,11 @@ pub fn run_agent_capture(
         Provider::Codex => {
             let mut c = Command::new(bin);
             c.arg("exec").arg(user_prompt);
+            c
+        }
+        Provider::Pi => {
+            let mut c = Command::new(bin);
+            c.arg("-p").arg(user_prompt).arg("--no-session");
             c
         }
     };
@@ -322,6 +332,13 @@ mod tests {
         let s = parse_agent_spec("codex:gpt5").unwrap();
         assert!(matches!(s.provider, Provider::Codex));
         assert_eq!(s.profile, "gpt5");
+    }
+
+    #[test]
+    fn parses_pi_provider() {
+        let s = parse_agent_spec("pi").unwrap();
+        assert!(matches!(s.provider, Provider::Pi));
+        assert_eq!(spec_label(&s), "pi:default");
     }
 
     #[test]

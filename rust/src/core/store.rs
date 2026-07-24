@@ -20,6 +20,7 @@ pub fn store_path() -> PathBuf {
 fn default_spaces() -> Vec<Space> {
     let now1 = now_iso();
     let now2 = now_iso();
+    let now3 = now_iso();
     vec![
         Space {
             id: "cat_0001".into(),
@@ -38,6 +39,15 @@ fn default_spaces() -> Vec<Space> {
             parent_id: None,
             created_at: now2.clone(),
             updated_at: now2,
+        },
+        Space {
+            id: "cat_0003".into(),
+            name: "pi".into(),
+            description: "Pi agent sessions".into(),
+            tags: vec![],
+            parent_id: None,
+            created_at: now3.clone(),
+            updated_at: now3,
         },
     ]
 }
@@ -143,6 +153,20 @@ pub fn load_store() -> Store {
         });
         migrated = true;
     }
+    if !store.spaces.iter().any(|s| s.name == "pi") {
+        let now = now_iso();
+        let id = generate_space_id(&store.spaces);
+        store.spaces.push(Space {
+            id,
+            name: "pi".into(),
+            description: "Pi agent sessions".into(),
+            tags: vec![],
+            parent_id: None,
+            created_at: now.clone(),
+            updated_at: now,
+        });
+        migrated = true;
+    }
 
     if migrated {
         let _ = save_store(&store);
@@ -173,6 +197,26 @@ pub fn find_bookmark(id: &str) -> Option<Bookmark> {
         .bookmarks
         .into_iter()
         .find(|b| b.id == id || b.session_id == id)
+}
+
+/// Find a bookmark for a resolved session without treating Pi's cwd-scoped
+/// session ID as globally unique.
+pub fn find_bookmark_for_session(
+    provider: &str,
+    session_id: &str,
+    project_path: &str,
+) -> Option<Bookmark> {
+    let matches = load_store()
+        .bookmarks
+        .into_iter()
+        .filter(|bookmark| bookmark.provider == provider && bookmark.session_id == session_id);
+    if provider == "pi" && !project_path.is_empty() {
+        matches
+            .filter(|bookmark| bookmark.project_path == project_path)
+            .next()
+    } else {
+        matches.into_iter().next()
+    }
 }
 
 pub fn update_bookmark(id: &str, patch: BookmarkPatch) -> Option<Bookmark> {
@@ -455,6 +499,7 @@ mod tests {
             let s = load_store();
             assert!(s.spaces.iter().any(|sp| sp.name == "claude"));
             assert!(s.spaces.iter().any(|sp| sp.name == "codex"));
+            assert!(s.spaces.iter().any(|sp| sp.name == "pi"));
             assert_eq!(s.version, 1);
         });
     }
@@ -482,6 +527,32 @@ mod tests {
             // Categories auto-tracked
             let s = load_store();
             assert!(s.categories.contains(&"demo".to_string()));
+        });
+    }
+
+    #[test]
+    fn pi_bookmark_lookup_includes_project_scope() {
+        with_temp_store(|| {
+            for (suffix, project) in [("a", "/work/a"), ("b", "/work/b")] {
+                add_bookmark(Bookmark {
+                    id: format!("starling_{suffix}"),
+                    provider: "pi".into(),
+                    session_id: "SharedID".into(),
+                    title: suffix.into(),
+                    category: String::new(),
+                    tags: vec![],
+                    project_path: project.into(),
+                    first_prompt: String::new(),
+                    notes: vec![],
+                    space_ids: vec![],
+                    created_at: now_iso(),
+                    updated_at: now_iso(),
+                });
+            }
+
+            let bookmark =
+                find_bookmark_for_session("pi", "SharedID", "/work/b").expect("scoped pin");
+            assert_eq!(bookmark.id, "starling_b");
         });
     }
 

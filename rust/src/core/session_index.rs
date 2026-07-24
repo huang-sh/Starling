@@ -13,18 +13,27 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::constants::{claude_session_roots, codex_session_roots, default_starling_home, now_iso};
+use crate::constants::{
+    claude_session_roots, codex_session_roots, default_starling_home, now_iso, pi_session_roots,
+};
 use crate::core::fs_utils::{atomic_write_json, read_json};
 use crate::core::session::{
-    extract_claude_session_meta, extract_codex_session_meta, parse_jsonl_head,
+    extract_claude_session_meta, extract_codex_session_meta, extract_pi_session_meta,
+    parse_jsonl_head,
 };
 use crate::types::SessionMeta;
+
+// Version 3 keeps cwd-scoped Pi sessions distinct even when they reuse an ID.
+// Rebuilding v2 avoids carrying forward an incrementally-upserted index that
+// may already have collapsed those transcripts.
+const SESSION_INDEX_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     Claude,
     Codex,
+    Pi,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,7 +95,7 @@ pub fn load_session_index() -> Option<SessionIndex> {
     let path = session_index_path();
     let raw = std::fs::read_to_string(&path).ok()?;
     let parsed: SessionIndex = serde_json::from_str(&raw).ok()?;
-    if parsed.version != 1 {
+    if parsed.version != SESSION_INDEX_VERSION {
         return None;
     }
     Some(parsed)
@@ -104,7 +113,21 @@ fn provider_roots(filter: Option<Provider>) -> Vec<(Provider, PathBuf)> {
             out.push((Provider::Codex, r));
         }
     }
+    if filter.map(|f| f == Provider::Pi).unwrap_or(true) {
+        for r in pi_session_roots() {
+            out.push((Provider::Pi, r));
+        }
+    }
     out
+}
+
+fn provider_from_name(name: &str) -> Option<Provider> {
+    match name {
+        "claude" => Some(Provider::Claude),
+        "codex" => Some(Provider::Codex),
+        "pi" => Some(Provider::Pi),
+        _ => None,
+    }
 }
 
 fn write_session_index(
@@ -123,11 +146,7 @@ fn write_session_index(
                 .ok()
                 .map(|dt| dt.timestamp_millis() as u64)
                 .unwrap_or(0);
-            let provider = if s.provider == "codex" {
-                Provider::Codex
-            } else {
-                Provider::Claude
-            };
+            let provider = provider_from_name(&s.provider).unwrap_or(Provider::Claude);
             IndexedSessionFile {
                 session_id: s.session_id.clone(),
                 provider,
@@ -138,7 +157,7 @@ fn write_session_index(
         .collect();
 
     let index = SessionIndex {
-        version: 1,
+        version: SESSION_INDEX_VERSION,
         built_at: now_iso(),
         session_count: sessions.len() as u32,
         project_count: projects.len() as u32,
@@ -153,10 +172,22 @@ fn write_session_index(
 }
 
 fn upsert_session(sessions: &mut Vec<SessionMeta>, session: SessionMeta) {
-    if let Some(slot) = sessions
-        .iter_mut()
-        .find(|s| s.session_id == session.session_id)
-    {
+    let same_identity = |existing: &&mut SessionMeta| {
+        if existing.provider != session.provider {
+            return false;
+        }
+        if session.provider == "pi" {
+            // Pi IDs are only unique within a cwd. The persisted transcript
+            // path is the stable identity across index refreshes.
+            if !existing.file_path.is_empty() && !session.file_path.is_empty() {
+                return existing.file_path == session.file_path;
+            }
+            return existing.session_id == session.session_id
+                && existing.project_path == session.project_path;
+        }
+        existing.session_id == session.session_id
+    };
+    if let Some(slot) = sessions.iter_mut().find(same_identity) {
         *slot = session;
     } else {
         sessions.push(session);
@@ -180,12 +211,14 @@ pub fn remove_session_from_index(session_id: &str) -> bool {
         Some(i) => i,
         None => return false,
     };
-    let normalized = session_id.to_lowercase();
     let original_len = index.sessions.len();
     let sessions: Vec<SessionMeta> = index
         .sessions
         .into_iter()
-        .filter(|s| s.session_id.to_lowercase() != normalized)
+        .filter(|s| {
+            let provider = provider_from_name(&s.provider);
+            !session_id_matches(session_id, &s.session_id, provider, false)
+        })
         .collect();
     if sessions.len() == original_len {
         return false;
@@ -259,6 +292,7 @@ fn parse_session_file(path: &Path, provider: Provider) -> Option<SessionMeta> {
     let meta = match provider {
         Provider::Claude => extract_claude_session_meta(&entries, path, &mtime_iso),
         Provider::Codex => extract_codex_session_meta(&entries, path, &mtime_iso),
+        Provider::Pi => extract_pi_session_meta(&entries, path, &mtime_iso),
     };
     Some(meta)
 }
@@ -368,10 +402,8 @@ pub fn aggregate_projects_from_sessions(
     let mut map: HashMap<String, Vec<SessionMeta>> = HashMap::new();
     for s in sessions {
         if let Some(p) = provider_filter {
-            let sp = if s.provider == "codex" {
-                Provider::Codex
-            } else {
-                Provider::Claude
+            let Some(sp) = provider_from_name(&s.provider) else {
+                continue;
             };
             if sp != p {
                 continue;
@@ -474,17 +506,39 @@ pub fn is_session_index_fresh(provider: Option<Provider>, now_ms: u64) -> bool {
     true
 }
 
-fn matches_session_id(wanted_ids: &std::collections::HashSet<String>, session_id: &str) -> bool {
-    let normalized = session_id.to_lowercase();
-    if wanted_ids.contains(&normalized) {
-        return true;
+fn is_uuidish(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.len() >= 8
+        && trimmed.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+        && trimmed.chars().filter(|c| *c != '-').count() <= 32
+}
+
+fn session_id_matches(
+    wanted: &str,
+    session_id: &str,
+    provider: Option<Provider>,
+    allow_prefix: bool,
+) -> bool {
+    let wanted = wanted.trim();
+    let session_id = session_id.trim();
+    if wanted.is_empty() {
+        return false;
     }
-    for w in wanted_ids {
-        if !w.is_empty() && normalized.starts_with(w) {
-            return true;
-        }
+    let case_insensitive =
+        provider != Some(Provider::Pi) || (is_uuidish(wanted) && is_uuidish(session_id));
+    if case_insensitive {
+        let wanted = wanted.to_ascii_lowercase();
+        let session_id = session_id.to_ascii_lowercase();
+        return session_id == wanted || (allow_prefix && session_id.starts_with(&wanted));
     }
-    false
+    // Pi custom IDs are case-sensitive.
+    session_id == wanted || (allow_prefix && session_id.starts_with(wanted))
+}
+
+fn matches_session_id(wanted_ids: &[String], session_id: &str, provider: Option<Provider>) -> bool {
+    wanted_ids
+        .iter()
+        .any(|wanted| session_id_matches(wanted, session_id, provider, true))
 }
 
 /// Find indexed sessions by ID/prefix. Uses the fast path when the index is
@@ -497,8 +551,7 @@ pub fn lookup_indexed_sessions(
     if session_ids.is_empty() {
         return result;
     }
-    let wanted: std::collections::HashSet<String> =
-        session_ids.iter().map(|s| s.to_lowercase()).collect();
+    let wanted: Vec<String> = session_ids.to_vec();
 
     let now_ms = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -516,23 +569,34 @@ pub fn lookup_indexed_sessions(
 
     for session in index.sessions {
         if let Some(p) = provider {
-            let sp = if session.provider == "codex" {
-                Provider::Codex
-            } else {
-                Provider::Claude
+            let Some(sp) = provider_from_name(&session.provider) else {
+                continue;
             };
             if sp != p {
                 continue;
             }
         }
-        if !matches_session_id(&wanted, &session.session_id) {
+        let session_provider = provider_from_name(&session.provider);
+        if !matches_session_id(&wanted, &session.session_id, session_provider) {
             continue;
         }
-        // exact id wins over prefix
-        if result.contains_key(&session.session_id) {
+        let result_key = if session.provider == "pi" {
+            format!(
+                "pi\0{}\0{}",
+                session.session_id,
+                if session.file_path.is_empty() {
+                    &session.project_path
+                } else {
+                    &session.file_path
+                }
+            )
+        } else {
+            session.session_id.clone()
+        };
+        if result.contains_key(&result_key) {
             continue;
         }
-        result.insert(session.session_id.clone(), session);
+        result.insert(result_key, session);
     }
     result
 }
@@ -573,11 +637,25 @@ mod tests {
 
     #[test]
     fn matches_session_id_prefix_works() {
-        let mut wanted = std::collections::HashSet::new();
-        wanted.insert("abc123".into());
-        assert!(matches_session_id(&wanted, "abc123def456"));
-        assert!(matches_session_id(&wanted, "ABC123"));
-        assert!(!matches_session_id(&wanted, "xyz789"));
+        let wanted = vec!["abc123".into()];
+        assert!(matches_session_id(
+            &wanted,
+            "abc123def456",
+            Some(Provider::Claude)
+        ));
+        assert!(matches_session_id(&wanted, "ABC123", Some(Provider::Codex)));
+        assert!(!matches_session_id(
+            &wanted,
+            "xyz789",
+            Some(Provider::Claude)
+        ));
+        let pi_wanted = vec!["PiCase".into()];
+        assert!(matches_session_id(&pi_wanted, "PiCase", Some(Provider::Pi)));
+        assert!(!matches_session_id(
+            &pi_wanted,
+            "picase",
+            Some(Provider::Pi)
+        ));
     }
 
     #[test]
@@ -595,5 +673,34 @@ mod tests {
         let new = mk_session("s2", "/b", "codex", "y");
         upsert_session(&mut sessions, new);
         assert_eq!(sessions.len(), 2);
+    }
+
+    #[test]
+    fn upsert_keeps_same_pi_id_from_different_projects() {
+        let mut first = mk_session("SharedID", "/a", "pi", "old");
+        first.file_path = "/pi/--a--/one_SharedID.jsonl".into();
+        let mut second = mk_session("SharedID", "/b", "pi", "new");
+        second.file_path = "/pi/--b--/two_SharedID.jsonl".into();
+        let mut sessions = vec![first];
+
+        upsert_session(&mut sessions, second);
+
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().any(|s| s.project_path == "/a"));
+        assert!(sessions.iter().any(|s| s.project_path == "/b"));
+    }
+
+    #[test]
+    fn upsert_replaces_same_pi_transcript() {
+        let mut old = mk_session("SharedID", "/a", "pi", "old");
+        old.file_path = "/pi/--a--/one_SharedID.jsonl".into();
+        let mut updated = mk_session("SharedID", "/a", "pi", "new");
+        updated.file_path = old.file_path.clone();
+        let mut sessions = vec![old];
+
+        upsert_session(&mut sessions, updated);
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].modified_at, "new");
     }
 }

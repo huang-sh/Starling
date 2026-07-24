@@ -278,6 +278,7 @@ function sessionCell(row: MonitorRow): string {
 function agentCell(provider: string): string {
   if (provider === "claude") return ansi.magenta("claude");
   if (provider === "codex") return ansi.green("codex");
+  if (provider === "pi") return ansi.cyan("pi");
   return provider || "-";
 }
 

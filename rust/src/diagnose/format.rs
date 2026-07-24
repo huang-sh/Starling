@@ -43,6 +43,7 @@ fn format_evaluatee(ev: &EvaluateeResult) -> String {
     let provider_str = match ev.provider {
         crate::diagnose::Provider::Claude => "claude",
         crate::diagnose::Provider::Codex => "codex",
+        crate::diagnose::Provider::Pi => "pi",
     };
     out.push(format!(
         "{}  {}",

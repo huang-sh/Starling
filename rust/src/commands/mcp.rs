@@ -571,7 +571,7 @@ fn initialize_result(tool_set: McpToolSet) -> Value {
         McpToolSet::Starling => (
             "starling",
             "Starling MCP Server",
-            "Use Starling MCP tools to inspect local Claude Code and Codex sessions, monitor status, and organize sessions into catalogs.",
+            "Use Starling MCP tools to inspect local Claude Code, Codex, and Pi sessions, monitor status, and organize sessions into catalogs.",
         ),
         McpToolSet::All => (
             "starling",
@@ -604,7 +604,7 @@ fn tool_definitions(tool_set: McpToolSet) -> Vec<Value> {
                     "pinned": { "type": "boolean", "description": "Only include pinned sessions." },
                     "recent": { "type": "boolean", "description": "Legacy option to include unpinned recent sessions; default top already includes them unless pinned is true." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 10000, "description": "Maximum sessions to return after activity sorting." },
-                    "agent": { "type": "string", "enum": ["claude", "codex"], "description": "Only include sessions for this agent." },
+                    "agent": { "type": "string", "enum": ["claude", "codex", "pi"], "description": "Only include sessions for this agent." },
                     "sort": { "type": "string", "enum": ["activity", "recent", "tokens", "created", "memory", "cpu", "ctx", "skills", "tools"], "description": "Sort mode for sessions." },
                     "catalog": { "type": "string", "description": "Catalog name/path/id filter." }
                 }
@@ -618,7 +618,7 @@ fn tool_definitions(tool_set: McpToolSet) -> Vec<Value> {
                 "properties": {
                     "limit": { "type": "integer", "minimum": 1, "maximum": 10000 },
                     "all": { "type": "boolean", "description": "Return all indexed sessions." },
-                    "agent": { "type": "string", "enum": ["claude", "codex"] },
+                    "agent": { "type": "string", "enum": ["claude", "codex", "pi"] },
                     "catalog": { "type": "string" },
                     "cataloged": { "type": "boolean" }
                 }

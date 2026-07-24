@@ -240,6 +240,8 @@ function agentCell(provider) {
         return ansi.magenta("claude");
     if (provider === "codex")
         return ansi.green("codex");
+    if (provider === "pi")
+        return ansi.cyan("pi");
     return provider || "-";
 }
 function statusLetter(status) {

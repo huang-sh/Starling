@@ -20,7 +20,7 @@ const hookEvents = [
   "SessionEnd",
 ];
 
-test("postinstall adds idempotent Claude status hooks without removing user hooks", () => {
+test("postinstall installs agent skills and adds idempotent Claude status hooks without removing user hooks", () => {
   const home = join(tmpdir(), `starling-postinstall-${process.pid}-${Date.now()}`);
   const claudeDir = join(home, ".claude");
   mkdirSync(claudeDir, { recursive: true });
@@ -50,6 +50,19 @@ test("postinstall adds idempotent Claude status hooks without removing user hook
       encoding: "utf8",
     });
     assert.equal(result.status, 0, result.stderr);
+  }
+
+  const skillSource = readFileSync(join(repoRoot, "skills", "starling", "SKILL.md"), "utf8");
+  for (const relativePath of [
+    [".codex", "skills", "starling", "SKILL.md"],
+    [".claude", "skills", "starling", "SKILL.md"],
+    [".pi", "agent", "skills", "starling", "SKILL.md"],
+  ]) {
+    assert.equal(
+      readFileSync(join(home, ...relativePath), "utf8"),
+      skillSource,
+      `${relativePath[0]} receives the bundled Starling skill`,
+    );
   }
 
   const settings = JSON.parse(readFileSync(settingsPath, "utf8"));

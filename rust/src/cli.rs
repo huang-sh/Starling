@@ -57,7 +57,7 @@ pub enum Command {
     #[command(subcommand, alias = "prj")]
     Project(ProjectCommand),
 
-    /// Launch a Claude Code or Codex session under Starling tracking
+    /// Launch a Claude Code, Codex, or Pi session under Starling tracking
     ///
     /// Records the run, maps the spawned process to its session, and optionally
     /// assigns it to a catalog. Use --setting to launch with a model profile.
@@ -86,7 +86,7 @@ pub enum Command {
 
     /// Resume an agent session directly
     Resume {
-        /// Session ID to resume
+        /// Session ID, or an absolute Pi transcript path, to resume
         session_id: String,
     },
 }
@@ -100,7 +100,7 @@ pub enum SessionCommand {
         #[arg(short = 'n', visible_short_alias = 'l', long, default_value = "20")]
         limit: usize,
 
-        /// Filter by agent: claude | codex
+        /// Filter by agent: claude | codex | pi
         #[arg(short, long)]
         agent: Option<String>,
 
@@ -134,7 +134,7 @@ pub enum SessionCommand {
     Lookup {
         /// One or more session IDs
         session_ids: Vec<String>,
-        /// Filter by agent: claude | codex
+        /// Filter by agent: claude | codex | pi
         #[arg(short, long)]
         agent: Option<String>,
         /// Output as JSON
@@ -144,7 +144,7 @@ pub enum SessionCommand {
 
     /// Resume an agent session
     Resume {
-        /// Session ID to resume
+        /// Session ID, or an absolute Pi transcript path, to resume
         session_id: String,
     },
 
@@ -217,7 +217,7 @@ pub enum IndexCommand {
     },
     /// Rebuild ~/.starling/session-index.json
     Rebuild {
-        /// Filter by agent: claude | codex
+        /// Filter by agent: claude | codex | pi
         #[arg(short, long)]
         agent: Option<String>,
         /// Output as JSON
@@ -416,7 +416,7 @@ pub enum ProjectCommand {
     /// List known projects
     #[command(alias = "ls")]
     List {
-        /// Filter by agent: claude | codex
+        /// Filter by agent: claude | codex | pi
         #[arg(short, long)]
         agent: Option<String>,
         /// Max projects to show
@@ -439,7 +439,7 @@ pub enum ProjectCommand {
     Show {
         /// Project path to inspect
         path: String,
-        /// Filter by agent: claude | codex
+        /// Filter by agent: claude | codex | pi
         #[arg(short, long)]
         agent: Option<String>,
         /// Output as JSON
@@ -496,6 +496,12 @@ pub enum RunSubcommand {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Launch Pi agent
+    Pi {
+        /// Arguments passed through to Pi
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Show recorded Starling runs
     Status {
         /// Run ID to inspect; omit to list recent runs
@@ -518,35 +524,36 @@ pub enum RunSubcommand {
 pub enum ModelCommand {
     /// List model profiles and current agent configs
     ///
-    /// Scans the active configs (~/.claude/settings.json, ~/.codex/config.toml)
-    /// and any saved profiles under ~/.starling/settings/{claude,codex}/,
+    /// Scans the active configs (~/.claude/settings.json, ~/.codex/config.toml,
+    /// ~/.pi/agent/settings.json) and saved profiles under
+    /// ~/.starling/settings/{claude,codex,pi}/,
     /// showing the model, auth/provider, scope, and source file for each.
     #[command(alias = "ls")]
     List {
         /// Output as JSON
         #[arg(long)]
         json: bool,
-        /// Filter by agent: claude | codex
+        /// Filter by agent: claude | codex | pi
         #[arg(long)]
         agent: Option<String>,
     },
     /// Create a new model profile
     ///
     /// Not yet implemented in the Rust CLI. Create the profile file directly
-    /// under ~/.starling/settings/{claude,codex}/, or use the VS Code extension.
+    /// under ~/.starling/settings/{claude,codex,pi}/, or use the VS Code extension.
     Add {
         /// Name for the new profile
         name: String,
     },
     /// Delete a model profile
     ///
-    /// Removes a profile file from ~/.starling/settings/{claude,codex}/.
+    /// Removes a profile file from ~/.starling/settings/{claude,codex,pi}/.
     /// If the name exists for both agents, disambiguate with --agent.
     /// The agent's default 'current' config cannot be deleted here.
     Delete {
         /// Name of the profile to delete
         name: String,
-        /// Disambiguate by agent: claude | codex
+        /// Disambiguate by agent: claude | codex | pi
         #[arg(long)]
         agent: Option<String>,
         /// Output as JSON
@@ -598,7 +605,7 @@ pub struct DiagnoseCommand {
     #[arg(long, default_value = "personality")]
     pub task: String,
 
-    /// Judge/launcher agent, e.g. claude:sonnet / codex:gpt5 / claude (bare provider = default config)
+    /// Judge/launcher agent, e.g. claude:sonnet / codex:gpt5 / pi (bare provider = default config)
     #[arg(long)]
     pub judge: Option<String>,
 
@@ -646,7 +653,7 @@ pub struct MonitorCommand {
     #[arg(short, long)]
     pub limit: Option<usize>,
 
-    /// Filter by agent: claude | codex
+    /// Filter by agent: claude | codex | pi
     #[arg(short, long, value_enum)]
     pub agent: Option<MonitorAgent>,
 
@@ -677,6 +684,8 @@ pub enum MonitorAgent {
     Claude,
     /// Codex sessions
     Codex,
+    /// Pi agent sessions
+    Pi,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -759,7 +768,7 @@ pub enum TopAction {
     /// Record an agent hook event from stdin
     #[command(hide = true)]
     Hook {
-        /// Agent provider: claude | codex
+        /// Agent provider: claude | codex | pi
         #[arg(long, default_value = "claude")]
         provider: String,
         /// Hook event name when the payload does not include one
