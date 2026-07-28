@@ -489,13 +489,42 @@ export async function runStarlingTui(options) {
             }
             return;
         }
+        if (key.type === "left") {
+            dispatch({ type: "ui.move", delta: -1 });
+            return;
+        }
+        if (key.type === "right") {
+            dispatch({ type: "ui.move", delta: 1 });
+            return;
+        }
+        if (key.type === "home") {
+            dispatch({ type: "ui.home" });
+            return;
+        }
+        if (key.type === "end") {
+            dispatch({ type: "ui.end" });
+            return;
+        }
+        if (prompt.method === "editor" && (key.type === "up" || key.type === "down")) {
+            dispatch({ type: "ui.line", delta: key.type === "up" ? -1 : 1 });
+            return;
+        }
+        if (key.type === "delete") {
+            dispatch({ type: "ui.delete" });
+            return;
+        }
         if (key.type === "text" || key.type === "paste") {
             dispatch({ type: "ui.append", value: key.value });
+            return;
         }
-        if (key.type === "backspace")
+        if (key.type === "backspace") {
             dispatch({ type: "ui.backspace" });
-        if (key.type === "ctrl-u")
+            return;
+        }
+        if (key.type === "ctrl-u") {
             dispatch({ type: "ui.value", value: "" });
+            return;
+        }
         if (key.type === "alt-enter" || (prompt.method === "editor" && key.type === "enter")) {
             dispatch({ type: "ui.append", value: "\n" });
         }
@@ -554,16 +583,49 @@ export async function runStarlingTui(options) {
             abortTurn();
             return;
         }
-        if (key.type === "enter")
+        if (key.type === "left") {
+            dispatch({ type: "composer.move", delta: -1 });
+            return;
+        }
+        if (key.type === "right") {
+            dispatch({ type: "composer.move", delta: 1 });
+            return;
+        }
+        if (key.type === "home") {
+            dispatch({ type: "composer.home" });
+            return;
+        }
+        if (key.type === "end") {
+            dispatch({ type: "composer.end" });
+            return;
+        }
+        if (key.type === "delete") {
+            dispatch({ type: "composer.delete" });
+            return;
+        }
+        if ((key.type === "up" || key.type === "down") && state.composer) {
+            dispatch({ type: "composer.line", delta: key.type === "up" ? -1 : 1 });
+            return;
+        }
+        if (key.type === "enter") {
             submitComposer();
-        if (key.type === "alt-enter")
+            return;
+        }
+        if (key.type === "alt-enter") {
             dispatch({ type: "composer.append", value: "\n" });
-        if (key.type === "backspace")
+            return;
+        }
+        if (key.type === "backspace") {
             dispatch({ type: "composer.backspace" });
-        if (key.type === "ctrl-u")
+            return;
+        }
+        if (key.type === "ctrl-u") {
             dispatch({ type: "composer.set", value: "" });
+            return;
+        }
         if (key.type === "text" || key.type === "paste") {
             dispatch({ type: "composer.append", value: key.value });
+            return;
         }
         const page = Math.max(3, Math.floor((stdout.rows || 24) / 2));
         if (key.type === "page-up")

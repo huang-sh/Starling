@@ -50,6 +50,16 @@ export interface ExtensionUiPrompt {
   options: string[];
   selected: number;
   value: string;
+  /** UTF-16 index kept on a grapheme boundary. */
+  cursor?: number;
+}
+
+export type ExtensionUiWidgetPlacement = "aboveEditor" | "belowEditor";
+
+export interface ExtensionUiWidget {
+  key: string;
+  lines: string[];
+  placement: ExtensionUiWidgetPlacement;
 }
 
 export interface StarlingTuiState {
@@ -68,12 +78,17 @@ export interface StarlingTuiState {
   thinking: string;
   queueDepth: number;
   composer: string;
+  /** UTF-16 index kept on a grapheme boundary. */
+  composerCursor: number;
   slashCommands: SlashCommandItem[];
   slashMenuOpen: boolean;
   slashSelected: number;
   scrollOffset: number;
   timeline: TimelineEntry[];
   activity: ActivityEntry[];
+  statusItems: Record<string, string>;
+  widgets: Record<string, ExtensionUiWidget>;
+  terminalTitle: string;
   uiPrompt?: ExtensionUiPrompt;
   nextId: number;
 }
@@ -87,11 +102,21 @@ export type StarlingTuiAction =
   | { type: "composer.set"; value: string }
   | { type: "composer.append"; value: string }
   | { type: "composer.backspace" }
+  | { type: "composer.delete" }
+  | { type: "composer.move"; delta: number }
+  | { type: "composer.line"; delta: -1 | 1 }
+  | { type: "composer.home" }
+  | { type: "composer.end" }
   | { type: "slash.loaded"; commands: readonly unknown[] }
   | { type: "slash.select"; delta: number }
   | { type: "slash.dismiss" }
   | { type: "prompt.submitted"; text: string; queued: boolean }
-  | { type: "prompt.rejected"; message: string }
+  | {
+    type: "prompt.rejected";
+    text?: string;
+    queued?: boolean;
+    message: string;
+  }
   | { type: "command.submitted"; name: string }
   | { type: "command.completed"; message?: string }
   | { type: "command.failed"; message: string }
@@ -110,6 +135,11 @@ export type StarlingTuiAction =
   | { type: "ui.value"; value: string }
   | { type: "ui.append"; value: string }
   | { type: "ui.backspace" }
+  | { type: "ui.delete" }
+  | { type: "ui.move"; delta: number }
+  | { type: "ui.line"; delta: -1 | 1 }
+  | { type: "ui.home" }
+  | { type: "ui.end" }
   | { type: "ui.close" };
 
 const MAX_TIMELINE_ENTRIES = 1_000;
@@ -129,12 +159,16 @@ export function createInitialStarlingTuiState(cwd: string): StarlingTuiState {
     thinking: "",
     queueDepth: 0,
     composer: "",
+    composerCursor: 0,
     slashCommands: mergeSlashCommands([]),
     slashMenuOpen: false,
     slashSelected: 0,
     scrollOffset: 0,
     timeline: [],
     activity: [],
+    statusItems: {},
+    widgets: {},
+    terminalTitle: "",
     nextId: 1,
   };
 }
@@ -149,9 +183,22 @@ export function reduceStarlingTui(
     case "composer.set":
       return updateComposer(state, action.value);
     case "composer.append":
-      return updateComposer(state, state.composer + action.value);
+      return insertComposer(state, action.value);
     case "composer.backspace":
-      return updateComposer(state, removeLastCodePoint(state.composer));
+      return removeComposerGrapheme(state, -1);
+    case "composer.delete":
+      return removeComposerGrapheme(state, 1);
+    case "composer.move":
+      return moveComposerCursor(state, action.delta);
+    case "composer.line":
+      return {
+        ...state,
+        composerCursor: moveLineCursor(state.composer, state.composerCursor, action.delta),
+      };
+    case "composer.home":
+      return { ...state, composerCursor: lineStart(state.composer, state.composerCursor) };
+    case "composer.end":
+      return { ...state, composerCursor: lineEnd(state.composer, state.composerCursor) };
     case "slash.loaded": {
       const slashCommands = mergeSlashCommands(action.commands);
       const menu = filterSlashCommands(state.composer, slashCommands);
@@ -178,10 +225,11 @@ export function reduceStarlingTui(
         {
           ...state,
           composer: "",
+          composerCursor: 0,
           slashMenuOpen: false,
           slashSelected: 0,
           scrollOffset: 0,
-          busy: true,
+          busy: action.queued ? state.busy : true,
           phase: "working",
           status: action.queued ? "Follow-up queued" : "Sending…",
           queueDepth: action.queued ? state.queueDepth + 1 : state.queueDepth,
@@ -189,20 +237,41 @@ export function reduceStarlingTui(
         { kind: "user", text: action.text, pending: true },
       );
     }
-    case "prompt.rejected":
-      return appendTimeline(
-        addActivity(
-          { ...state, phase: "error", busy: false, status: action.message },
-          "request",
-          action.message,
-          "error",
-        ),
-        { kind: "error", text: action.message },
+    case "prompt.rejected": {
+      const optimistic = action.text === undefined
+        ? -1
+        : findLastIndex(
+          state.timeline,
+          (entry) => entry.kind === "user" && entry.pending === true && entry.text === action.text,
+        );
+      const composer = state.composer || action.text || "";
+      const busy = action.queued ? state.busy : false;
+      const next = addActivity(
+        {
+          ...state,
+          phase: busy || state.compacting ? "working" : "ready",
+          busy,
+          status: busy
+            ? "Agent is working…"
+            : state.compacting ? "Compacting context…" : "Ready",
+          queueDepth: action.queued ? Math.max(0, state.queueDepth - 1) : state.queueDepth,
+          composer,
+          composerCursor: state.composer ? state.composerCursor : composer.length,
+          timeline: optimistic < 0
+            ? state.timeline
+            : state.timeline.filter((_, index) => index !== optimistic),
+        },
+        "request",
+        action.message,
+        "error",
       );
+      return appendTimeline(next, { kind: "error", text: action.message });
+    }
     case "command.submitted":
       return {
         ...state,
         composer: "",
+        composerCursor: 0,
         slashMenuOpen: false,
         slashSelected: 0,
         scrollOffset: 0,
@@ -235,11 +304,11 @@ export function reduceStarlingTui(
     case "session.metadata":
       return {
         ...state,
-        model: action.model || state.model,
-        thinking: action.thinking ?? state.thinking,
-        sessionName: action.sessionName || state.sessionName,
-        sessionId: action.sessionId || state.sessionId,
-        sessionFile: action.sessionFile || state.sessionFile,
+        ...(action.model !== undefined ? { model: action.model || "default model" } : {}),
+        ...(action.thinking !== undefined ? { thinking: action.thinking } : {}),
+        ...(Object.hasOwn(action, "sessionName") ? { sessionName: action.sessionName } : {}),
+        ...(Object.hasOwn(action, "sessionId") ? { sessionId: action.sessionId } : {}),
+        ...(Object.hasOwn(action, "sessionFile") ? { sessionFile: action.sessionFile } : {}),
       };
     case "scroll":
       return { ...state, scrollOffset: Math.max(0, state.scrollOffset + action.delta) };
@@ -255,15 +324,50 @@ export function reduceStarlingTui(
     }
     case "ui.value":
       return state.uiPrompt
-        ? { ...state, uiPrompt: { ...state.uiPrompt, value: action.value } }
+        ? { ...state, uiPrompt: { ...state.uiPrompt, value: action.value, cursor: action.value.length } }
         : state;
-    case "ui.append":
-      return state.uiPrompt
-        ? { ...state, uiPrompt: { ...state.uiPrompt, value: state.uiPrompt.value + action.value } }
-        : state;
+    case "ui.append": {
+      if (!state.uiPrompt) return state;
+      const edit = insertText(state.uiPrompt.value, promptCursor(state.uiPrompt), action.value);
+      return { ...state, uiPrompt: { ...state.uiPrompt, value: edit.value, cursor: edit.cursor } };
+    }
     case "ui.backspace":
+    case "ui.delete": {
+      if (!state.uiPrompt) return state;
+      const edit = removeTextGrapheme(
+        state.uiPrompt.value,
+        promptCursor(state.uiPrompt),
+        action.type === "ui.backspace" ? -1 : 1,
+      );
+      return { ...state, uiPrompt: { ...state.uiPrompt, value: edit.value, cursor: edit.cursor } };
+    }
+    case "ui.move":
       return state.uiPrompt
-        ? { ...state, uiPrompt: { ...state.uiPrompt, value: removeLastCodePoint(state.uiPrompt.value) } }
+        ? {
+          ...state,
+          uiPrompt: {
+            ...state.uiPrompt,
+            cursor: moveTextCursor(state.uiPrompt.value, promptCursor(state.uiPrompt), action.delta),
+          },
+        }
+        : state;
+    case "ui.line":
+      return state.uiPrompt
+        ? {
+          ...state,
+          uiPrompt: {
+            ...state.uiPrompt,
+            cursor: moveLineCursor(state.uiPrompt.value, promptCursor(state.uiPrompt), action.delta),
+          },
+        }
+        : state;
+    case "ui.home":
+      return state.uiPrompt
+        ? { ...state, uiPrompt: { ...state.uiPrompt, cursor: lineStart(state.uiPrompt.value, promptCursor(state.uiPrompt)) } }
+        : state;
+    case "ui.end":
+      return state.uiPrompt
+        ? { ...state, uiPrompt: { ...state.uiPrompt, cursor: lineEnd(state.uiPrompt.value, promptCursor(state.uiPrompt)) } }
         : state;
     case "ui.close":
       return closeUiPrompt(state);
@@ -313,9 +417,9 @@ function reduceChatEvent(state: StarlingTuiState, event: ChatEvent): StarlingTui
     case "session.snapshot":
       return hydrateSnapshot(state, event.snapshot);
     case "session.name.changed":
-      return { ...state, sessionName: event.name || state.sessionName };
+      return { ...state, sessionName: event.name };
     case "session.thinking.changed":
-      return { ...state, thinking: event.level || state.thinking };
+      return { ...state, thinking: event.level };
     case "turn.started":
       return { ...state, busy: true, phase: "working", status: "Agent is working…" };
     case "turn.generating":
@@ -396,6 +500,22 @@ function reduceChatEvent(state: StarlingTuiState, event: ChatEvent): StarlingTui
       );
     case "activity.recorded":
       return addActivity(state, event.label, event.detail, event.tone);
+    case "status.changed":
+      return { ...state, statusItems: updateKeyedValue(state.statusItems, event.key, event.text) };
+    case "widget.changed": {
+      const widgets = { ...state.widgets };
+      if (event.lines === undefined) delete widgets[event.key];
+      else {
+        widgets[event.key] = {
+          key: event.key,
+          lines: event.lines,
+          placement: event.placement,
+        };
+      }
+      return { ...state, widgets };
+    }
+    case "terminal.title.changed":
+      return { ...state, terminalTitle: event.title };
     case "diagnostic":
       return reduceDiagnostic(state, event.level === "error" ? "error" : "info", event.message);
     case "interaction.requested":
@@ -409,16 +529,20 @@ function reduceChatEvent(state: StarlingTuiState, event: ChatEvent): StarlingTui
 
 function hydrateSnapshot(state: StarlingTuiState, snapshot: ChatSessionSnapshot): StarlingTuiState {
   const normalized = transcriptToTimeline(snapshot.transcript, state.nextId);
+  const compacting = snapshot.compacting === true;
+  const working = snapshot.streaming || compacting;
   return {
     ...state,
-    phase: snapshot.streaming ? "working" : "ready",
-    status: snapshot.streaming ? "Agent is working…" : "Ready",
+    phase: working ? "working" : "ready",
+    status: snapshot.streaming
+      ? "Agent is working…"
+      : compacting ? "Compacting context…" : "Ready",
     ready: true,
     busy: snapshot.streaming,
-    compacting: false,
-    sessionId: snapshot.sessionId || state.sessionId,
-    sessionName: snapshot.sessionName || state.sessionName,
-    sessionFile: snapshot.sessionFile || state.sessionFile,
+    compacting,
+    sessionId: snapshot.sessionId,
+    sessionName: snapshot.sessionName,
+    sessionFile: snapshot.sessionFile,
     model: snapshot.model,
     thinking: snapshot.thinking,
     queueDepth: snapshot.queueDepth,
@@ -572,6 +696,10 @@ function reduceDiagnostic(
   );
 }
 
+function promptCursor(prompt: ExtensionUiPrompt): number {
+  return prompt.cursor ?? prompt.value.length;
+}
+
 function promptFromRequest(request: ChatInteractionRequest): ExtensionUiPrompt {
   return {
     id: request.id,
@@ -581,6 +709,7 @@ function promptFromRequest(request: ChatInteractionRequest): ExtensionUiPrompt {
     options: request.options,
     selected: 0,
     value: request.initialValue,
+    cursor: request.initialValue.length,
   };
 }
 
@@ -599,25 +728,150 @@ function openUiPrompt(state: StarlingTuiState, prompt: ExtensionUiPrompt): Starl
 }
 
 function closeUiPrompt(state: StarlingTuiState): StarlingTuiState {
-  return { ...state, uiPrompt: undefined, status: state.busy ? "Agent is working…" : "Ready" };
+  return {
+    ...state,
+    uiPrompt: undefined,
+    status: state.busy
+      ? "Agent is working…"
+      : state.compacting ? "Compacting context…" : "Ready",
+  };
 }
 
 function compactWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
-function removeLastCodePoint(value: string): string {
-  return Array.from(value).slice(0, -1).join("");
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+interface TextEdit {
+  value: string;
+  cursor: number;
 }
 
-function updateComposer(state: StarlingTuiState, composer: string): StarlingTuiState {
+function insertText(value: string, cursor: number, inserted: string): TextEdit {
+  const at = clampCursor(value, cursor);
+  const nextValue = value.slice(0, at) + inserted + value.slice(at);
+  return {
+    value: nextValue,
+    cursor: ceilCursor(nextValue, at + inserted.length),
+  };
+}
+
+function removeTextGrapheme(value: string, cursor: number, direction: -1 | 1): TextEdit {
+  const boundaries = graphemeBoundaries(value);
+  const at = boundaryIndex(boundaries, clampCursor(value, cursor));
+  const startIndex = direction < 0 ? at - 1 : at;
+  const endIndex = startIndex + 1;
+  if (startIndex < 0 || endIndex >= boundaries.length) return { value, cursor: boundaries[at] ?? 0 };
+  const start = boundaries[startIndex] ?? 0;
+  const end = boundaries[endIndex] ?? start;
+  return { value: value.slice(0, start) + value.slice(end), cursor: start };
+}
+
+function moveTextCursor(value: string, cursor: number, delta: number): number {
+  const boundaries = graphemeBoundaries(value);
+  const index = boundaryIndex(boundaries, clampCursor(value, cursor));
+  const next = Math.min(Math.max(0, index + Math.trunc(delta)), boundaries.length - 1);
+  return boundaries[next] ?? value.length;
+}
+
+function insertComposer(state: StarlingTuiState, value: string): StarlingTuiState {
+  const edit = insertText(state.composer, state.composerCursor, value);
+  return updateComposer(state, edit.value, edit.cursor);
+}
+
+function removeComposerGrapheme(state: StarlingTuiState, direction: -1 | 1): StarlingTuiState {
+  const edit = removeTextGrapheme(state.composer, state.composerCursor, direction);
+  if (edit.value === state.composer && edit.cursor === state.composerCursor) return state;
+  return updateComposer(state, edit.value, edit.cursor);
+}
+
+function moveComposerCursor(state: StarlingTuiState, delta: number): StarlingTuiState {
+  return { ...state, composerCursor: moveTextCursor(state.composer, state.composerCursor, delta) };
+}
+
+function updateComposer(
+  state: StarlingTuiState,
+  composer: string,
+  cursor = composer.length,
+): StarlingTuiState {
   const slashMenuOpen = slashQuery(composer) !== null && state.slashCommands.length > 0;
   return {
     ...state,
     composer,
+    composerCursor: clampCursor(composer, cursor),
     slashMenuOpen,
     slashSelected: 0,
   };
+}
+
+function graphemeBoundaries(value: string): number[] {
+  const boundaries = [0];
+  for (const part of graphemeSegmenter.segment(value)) boundaries.push(part.index + part.segment.length);
+  return boundaries;
+}
+
+function boundaryIndex(boundaries: readonly number[], cursor: number): number {
+  const exact = boundaries.indexOf(cursor);
+  if (exact >= 0) return exact;
+  for (let index = boundaries.length - 1; index >= 0; index -= 1) {
+    if ((boundaries[index] ?? 0) < cursor) return index;
+  }
+  return 0;
+}
+
+function clampCursor(value: string, cursor: number): number {
+  const bounded = Math.min(Math.max(0, Math.trunc(cursor)), value.length);
+  const boundaries = graphemeBoundaries(value);
+  return boundaries[boundaryIndex(boundaries, bounded)] ?? 0;
+}
+
+function ceilCursor(value: string, cursor: number): number {
+  const bounded = Math.min(Math.max(0, Math.trunc(cursor)), value.length);
+  for (const boundary of graphemeBoundaries(value)) {
+    if (boundary >= bounded) return boundary;
+  }
+  return value.length;
+}
+
+function lineStart(value: string, cursor: number): number {
+  if (cursor <= 0) return 0;
+  return value.lastIndexOf("\n", cursor - 1) + 1;
+}
+
+function lineEnd(value: string, cursor: number): number {
+  const end = value.indexOf("\n", cursor);
+  return end < 0 ? value.length : end;
+}
+
+function moveLineCursor(value: string, cursor: number, delta: -1 | 1): number {
+  const at = clampCursor(value, cursor);
+  const start = lineStart(value, at);
+  const column = graphemeBoundaries(value.slice(start, at)).length - 1;
+  let targetStart: number;
+  if (delta < 0) {
+    if (start === 0) return at;
+    targetStart = lineStart(value, start - 1);
+  } else {
+    const currentEnd = lineEnd(value, at);
+    if (currentEnd >= value.length) return at;
+    targetStart = currentEnd + 1;
+  }
+  const targetEnd = lineEnd(value, targetStart);
+  const targetBoundaries = graphemeBoundaries(value.slice(targetStart, targetEnd));
+  const targetColumn = Math.min(column, targetBoundaries.length - 1);
+  return targetStart + (targetBoundaries[targetColumn] ?? 0);
+}
+
+function updateKeyedValue(
+  values: Readonly<Record<string, string>>,
+  key: string,
+  value: string | undefined,
+): Record<string, string> {
+  const next = { ...values };
+  if (value === undefined) delete next[key];
+  else next[key] = value;
+  return next;
 }
 
 function clampSelection(selected: number, count: number): number {

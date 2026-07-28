@@ -181,7 +181,9 @@ test("discovers, completes, and invokes Pi SDK slash commands in the Starling TU
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(requests.some(({ type }) => type === "prompt"), false, "completion must not execute");
 
-    input.write("hello\r");
+    input.write("helo");
+    input.write("\u001b[D");
+    input.write("l\r");
     await until(() => requests.some((request) =>
       request.type === "prompt" && request.message === "/echo hello"));
     assert.equal(launch.noExtensions, false, "bare Starling must load trusted Pi commands");

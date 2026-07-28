@@ -19,6 +19,7 @@ export function normalizeChatSnapshot(rawState, rawMessages) {
         thinking: textField(state.thinkingLevel) || textField(state.thinking),
         queueDepth: nonNegativeInteger(state.pendingMessageCount),
         streaming: state.isStreaming === true,
+        compacting: state.isCompacting === true,
         transcript: normalizeHistory(rawMessages),
     };
 }
@@ -120,8 +121,10 @@ export function normalizeChatRecord(raw) {
             return [{ type: "queue.changed", depth: steering + followUp }];
         }
         case "session_info_changed": {
-            const name = textField(raw.name) || textField(raw.sessionName);
-            return name ? [{ type: "session.name.changed", name }] : [];
+            if (!Object.hasOwn(raw, "name") && !Object.hasOwn(raw, "sessionName"))
+                return [];
+            const value = Object.hasOwn(raw, "name") ? raw.name : raw.sessionName;
+            return [{ type: "session.name.changed", name: optionalText(value) }];
         }
         case "thinking_level_changed": {
             const level = textField(raw.level);
@@ -223,14 +226,27 @@ function normalizeExtensionUiRecord(raw) {
             : [];
     }
     if (method === "setStatus") {
-        const detail = textField(raw.statusText);
-        return detail
-            ? [{ type: "activity.recorded", label: textField(raw.statusKey) || "status", detail, tone: "active" }]
-            : [];
+        const key = textField(raw.statusKey) || "status";
+        return [{ type: "status.changed", key, text: optionalText(raw.statusText) }];
+    }
+    if (method === "setWidget") {
+        const key = textField(raw.widgetKey);
+        const lines = raw.widgetLines === undefined
+            ? undefined
+            : Array.isArray(raw.widgetLines) && raw.widgetLines.every((line) => typeof line === "string")
+                ? raw.widgetLines
+                : null;
+        if (!key || lines === null)
+            return [];
+        return [{
+                type: "widget.changed",
+                key,
+                lines,
+                placement: raw.widgetPlacement === "belowEditor" ? "belowEditor" : "aboveEditor",
+            }];
     }
     if (method === "setTitle") {
-        const name = textField(raw.title);
-        return name ? [{ type: "session.name.changed", name }] : [];
+        return [{ type: "terminal.title.changed", title: textField(raw.title) }];
     }
     if (method === "set_editor_text") {
         return [{ type: "composer.replaced", value: textField(raw.text) }];

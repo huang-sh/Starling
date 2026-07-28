@@ -192,8 +192,9 @@ function renderCompactFrame(state, width, height, tick, color) {
             lines.push({ text: "× No matching slash commands", tone: "muted" });
         }
     }
+    const compactInput = wrapEditorLines(state.composer, state.composerCursor, Math.max(1, width - 2), 1).at(-1)?.text ?? "▏";
     lines.push({
-        text: `› ${lastLogicalLine(state.composer)}▏`,
+        text: `› ${compactInput}`,
         tone: state.composer ? "user" : "brand",
     });
     return lines.slice(-height)
@@ -265,20 +266,51 @@ function renderFooter(state, width, tick) {
     else if (state.scrollOffset > 0) {
         rows.push({ text: `  ↑ ${state.scrollOffset} lines back · PgDn return`, tone: "muted" });
     }
+    rows.push(...renderExtensionStatus(state, width));
+    rows.push(...renderExtensionWidgets(state, "aboveEditor", width));
     if (state.slashMenuOpen)
         rows.push(...renderSlashMenu(state, width));
     const meta = editorMeta(state, width);
-    const editorWidth = Math.max(1, width - 7);
-    const inputLines = wrapTerminalText(state.composer, editorWidth).slice(-5);
-    const visibleInput = inputLines.length > 0 ? inputLines : [""];
+    const editorWidth = Math.max(1, width - 6);
+    const visibleInput = wrapEditorLines(state.composer, state.composerCursor, editorWidth, 5);
     rows.push({ text: boxRule("╭─ ", `${meta} `, "╮", width), tone: "brand" });
     for (const line of visibleInput.slice(0, -1)) {
-        rows.push({ text: boxContent(`· ${line}`, width), tone: "user" });
+        rows.push({ text: boxContent(`· ${line.text}`, width), tone: "user" });
     }
     rows.push({
-        text: editorBottomLine(visibleInput.at(-1) || "", width),
+        text: editorBottomLine(visibleInput.at(-1)?.text ?? "▏", width),
         tone: state.phase === "error" ? "error" : "brand",
     });
+    rows.push(...renderExtensionWidgets(state, "belowEditor", width));
+    return rows;
+}
+function renderExtensionStatus(state, width) {
+    const rows = [];
+    for (const [key, value] of Object.entries(state.statusItems)) {
+        const prefix = `  ${key} · `;
+        const lines = wrapTerminalText(value, Math.max(1, width - visibleWidth(prefix)));
+        rows.push({ text: `${prefix}${lines[0] ?? ""}`, tone: "active" });
+        for (const line of lines.slice(1)) {
+            rows.push({ text: `${" ".repeat(visibleWidth(prefix))}${line}`, tone: "muted" });
+        }
+    }
+    return rows;
+}
+function renderExtensionWidgets(state, placement, width) {
+    const rows = [];
+    for (const widget of Object.values(state.widgets)) {
+        if (widget.placement !== placement)
+            continue;
+        const prefix = `  ${widget.key} · `;
+        widget.lines.forEach((value, lineIndex) => {
+            const linePrefix = lineIndex === 0 ? prefix : " ".repeat(visibleWidth(prefix));
+            const lines = wrapTerminalText(value, Math.max(1, width - visibleWidth(linePrefix)));
+            rows.push({ text: `${linePrefix}${lines[0] ?? ""}`, tone: "muted" });
+            for (const line of lines.slice(1)) {
+                rows.push({ text: `${" ".repeat(visibleWidth(linePrefix))}${line}`, tone: "muted" });
+            }
+        });
+    }
     return rows;
 }
 function renderSlashMenu(state, width) {
@@ -333,8 +365,14 @@ function renderInteraction(state, width, tick) {
         rows.push({ text: boxContent(choices, width), tone: "user" });
     }
     else {
-        const value = lastLogicalLine(prompt.value);
-        rows.push({ text: boxContent(`› ${value}`, width), tone: value ? "user" : "muted" });
+        const inputLines = wrapEditorLines(prompt.value, prompt.cursor ?? prompt.value.length, Math.max(1, width - 6), 5);
+        inputLines.forEach((line) => {
+            const marker = line.hasCursor ? "›" : "·";
+            rows.push({
+                text: boxContent(`${marker} ${line.text}`, width),
+                tone: prompt.value ? "user" : "muted",
+            });
+        });
     }
     rows.push({ text: boxRule("╰─ ", `${spinner(tick)} ${state.status}`, " ╯", width), tone: "active" });
     rows.push({
@@ -440,12 +478,50 @@ function editorMeta(state, width) {
 }
 function editorBottomLine(value, width) {
     const left = "╰─ › ";
-    const cursor = "▏";
     const right = "╯";
-    const textWidth = Math.max(0, width - visibleWidth(left) - visibleWidth(cursor) - visibleWidth(right));
+    const textWidth = Math.max(0, width - visibleWidth(left) - visibleWidth(right));
     const text = takeTerminalColumns(sanitizeTerminalText(value, false), textWidth);
-    const fill = Math.max(0, width - visibleWidth(left) - visibleWidth(text) - visibleWidth(cursor) - visibleWidth(right));
-    return `${left}${text}${cursor}${"─".repeat(fill)}${right}`;
+    const fill = Math.max(0, width - visibleWidth(left) - visibleWidth(text) - visibleWidth(right));
+    return `${left}${text}${"─".repeat(fill)}${right}`;
+}
+/** Wrap an editor value while keeping the fake cursor inside the visible window. */
+function wrapEditorLines(value, cursor, width, maxLines) {
+    const at = editorCursorBoundary(value, cursor ?? value.length);
+    const cleanValue = sanitizeTerminalText(value);
+    const cleanCursor = Math.min(cleanValue.length, sanitizeTerminalText(value.slice(0, at)).length);
+    const marker = editorCursorMarker(cleanValue);
+    const wrapped = wrapTerminalText(`${cleanValue.slice(0, cleanCursor)}${marker}${cleanValue.slice(cleanCursor)}`, width);
+    const cursorLine = Math.max(0, wrapped.findIndex((line) => line.includes(marker)));
+    const lines = wrapped.map((line) => ({
+        text: line.replace(marker, "▏"),
+        hasCursor: line.includes(marker),
+    }));
+    const limit = Math.max(1, maxLines);
+    if (lines.length <= limit)
+        return lines;
+    const maximumStart = lines.length - limit;
+    const start = Math.min(maximumStart, Math.max(0, cursorLine - limit + 1));
+    return lines.slice(start, start + limit);
+}
+function editorCursorBoundary(value, cursor) {
+    const bounded = Math.min(Math.max(0, Math.trunc(cursor)), value.length);
+    let boundary = 0;
+    for (const part of graphemeSegmenter.segment(value)) {
+        if (part.index > bounded)
+            break;
+        boundary = part.index;
+        if (part.index + part.segment.length <= bounded)
+            boundary = part.index + part.segment.length;
+    }
+    return boundary;
+}
+function editorCursorMarker(value) {
+    for (let codePoint = 0xe000; codePoint <= 0xf8ff; codePoint += 1) {
+        const marker = String.fromCodePoint(codePoint);
+        if (!value.includes(marker))
+            return marker;
+    }
+    return "\ufffc";
 }
 function boxRule(left, label, right, width) {
     const cleanLabel = shorten(sanitizeTerminalText(label, false), Math.max(1, width - 6));
@@ -472,9 +548,6 @@ function shorten(value, width) {
     if (width <= 1)
         return "…";
     return `${takeTerminalColumns(clean, width - 1)}…`;
-}
-function lastLogicalLine(value) {
-    return sanitizeTerminalText(value).split("\n").at(-1) || "";
 }
 function takeTerminalColumns(value, width) {
     let result = "";

@@ -40,7 +40,7 @@ test("a lone escape can be flushed while unsupported control sequences never lea
   assert.deepEqual(escape.flushPendingEscape(), [{ type: "escape" }]);
 
   const controls = new StarlingInputDecoder();
-  assert.deepEqual(controls.push("\u001b[H\u001b[3~ok"), [
+  assert.deepEqual(controls.push("\u001b[2~\u001b[9~ok"), [
     { type: "text", value: "o" },
     { type: "text", value: "k" },
   ]);

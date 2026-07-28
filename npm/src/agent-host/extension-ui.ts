@@ -154,8 +154,8 @@ export function createExtensionUiBridge(
       emit({ method: "set_editor_text", text });
     },
     pasteToEditor: (text: string) => {
-      editorText = text;
-      emit({ method: "set_editor_text", text });
+      editorText += text;
+      emit({ method: "set_editor_text", text: editorText });
     },
     getEditorText: () => editorText,
     onTerminalInput: () => () => {},

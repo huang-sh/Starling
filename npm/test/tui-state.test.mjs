@@ -225,6 +225,7 @@ test("confirmation prompts default to deny", () => {
     options: ["No", "Yes"],
     selected: 0,
     value: "",
+    cursor: 0,
   });
 });
 
