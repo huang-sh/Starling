@@ -10,10 +10,10 @@
 
 Launch, switch, and organize Claude Code, Codex, and Pi sessions with model profiles, catalogs, project views, live monitoring, and VS Code integration.
 
-Current release: **0.1.9**
+Current release: **0.2.0**
 
 - npm: [`starling-ai`](https://www.npmjs.com/package/starling-ai)
-- GitHub Release: [`rust-v0.1.9`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.9)
+- GitHub Release: [`rust-v0.2.0`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.2.0)
 - VS Code extension: [`huangsh.starling-ai`](https://marketplace.visualstudio.com/items?itemName=huangsh.starling-ai)
 
 ## Features
@@ -26,6 +26,8 @@ Current release: **0.1.9**
 - Track token usage when it is available in the session file.
 - Maintain a local session index at `~/.starling/session-index.json` for faster project and catalog views.
 - Launch Claude Code, Codex, or Pi through `starling run` and automatically assign the created session to a catalog.
+- Run `starling` with no subcommand to open Starling's own full-screen coding workspace, backed directly by the Pi SDK.
+- Host the same SDK session as a machine-readable JSONL process through `starling chat pi` for editor integrations.
 - Manage Claude, Codex, and Pi model profiles under `~/.starling/settings`.
 - Monitor the top 20 active pinned and unpinned sessions together with a top-style terminal view that separates `running`, `waiting`, `idle`, and `stopped` states.
 - Use JSON output as the stable data contract for terminal rendering and the VS Code extension.
@@ -54,7 +56,7 @@ On Linux and macOS, npm installs the small JavaScript launcher plus the matching
 The same native archives and sha256 files are attached to the GitHub release:
 
 ```text
-https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.9
+https://github.com/huang-sh/Starling/releases/tag/rust-v0.2.0
 ```
 
 The npm install step also installs the bundled Starling skill to:
@@ -71,9 +73,17 @@ If npm lifecycle scripts were disabled with `--ignore-scripts`, install the skil
 npm explore -g starling-ai -- npm run install:skill
 ```
 
-Starling requires Node.js 16 or newer. Claude Code, Codex, and/or Pi must be installed separately if you want Starling to discover, launch, or resume those agents. Pi features that use an explicit `--session-id` require Pi 0.76 or newer.
+The npm distribution requires Node.js 22.19.0 or newer and installs `@earendil-works/pi-coding-agent` 0.82.0 as a fixed dependency. Starling imports its public SDK only when starting the chat workspace; session-management commands do not initialize the SDK. `starling run pi` remains a compatibility path for launching Pi's native CLI, while bare `starling` and `starling chat pi` use the Starling-owned SDK host.
 
 ## Quick Start
+
+Open a new SDK-backed coding session in the current directory:
+
+```bash
+starling
+```
+
+This starts Starling's own TUI. It does not start or copy Pi's interactive TUI.
 
 List recent sessions:
 
@@ -128,6 +138,17 @@ starling run -c paper-review pi
 ```
 
 A plain `starling run pi` does not add a session selector. Pi creates the new session ID normally, and the Starling runtime hook records that ID after startup.
+
+Start the SDK host for VS Code or another machine client:
+
+```bash
+starling chat --cwd /path/to/project --title "Review" pi
+starling chat --cwd /path/to/project pi --session /absolute/path/to/session.jsonl
+```
+
+`starling chat pi` starts Starling's Node host, which imports `createAgentSession`, `ModelRuntime`, `SessionManager`, and `DefaultResourceLoader` from the Pi SDK. It never launches `pi --mode rpc`. A new chat lets `SessionManager.create()` allocate the session identity and receives no preallocated `--session-id`; `--session` accepts only an absolute existing Pi transcript path. Standard input and SDK events use newline-delimited JSON. Standard output contains only LF-terminated JSON records: Starling brackets the compatibility records with `starling_started` and `starling_exited` events whose `schema` is `starling.chat` and `schemaVersion` is `1`. Diagnostics are written to standard error.
+
+The chat runtime disables discovered user/project Pi extensions and explicitly loads only Starling's runtime gate. It auto-allows the built-in read-only `read`, `grep`, `find`, and `ls` tools. `bash`, `edit`, `write`, and unknown tools issue Pi `extension_ui_request` confirmation events. The RPC client must answer those requests; rejection, cancellation, UI errors, or no response within 30 seconds block the tool call. Ordinary interactive `starling run pi` permission behavior is unchanged.
 
 Starling options must be placed before the agent name. `-s` is the short alias for `--setting`; `-c` is the short alias for `--catalog`. Agent arguments go after `claude`, `codex`, or `pi`. Starling may add its runtime hook and pin an explicit existing-session selector to the locked transcript path:
 
@@ -375,6 +396,16 @@ starling config show
 
 `STARLING_HOME` still has the highest priority and overrides the saved CLI setting for that process.
 
+Starling resolves the Pi executable in this order: `STARLING_PI_BIN`, saved `piPath`, `STARLING_BUNDLED_PI_BIN` (set by the npm launcher), then `pi` on `PATH`. Configure or inspect it with:
+
+```bash
+starling config set pi /absolute/path/to/pi
+starling config unset pi
+starling config show
+```
+
+The npm launcher exposes Starling's SDK host as `STARLING_PI_SDK_HOST` and its compatible Node executable as `STARLING_PI_SDK_NODE`. When invoked through that npm launcher, Starling uses the pair for the bare TUI and `starling chat pi`; it does not resolve or execute the Pi CLI for those paths. The standalone native binary still uses the explicit `starling chat pi` subcommand and requires those two environment variables. Separately, the launcher can still resolve the package's public `rpc-entry` export and expose `cli.js` as `STARLING_BUNDLED_PI_BIN` for the legacy `starling run pi` command. Explicit `STARLING_PI_BIN` or `STARLING_BUNDLED_PI_BIN` values are never overwritten.
+
 Starling does not move or rewrite the original Claude Code, Codex, or Pi session files. It reads them from agent-owned locations such as `~/.claude/projects`, `~/.codex/sessions`, and `~/.pi/agent/sessions`, and stores only Starling metadata and profiles under the Starling data directory. Starling honors Pi's `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, global `settings.json`, and project-local `<cwd>/.pi/settings.json` `sessionDir` settings when the launch cwd is known.
 
 The local session index is optimized for repeated CLI and VS Code sidebar reads:
@@ -435,12 +466,13 @@ The VS Code extension is maintained separately at:
 https://github.com/huang-sh/Starling-ext
 ```
 
-The Starling sidebar contains four views:
+The extension contributes a Starling Chat workspace to VS Code's right sidebar and keeps four management views in the activity bar:
 
 - Catalog: hierarchical catalog tree, with sessions shown on request.
 - Projects: project directory tree with session counts.
 - Models: Claude, Codex, and Pi model profile settings.
 - Monitor: pinned and unpinned sessions together with live status, context, token, CPU, memory, task, and PID details.
+- Starling Chat: an SDK-backed streaming conversation with tool activity and native permission dialogs.
 
 The extension supports common right-click actions:
 

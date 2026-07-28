@@ -2,13 +2,22 @@
 // Unified entry point for the Starling CLI.
 
 import { spawn } from "node:child_process";
-import { existsSync, realpathSync } from "fs";
+import { existsSync, readFileSync, realpathSync } from "fs";
 import { createRequire } from "node:module";
 import path from "path";
 import readline from "node:readline";
 import { fileURLToPath } from "url";
 import { renderTopSnapshot, renderTopWatchFrame } from "../lib/render/top.js";
 import { getRenderPlan, renderCommandResult } from "../lib/render/commands.js";
+import { runStarlingTui, StarlingTuiError } from "../lib/tui/index.js";
+import {
+  MINIMUM_BUNDLED_PI_NODE_VERSION,
+  bundledPiEnvironment,
+  bundledPiSdkEnvironment,
+  nodeSupportsBundledPi,
+  piCliPathFromRpcEntry,
+  piRpcEntryExportTarget,
+} from "../lib/pi-runtime.js";
 
 // __dirname equivalent in ESM
 const __filename = fileURLToPath(import.meta.url);
@@ -178,7 +187,30 @@ const env = {
   STARLING_MANAGED_PACKAGE_ROOT: realpathSync(path.join(__dirname, "..")),
 };
 
+configureBundledPi(env);
+configurePiSdkHost(env);
+
 const cliArgs = process.argv.slice(2);
+if ((cliArgs.length === 0 || cliArgs[0] === "chat") && !hasConfiguredPiSdkHost(env)) {
+  const versionHint = nodeSupportsBundledPi(process.versions.node)
+    ? "Reinstall starling-ai so its SDK Host files are present."
+    : `Upgrade Node.js from ${process.versions.node} to ${MINIMUM_BUNDLED_PI_NODE_VERSION} or newer.`;
+  console.error(`Starling Chat requires its Pi SDK Host. ${versionHint}`);
+  process.exit(1);
+}
+if (cliArgs.length === 0) {
+  try {
+    const exitCode = await runStarlingTui({
+      executable: binaryPath,
+      env,
+      cwd: process.cwd(),
+    });
+    process.exit(exitCode);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(error instanceof StarlingTuiError && error.code === "NOT_TTY" ? 2 : 1);
+  }
+}
 if (shouldRenderTop(cliArgs)) {
   await runTopRenderer(cliArgs);
   process.exit(0);
@@ -305,6 +337,71 @@ function spawnStarling(args, stdio) {
   });
 
   return child;
+}
+
+function configureBundledPi(childEnv) {
+  if (childEnv.STARLING_PI_BIN?.trim() || childEnv.STARLING_BUNDLED_PI_BIN?.trim()) {
+    return;
+  }
+
+  const bundledPi = findBundledPiExecutable();
+
+  if (!bundledPi) return;
+  if (!nodeSupportsBundledPi(process.versions.node)) {
+    // Keep Starling usable on older Node releases. Rust will continue through
+    // its resolver to a configured or PATH Pi instead of selecting this one.
+    return;
+  }
+  Object.assign(childEnv, bundledPiEnvironment(process.execPath, bundledPi));
+}
+
+function configurePiSdkHost(childEnv) {
+  const hostEntry = path.join(__dirname, "..", "lib", "agent-host", "main.js");
+  if (!existsSync(hostEntry) || !nodeSupportsBundledPi(process.versions.node)) return;
+  const defaults = bundledPiSdkEnvironment(process.execPath, hostEntry);
+  if (!childEnv.STARLING_PI_SDK_HOST?.trim()) {
+    childEnv.STARLING_PI_SDK_HOST = defaults.STARLING_PI_SDK_HOST;
+  }
+  if (!childEnv.STARLING_PI_SDK_NODE?.trim()) {
+    childEnv.STARLING_PI_SDK_NODE = defaults.STARLING_PI_SDK_NODE;
+  }
+}
+
+function hasConfiguredPiSdkHost(childEnv) {
+  return Boolean(
+    childEnv.STARLING_PI_SDK_HOST?.trim()
+      && childEnv.STARLING_PI_SDK_NODE?.trim(),
+  );
+}
+
+function findBundledPiExecutable() {
+  const specifier = "@earendil-works/pi-coding-agent/rpc-entry";
+  try {
+    // Prefer normal package-export resolution. Pi 0.82 exposes an import-only
+    // condition, so createRequire may need the compatibility path below.
+    const rpcEntry = require.resolve(specifier);
+    const candidate = piCliPathFromRpcEntry(rpcEntry);
+    return existsSync(candidate) ? candidate : null;
+  } catch {
+    // Fall through.
+  }
+
+  const packageName = "@earendil-works/pi-coding-agent";
+  for (const moduleRoot of require.resolve.paths(packageName) || []) {
+    const packageRoot = path.join(moduleRoot, "@earendil-works", "pi-coding-agent");
+    const packageJsonPath = path.join(packageRoot, "package.json");
+    try {
+      const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
+      const exportTarget = piRpcEntryExportTarget(packageJson);
+      if (!exportTarget || !exportTarget.startsWith("./")) continue;
+      const rpcEntry = path.resolve(packageRoot, exportTarget);
+      const candidate = piCliPathFromRpcEntry(rpcEntry);
+      if (existsSync(rpcEntry) && existsSync(candidate)) return candidate;
+    } catch {
+      // Try the next Node module root.
+    }
+  }
+  return null;
 }
 
 // Forward common termination signals to the child so that it shuts down

@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::UNIX_EPOCH;
 
 use anyhow::Result;
@@ -16,7 +17,8 @@ use crate::cli::*;
 use crate::constants::{
     default_claude_settings_dir, default_codex_home, default_codex_settings_dir,
     default_pi_settings_dir, default_starling_home, normalize_pi_path_input, now_iso,
-    pi_node_compatible_path, resolve_pi_session_layout_for_launch, PiLaunchSessionLayout,
+    pi_node_compatible_path, resolve_pi_executable, resolve_pi_sdk_host,
+    resolve_pi_session_layout_for_launch, PiLaunchSessionLayout,
 };
 use crate::core::catalog_resolver::{resolve_catalog_reference, CatalogResolution};
 use crate::core::discovery::{
@@ -42,12 +44,385 @@ use crate::types::{Bookmark, RunProvider, RunRecord, RunSource, SessionMeta};
 
 pub fn handle(cmd: RunCommand) -> Result<()> {
     match &cmd.command {
-        RunSubcommand::Claude { args } => launch(RunProvider::Claude, "claude", &cmd, args),
-        RunSubcommand::Codex { args } => launch(RunProvider::Codex, "codex", &cmd, args),
-        RunSubcommand::Pi { args } => launch(RunProvider::Pi, "pi", &cmd, args),
+        RunSubcommand::Claude { args } => launch(
+            RunProvider::Claude,
+            Path::new("claude"),
+            &[],
+            "claude",
+            &cmd,
+            args,
+        ),
+        RunSubcommand::Codex { args } => launch(
+            RunProvider::Codex,
+            Path::new("codex"),
+            &[],
+            "codex",
+            &cmd,
+            args,
+        ),
+        RunSubcommand::Pi { args } => {
+            let pi = resolve_pi_executable();
+            launch(
+                RunProvider::Pi,
+                &pi.program,
+                &pi.prefix_args,
+                &pi.cli_path.to_string_lossy(),
+                &cmd,
+                args,
+            )
+        }
         RunSubcommand::Status { run_id, json } => status(run_id.as_deref(), *json),
         RunSubcommand::Stop { run_id, json } => stop(run_id, *json),
     }
+}
+
+pub fn handle_chat(cmd: ChatCommand) -> Result<()> {
+    match &cmd.command {
+        ChatSubcommand::Pi { session } => chat_pi(&cmd, session.as_deref()),
+    }
+}
+
+fn pi_chat_passthrough_args(session: Option<&str>, title: Option<&str>) -> Result<Vec<String>> {
+    let mut args = Vec::new();
+    if let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) {
+        args.push("--name".into());
+        args.push(title.to_string());
+    }
+    if let Some(session) = session {
+        let session = normalize_pi_path_input(session);
+        if !session.is_absolute() {
+            anyhow::bail!("--session must be an absolute Pi transcript path");
+        }
+        args.push("--session".into());
+        args.push(
+            pi_node_compatible_path(&session)
+                .to_string_lossy()
+                .to_string(),
+        );
+    }
+    Ok(args)
+}
+
+fn chat_pi(cmd_args: &ChatCommand, session: Option<&str>) -> Result<()> {
+    // Validate caller-controlled selectors before resolving runtime
+    // dependencies, while this path is still side-effect free.
+    let passthrough_args = pi_chat_passthrough_args(session, cmd_args.title.as_deref())?;
+    // Chat is a normal Pi SDK integration. Resolve the Starling-owned Node
+    // host before creating run state or temporary launch artifacts, and never
+    // fall back to the Pi CLI/RPC executable resolver used by `starling run`.
+    let sdk_host = resolve_pi_sdk_host()?;
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let start_ms = now_ms();
+    let started_at = now_iso();
+    let cwd = cmd_args.cwd.as_ref().map(PathBuf::from);
+    let project_path = cwd
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+        .map(|path| normalize_project_path(&path));
+    let catalog_id = resolve_catalog_id(cmd_args.catalog.as_deref());
+    let prepared = prepare_launch_with_pi_permissions(
+        RunProvider::Pi,
+        &run_id,
+        cmd_args.setting.as_deref(),
+        &passthrough_args,
+        true,
+        &[],
+        None,
+        true,
+        project_path.as_deref(),
+        true,
+    )?;
+    let effective_project_path = prepared
+        .session_project_hint
+        .clone()
+        .or_else(|| project_path.clone());
+    let sdk_host_cwd = effective_project_path.as_deref().map(Path::new);
+
+    let pi_session_lock = match (
+        prepared.session_id_hint.as_deref(),
+        effective_project_path.as_deref(),
+    ) {
+        (Some(session_id), Some(project_path)) => {
+            match acquire_pi_session_lock(session_id, project_path) {
+                Ok(lock) => Some(lock),
+                Err(error) => {
+                    cleanup_launch_artifacts(&prepared);
+                    return Err(error);
+                }
+            }
+        }
+        _ => None,
+    };
+    if let Err(error) = ensure_pi_session_not_running(
+        prepared.session_id_hint.as_deref(),
+        effective_project_path.as_deref(),
+    ) {
+        cleanup_launch_artifacts(&prepared);
+        return Err(error);
+    }
+
+    create_run(RunRecord {
+        run_id: run_id.clone(),
+        session_id: prepared.session_id_hint.clone(),
+        provider: RunProvider::Pi,
+        project_path: effective_project_path.clone(),
+        catalog_id: catalog_id.clone(),
+        setting: cmd_args.setting.clone(),
+        pid: None,
+        status: RunStatus::Running,
+        exit_code: None,
+        started_at,
+        ended_at: None,
+        source: RunSource::StarlingRun,
+    });
+
+    eprintln!(
+        "{} chat {} (Pi SDK host: {})",
+        "starling".cyan(),
+        short(&run_id),
+        sdk_host.host_path.display()
+    );
+    let mut child_command = sdk_host.command();
+    child_command.args(&prepared.args);
+    for (key, value) in &prepared.envs {
+        child_command.env(key, value);
+    }
+    if let Some(cwd) = sdk_host_cwd {
+        child_command.current_dir(cwd);
+    }
+    child_command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+
+    if let Some(lock) = pi_session_lock.as_ref() {
+        if let Err(error) = lock.set_child_inheritable(true) {
+            mark_run_crashed(&run_id);
+            cleanup_launch_artifacts(&prepared);
+            return Err(error);
+        }
+    }
+    let spawn_result = child_command.spawn();
+    if let Some(lock) = pi_session_lock.as_ref() {
+        if let Err(error) = lock.set_child_inheritable(false) {
+            eprintln!(
+                "{}: could not restore Pi lock close-on-exec: {}",
+                "warning".yellow(),
+                error
+            );
+        }
+    }
+    let mut child = match spawn_result {
+        Ok(child) => child,
+        Err(error) => {
+            mark_run_crashed(&run_id);
+            cleanup_launch_artifacts(&prepared);
+            anyhow::bail!(
+                "failed to spawn Pi SDK host {} with {}: {}",
+                sdk_host.host_path.display(),
+                sdk_host.node.display(),
+                error
+            );
+        }
+    };
+
+    let pid = child.id();
+    update_run_pid(&run_id, pid);
+    let assignment_watcher = maybe_start_catalog_assignment_watcher(
+        run_id.clone(),
+        pid,
+        RunProvider::Pi,
+        catalog_id.clone(),
+        cmd_args.title.clone(),
+        effective_project_path.clone(),
+        start_ms,
+        prepared.hook_file.clone(),
+    );
+    install_chat_signal_handler(run_id.clone(), pid);
+
+    let child_stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = assignment_watcher.join();
+            ACTIVE_CHILD_PID.store(0, Ordering::SeqCst);
+            mark_run_crashed(&run_id);
+            cleanup_launch_artifacts(&prepared);
+            anyhow::bail!("Pi SDK host stdout was not captured");
+        }
+    };
+    let stdout = std::io::stdout();
+    let mut stdout = std::io::BufWriter::new(stdout.lock());
+    let started_write = write_chat_json_line(
+        &mut stdout,
+        &serde_json::json!({
+            "type": "starling_started",
+            "schema": "starling.chat",
+            "schemaVersion": 1,
+            "agent": "pi",
+            "runId": run_id,
+            "pid": pid,
+            "cwd": effective_project_path,
+            "sessionId": prepared.session_id_hint,
+        }),
+    );
+    if let Err(error) = started_write {
+        let _ = child.kill();
+        let _ = child.wait();
+        ACTIVE_CHILD_PID.store(0, Ordering::SeqCst);
+        mark_run_crashed(&run_id);
+        cleanup_launch_artifacts(&prepared);
+        return Err(error);
+    }
+
+    let protocol_error = match relay_sdk_host_jsonl(child_stdout, &mut stdout) {
+        Ok(protocol_error) => protocol_error,
+        Err(error) => {
+            eprintln!("{}: Pi SDK host relay failed: {}", "error".red(), error);
+            let _ = child.kill();
+            true
+        }
+    };
+    let wait_result = child.wait();
+    ACTIVE_CHILD_PID.store(0, Ordering::SeqCst);
+    // Serialize the watcher's final run-record patch with completion so a
+    // late session-id update cannot overwrite the terminal run status.
+    let _ = assignment_watcher.join();
+    let (child_code, child_success, wait_error) = match wait_result {
+        Ok(status) => (child_exit_code(&status), status.success(), None),
+        Err(error) => (1, false, Some(error.to_string())),
+    };
+    let effective_success = child_success && !protocol_error && wait_error.is_none();
+    let exit_code = if protocol_error && child_success {
+        1
+    } else {
+        child_code
+    };
+
+    // The async signal hook records the parent signal before its background
+    // worker forwards it to the SDK host. Do all recoverable cleanup here,
+    // then let that worker restore/replay the original signal. In particular,
+    // never race it with process::exit(1) just because the child wait status
+    // has no code.
+    if pending_parent_signal().is_some() {
+        cleanup_launch_artifacts(&prepared);
+        let _ = stdout.flush();
+        CHAT_SIGNAL_CLEANUP_DONE.store(true, Ordering::SeqCst);
+        loop {
+            std::thread::park();
+        }
+    }
+
+    // A fresh Pi session has an SDK identity before its transcript file is
+    // materialized (Pi writes that file with the first message). Consume the
+    // runtime hook synchronously so even an immediately closed chat retains
+    // its real session ID in the run record and final lifecycle event.
+    if let Some(hook) = prepared.hook_file.as_deref().and_then(read_hook_session) {
+        update_run_session_id(
+            &run_id,
+            &canonical_session_id(&hook.session_id, Some(provider_name(RunProvider::Pi))),
+        );
+    }
+
+    assign_recent_session_fallback(
+        &run_id,
+        RunProvider::Pi,
+        pid,
+        catalog_id.as_deref(),
+        cmd_args.title.as_deref(),
+        effective_project_path.as_deref(),
+        start_ms,
+    );
+    finalize_run(
+        &run_id,
+        FinalizePatch {
+            status: if effective_success {
+                RunStatus::Completed
+            } else {
+                RunStatus::Errored
+            },
+            exit_code: Some(exit_code),
+            ended_at: Some(now_iso()),
+            session_id: None,
+        },
+    );
+    let final_session_id = find_run(&run_id).and_then(|run| run.session_id);
+    let exited_write = write_chat_json_line(
+        &mut stdout,
+        &serde_json::json!({
+            "type": "starling_exited",
+            "schema": "starling.chat",
+            "schemaVersion": 1,
+            "agent": "pi",
+            "runId": run_id,
+            "sessionId": final_session_id,
+            "exitCode": exit_code,
+            "success": effective_success,
+            "protocolError": protocol_error,
+            "error": wait_error,
+        }),
+    );
+    cleanup_launch_artifacts(&prepared);
+    exited_write?;
+    stdout.flush()?;
+    std::process::exit(exit_code);
+}
+
+fn write_chat_json_line(writer: &mut impl Write, value: &Value) -> Result<()> {
+    serde_json::to_writer(&mut *writer, value)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            // A child-only signal is represented as a normal Starling exit
+            // code. Only PENDING_PARENT_SIGNAL authorizes signal replay.
+            return 128 + signal;
+        }
+    }
+    if status.success() {
+        0
+    } else {
+        1
+    }
+}
+
+/// Relay only valid SDK host records. Starling guarantees that every forwarded
+/// record remains one LF-terminated JSON value.
+fn relay_sdk_host_jsonl(reader: impl Read, writer: &mut impl Write) -> Result<bool> {
+    let mut reader = BufReader::new(reader);
+    let mut line = Vec::new();
+    let mut protocol_error = false;
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        while matches!(line.last(), Some(b'\n' | b'\r')) {
+            line.pop();
+        }
+        if line.is_empty() || serde_json::from_slice::<Value>(&line).is_err() {
+            protocol_error = true;
+            eprintln!(
+                "{}: discarded non-JSON output from Pi SDK host stdout",
+                "warning".yellow()
+            );
+            continue;
+        }
+        writer.write_all(&line)?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+    }
+    Ok(protocol_error)
 }
 
 const STARLING_RUN_PTY_ENV: &str = "STARLING_RUN_PTY";
@@ -64,7 +439,9 @@ struct PreparedLaunch {
 
 fn launch(
     provider: RunProvider,
-    bin: &str,
+    program: &Path,
+    prefix_args: &[String],
+    display_bin: &str,
     cmd_args: &RunCommand,
     passthrough_args: &[String],
 ) -> Result<()> {
@@ -88,6 +465,11 @@ fn launch(
         cmd_args.no_mcp,
         project_path.as_deref(),
     )?;
+    let launch_args = prefix_args
+        .iter()
+        .chain(prepared.args.iter())
+        .cloned()
+        .collect::<Vec<_>>();
     let effective_project_path = prepared
         .session_project_hint
         .clone()
@@ -142,7 +524,12 @@ fn launch(
     };
     create_run(record);
 
-    eprintln!("{} run {} ({})", "starling".cyan(), short(&run_id), bin);
+    eprintln!(
+        "{} run {} ({})",
+        "starling".cyan(),
+        short(&run_id),
+        display_bin
+    );
 
     #[cfg(unix)]
     if pty_monitor_enabled(provider) {
@@ -153,7 +540,7 @@ fn launch(
                 return Err(error);
             }
         }
-        let pty_spawn = spawn_pty_child(bin, &prepared.args, &prepared.envs, cwd.as_deref());
+        let pty_spawn = spawn_pty_child(program, &launch_args, &prepared.envs, cwd.as_deref());
         if let Some(lock) = pi_session_lock.as_ref() {
             if let Err(error) = lock.set_child_inheritable(false) {
                 eprintln!(
@@ -166,8 +553,9 @@ fn launch(
         match pty_spawn {
             Ok(pty_child) => {
                 let pid = pty_child.pid as u32;
+                install_run_signal_handler(run_id.clone(), pid);
                 update_run_pid(&run_id, pid);
-                maybe_start_catalog_assignment_watcher(
+                let _ = maybe_start_catalog_assignment_watcher(
                     run_id.clone(),
                     pid,
                     provider,
@@ -177,10 +565,10 @@ fn launch(
                     start_ms,
                     prepared.hook_file.clone(),
                 );
-                install_signal_handler(run_id.clone());
-
                 let status =
                     drive_pty_child(pty_child, provider, &run_id, prepared.hook_file.as_deref());
+                ACTIVE_CHILD_PID.store(0, Ordering::SeqCst);
+                await_run_parent_signal_replay(&prepared);
                 assign_recent_session_fallback(
                     &run_id,
                     provider,
@@ -226,8 +614,8 @@ fn launch(
         }
     }
 
-    let mut cmd = Command::new(bin);
-    cmd.args(&prepared.args);
+    let mut cmd = Command::new(program);
+    cmd.args(&launch_args);
     for (key, value) in &prepared.envs {
         cmd.env(key, value);
     }
@@ -260,8 +648,9 @@ fn launch(
         Ok(mut child) => {
             // Update record with pid.
             let pid = child.id();
+            install_run_signal_handler(run_id.clone(), pid);
             update_run_pid(&run_id, pid);
-            maybe_start_catalog_assignment_watcher(
+            let _ = maybe_start_catalog_assignment_watcher(
                 run_id.clone(),
                 pid,
                 provider,
@@ -272,11 +661,10 @@ fn launch(
                 prepared.hook_file.clone(),
             );
 
-            // Install SIGINT/SIGTERM handler so Ctrl-C marks the run crashed.
-            install_signal_handler(run_id.clone());
-
             match child.wait() {
                 Ok(status) => {
+                    ACTIVE_CHILD_PID.store(0, Ordering::SeqCst);
+                    await_run_parent_signal_replay(&prepared);
                     assign_recent_session_fallback(
                         &run_id,
                         provider,
@@ -295,16 +683,23 @@ fn launch(
                         &run_id,
                         FinalizePatch {
                             status: final_status,
-                            exit_code: status.code(),
+                            exit_code: Some(child_exit_code(&status)),
                             ended_at: Some(now_iso()),
                             session_id: None,
                         },
                     );
                     cleanup_launch_artifacts(&prepared);
-                    std::process::exit(status.code().unwrap_or(0));
+                    std::process::exit(child_exit_code(&status));
                 }
                 Err(e) => {
-                    eprintln!("{}: failed to wait on {}: {}", "error".red(), bin, e);
+                    ACTIVE_CHILD_PID.store(0, Ordering::SeqCst);
+                    await_run_parent_signal_replay(&prepared);
+                    eprintln!(
+                        "{}: failed to wait on {}: {}",
+                        "error".red(),
+                        display_bin,
+                        e
+                    );
                     mark_run_crashed(&run_id);
                     cleanup_launch_artifacts(&prepared);
                     std::process::exit(1);
@@ -312,7 +707,7 @@ fn launch(
             }
         }
         Err(e) => {
-            eprintln!("{}: failed to spawn {}: {}", "error".red(), bin, e);
+            eprintln!("{}: failed to spawn {}: {}", "error".red(), display_bin, e);
             // Mark as crashed since we recorded a Running entry.
             mark_run_crashed(&run_id);
             cleanup_launch_artifacts(&prepared);
@@ -354,7 +749,7 @@ fn pty_monitor_enabled(provider: RunProvider) -> bool {
 
 #[cfg(unix)]
 fn spawn_pty_child(
-    bin: &str,
+    bin: &Path,
     args: &[String],
     envs: &[(String, String)],
     cwd: Option<&Path>,
@@ -398,7 +793,8 @@ fn spawn_pty_child(
             }
         }
 
-        let c_bin = CString::new(bin).unwrap_or_else(|_| CString::new("false").unwrap());
+        let c_bin = CString::new(bin.as_os_str().as_bytes())
+            .unwrap_or_else(|_| CString::new("false").unwrap());
         let mut c_args = Vec::with_capacity(args.len() + 1);
         c_args.push(c_bin.clone());
         for arg in args {
@@ -667,10 +1063,16 @@ fn maybe_start_catalog_assignment_watcher(
     project_path: Option<String>,
     start_ms: u64,
     hook_file: Option<PathBuf>,
-) {
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         loop {
             if let Some(hook) = hook_file.as_deref().and_then(read_hook_session) {
+                // Session identity is valid immediately, even though Pi may
+                // defer creating the transcript until the first message.
+                update_run_session_id(
+                    &run_id,
+                    &canonical_session_id(&hook.session_id, Some(provider_name(provider))),
+                );
                 let transcript_is_ready = hook
                     .transcript_path
                     .as_deref()
@@ -689,10 +1091,6 @@ fn maybe_start_catalog_assignment_watcher(
                     std::thread::sleep(std::time::Duration::from_millis(250));
                     continue;
                 }
-                update_run_session_id(
-                    &run_id,
-                    &canonical_session_id(&hook.session_id, Some(provider_name(provider))),
-                );
                 if catalog_id.is_none() {
                     return;
                 }
@@ -761,7 +1159,7 @@ fn maybe_start_catalog_assignment_watcher(
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
-    });
+    })
 }
 
 fn should_try_process_map_assignment(provider: RunProvider, hook_file_present: bool) -> bool {
@@ -2814,6 +3212,103 @@ requires_openai_auth = true
         assert!(registrations.contains("session_before_switch"));
         assert!(registrations.contains("session_before_fork"));
     }
+
+    #[test]
+    fn pi_chat_new_session_uses_sdk_host_without_cli_mode_or_session_selector() {
+        let args = pi_chat_passthrough_args(None, None).unwrap();
+        assert!(args.is_empty());
+        assert!(!args.iter().any(|arg| arg == "--mode"));
+        assert!(!args.iter().any(|arg| matches!(
+            arg.as_str(),
+            "--session" | "--session-id" | "--continue" | "--resume" | "--fork"
+        )));
+        assert!(!pi_launch_needs_managed_id(&args));
+    }
+
+    #[test]
+    fn pi_chat_requires_an_absolute_resume_transcript() {
+        let error = pi_chat_passthrough_args(Some("relative/session.jsonl"), None).unwrap_err();
+        assert!(error.to_string().contains("absolute Pi transcript path"));
+
+        let args =
+            pi_chat_passthrough_args(Some("/tmp/session.jsonl"), Some("Chat title")).unwrap();
+        assert_eq!(
+            args,
+            vec!["--name", "Chat title", "--session", "/tmp/session.jsonl"]
+        );
+    }
+
+    #[test]
+    fn pi_sdk_host_relay_keeps_stdout_strict_jsonl() {
+        let input = b"{\"type\":\"agent_start\"}\r\nnot-json\n{\"type\":\"agent_end\"}";
+        let mut output = Vec::new();
+        let had_protocol_error = relay_sdk_host_jsonl(&input[..], &mut output).unwrap();
+        assert!(had_protocol_error);
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "{\"type\":\"agent_start\"}\n{\"type\":\"agent_end\"}\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_only_signal_maps_to_exit_code_without_parent_signal_replay() {
+        use std::os::unix::process::ExitStatusExt;
+
+        PENDING_PARENT_SIGNAL.store(0, Ordering::SeqCst);
+        let status = std::process::ExitStatus::from_raw(libc::SIGTERM);
+        assert_eq!(child_exit_code(&status), 128 + libc::SIGTERM);
+        assert_eq!(pending_parent_signal(), None);
+    }
+
+    #[test]
+    fn pi_chat_permission_gate_is_bounded_and_fail_closed() {
+        let gate = pi_chat_permission_gate_source();
+        assert!(gate.contains("read\", \"grep\", \"find\", \"ls"));
+        assert!(gate.contains("input.length > 4000"));
+        assert!(gate.contains("STARLING_PERMISSION_TIMEOUT_MS = 30000"));
+        assert!(gate.contains("ctx.ui?.confirm"));
+        assert!(gate.contains("approved = false"));
+        assert!(gate.contains("block: true"));
+        assert!(pi_chat_permission_gate_registration_source().contains("tool_call"));
+    }
+
+    #[test]
+    fn pi_chat_disables_discovered_extensions_but_loads_starling_gate() {
+        let mut args = Vec::new();
+        append_pi_runtime_extension_args(&mut args, Path::new("/tmp/starling-pi-runtime.js"), true);
+        assert_eq!(
+            args,
+            vec![
+                "--no-extensions",
+                "--extension",
+                "/tmp/starling-pi-runtime.js"
+            ]
+        );
+
+        let mut regular_run_args = Vec::new();
+        append_pi_runtime_extension_args(
+            &mut regular_run_args,
+            Path::new("/tmp/starling-pi-runtime.js"),
+            false,
+        );
+        assert_eq!(
+            regular_run_args,
+            vec!["--extension", "/tmp/starling-pi-runtime.js"]
+        );
+    }
+}
+
+fn append_pi_runtime_extension_args(
+    args: &mut Vec<String>,
+    extension_file: &Path,
+    enforce_pi_permissions: bool,
+) {
+    if enforce_pi_permissions {
+        args.push("--no-extensions".into());
+    }
+    args.push("--extension".into());
+    args.push(extension_file.to_string_lossy().to_string());
 }
 
 fn prepare_launch(
@@ -2826,6 +3321,32 @@ fn prepare_launch(
     mcp_profile: Option<&str>,
     no_mcp: bool,
     launch_project_path: Option<&str>,
+) -> Result<PreparedLaunch> {
+    prepare_launch_with_pi_permissions(
+        provider,
+        run_id,
+        setting,
+        passthrough_args,
+        attach_hook,
+        mcp_names,
+        mcp_profile,
+        no_mcp,
+        launch_project_path,
+        false,
+    )
+}
+
+fn prepare_launch_with_pi_permissions(
+    provider: RunProvider,
+    run_id: &str,
+    setting: Option<&str>,
+    passthrough_args: &[String],
+    attach_hook: bool,
+    mcp_names: &[String],
+    mcp_profile: Option<&str>,
+    no_mcp: bool,
+    launch_project_path: Option<&str>,
+    enforce_pi_permissions: bool,
 ) -> Result<PreparedLaunch> {
     let mut passthrough_args = if provider == RunProvider::Pi {
         normalize_pi_passthrough_args(passthrough_args)?
@@ -2983,9 +3504,17 @@ fn prepare_launch(
             }
 
             if attach_hook {
-                let hook = create_pi_runtime_extension(run_id)?;
-                args.push("--extension".into());
-                args.push(hook.extension_file.to_string_lossy().to_string());
+                let hook =
+                    create_pi_runtime_extension_with_permissions(run_id, enforce_pi_permissions)?;
+                // Chat RPC has no native terminal permission UI. Disable all
+                // discovered user/project extensions so a custom tool cannot
+                // shadow a read-only built-in name and bypass this gate.
+                // Pi still loads the explicit Starling runtime extension.
+                append_pi_runtime_extension_args(
+                    &mut args,
+                    &hook.extension_file,
+                    enforce_pi_permissions,
+                );
                 envs.push((
                     "STARLING_PI_HOOK_FILE".into(),
                     hook.hook_file.to_string_lossy().to_string(),
@@ -3946,7 +4475,56 @@ fn pi_session_switch_guard_registration_source() -> &'static str {
   pi.on("session_before_fork", blockManagedSessionChange);"#
 }
 
+fn pi_chat_permission_gate_source() -> &'static str {
+    r#"const STARLING_AUTO_ALLOWED_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const STARLING_PERMISSION_TIMEOUT_MS = 30000;
+
+async function enforceStarlingToolPermission(event, ctx) {
+  const toolName = String(event?.toolName ?? "").trim().toLowerCase();
+  if (STARLING_AUTO_ALLOWED_TOOLS.has(toolName)) return;
+
+  let input = "{}";
+  try {
+    input = JSON.stringify(event?.input ?? {}, null, 2);
+  } catch (_) {
+    input = "<unserializable tool input>";
+  }
+  if (input.length > 4000) {
+    input = `${input.slice(0, 4000)}\n… <tool input truncated by Starling>`;
+  }
+
+  let approved = false;
+  try {
+    approved = (await ctx.ui?.confirm?.(
+      `Allow Pi tool: ${toolName || "unknown"}?`,
+      input,
+      { timeout: STARLING_PERMISSION_TIMEOUT_MS },
+    )) === true;
+  } catch (_) {
+    approved = false;
+  }
+
+  if (!approved) {
+    return {
+      block: true,
+      reason: `Starling denied Pi tool '${toolName || "unknown"}' because approval was not granted.`,
+    };
+  }
+}"#
+}
+
+fn pi_chat_permission_gate_registration_source() -> &'static str {
+    r#"  pi.on("tool_call", enforceStarlingToolPermission);"#
+}
+
 pub(crate) fn create_pi_runtime_extension(run_id: &str) -> Result<PiRuntimeExtension> {
+    create_pi_runtime_extension_with_permissions(run_id, false)
+}
+
+fn create_pi_runtime_extension_with_permissions(
+    run_id: &str,
+    enforce_permissions: bool,
+) -> Result<PiRuntimeExtension> {
     let dir = default_starling_home().join("run-hooks");
     std::fs::create_dir_all(&dir)?;
     let extension_file = dir.join(format!("{run_id}.pi-extension.mjs"));
@@ -3959,6 +4537,7 @@ const RUN_ID = __RUN_ID__;
 const HOOK_FILE = __HOOK_FILE__;
 
 __SESSION_GUARD__
+__PERMISSION_GATE__
 
 function emit(eventName, event, ctx) {
   try {
@@ -3991,6 +4570,7 @@ export default function (pi) {
   // The inherited OS lock protects exactly one transcript. Prevent Pi's
   // in-process /new, /resume, and /fork flows from changing that identity.
 __SESSION_GUARD_REGISTRATIONS__
+__PERMISSION_GATE_REGISTRATION__
   pi.on("session_start", (event, ctx) => emit("SessionStart", event, ctx));
   pi.on("before_agent_start", (event, ctx) => emit("UserPromptSubmit", event, ctx));
   pi.on("tool_execution_start", (event, ctx) => emit("PreToolUse", event, ctx));
@@ -4007,8 +4587,24 @@ __SESSION_GUARD_REGISTRATIONS__
         .replace("__RUN_ID__", &serde_json::to_string(run_id)?)
         .replace("__SESSION_GUARD__", pi_session_switch_guard_source())
         .replace(
+            "__PERMISSION_GATE__",
+            if enforce_permissions {
+                pi_chat_permission_gate_source()
+            } else {
+                ""
+            },
+        )
+        .replace(
             "__SESSION_GUARD_REGISTRATIONS__",
             pi_session_switch_guard_registration_source(),
+        )
+        .replace(
+            "__PERMISSION_GATE_REGISTRATION__",
+            if enforce_permissions {
+                pi_chat_permission_gate_registration_source()
+            } else {
+                ""
+            },
         )
         .replace(
             "__HOOK_FILE__",
@@ -5263,37 +5859,192 @@ fn terminate_pid(pid: u32, force: bool) {
 #[cfg(not(any(unix, windows)))]
 fn terminate_pid(_pid: u32, _force: bool) {}
 
-// --- Signal handler ---
+// --- Signal handling ---
 //
-// Install a SIGINT/SIGTERM handler that marks the given run as crashed so the
-// user's runs.json reflects reality even when starling is killed mid-run. We
-// use a static to remember the active run_id (single-run-per-process model).
+// `signal-hook`'s low-level handler only notifies a self-pipe. All allocation,
+// locking, filesystem I/O, child signalling, and default-signal emulation run
+// on the ordinary background thread below, outside signal-handler context.
 
-use once_cell::sync::Lazy;
-use std::sync::Mutex;
+static ACTIVE_CHILD_PID: AtomicU32 = AtomicU32::new(0);
+static PENDING_PARENT_SIGNAL: once_cell::sync::Lazy<std::sync::Arc<AtomicUsize>> =
+    once_cell::sync::Lazy::new(|| std::sync::Arc::new(AtomicUsize::new(0)));
+static RUN_SIGNAL_CLEANUP_DONE: AtomicBool = AtomicBool::new(false);
+static CHAT_SIGNAL_CLEANUP_DONE: AtomicBool = AtomicBool::new(false);
 
-static ACTIVE_RUN: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+fn install_run_signal_handler(run_id: String, child_pid: u32) {
+    ACTIVE_CHILD_PID.store(child_pid, Ordering::SeqCst);
+    RUN_SIGNAL_CLEANUP_DONE.store(false, Ordering::SeqCst);
+    install_signal_handler_inner(run_id, false);
+}
 
-fn install_signal_handler(run_id: String) {
-    *ACTIVE_RUN.lock().unwrap() = Some(run_id);
-    #[cfg(unix)]
-    unsafe {
-        extern "C" {
-            fn signal(signum: i32, handler: usize) -> usize;
-        }
-        extern "C" fn handle_sig(_sig: i32) {
-            if let Ok(g) = ACTIVE_RUN.lock() {
-                if let Some(id) = g.as_ref() {
-                    mark_run_crashed(id);
-                }
-            }
-            // Re-raise default to terminate.
-            unsafe {
-                libc::signal(libc::SIGINT, libc::SIG_DFL as usize);
-                libc::raise(libc::SIGINT);
-            }
-        }
-        signal(libc::SIGINT, handle_sig as usize);
-        signal(libc::SIGTERM, handle_sig as usize);
+fn install_chat_signal_handler(run_id: String, child_pid: u32) {
+    ACTIVE_CHILD_PID.store(child_pid, Ordering::SeqCst);
+    CHAT_SIGNAL_CLEANUP_DONE.store(false, Ordering::SeqCst);
+    install_signal_handler_inner(run_id, true);
+}
+
+fn await_run_parent_signal_replay(prepared: &PreparedLaunch) {
+    if pending_parent_signal().is_none() {
+        return;
     }
+    cleanup_launch_artifacts(prepared);
+    RUN_SIGNAL_CLEANUP_DONE.store(true, Ordering::SeqCst);
+    loop {
+        std::thread::park();
+    }
+}
+
+fn pending_parent_signal() -> Option<i32> {
+    #[cfg(unix)]
+    {
+        let signal = PENDING_PARENT_SIGNAL.load(Ordering::SeqCst) as i32;
+        return (signal > 0).then_some(signal);
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+#[cfg(unix)]
+struct PendingSignalRegistrations(Vec<signal_hook::SigId>);
+
+#[cfg(unix)]
+impl Drop for PendingSignalRegistrations {
+    fn drop(&mut self) {
+        for id in self.0.drain(..) {
+            signal_hook::low_level::unregister(id);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn register_pending_parent_signal_flags(
+    signals: &[libc::c_int],
+) -> std::io::Result<PendingSignalRegistrations> {
+    let mut registrations = Vec::with_capacity(signals.len());
+    for &signal in signals {
+        match signal_hook::flag::register_usize(
+            signal,
+            std::sync::Arc::clone(&PENDING_PARENT_SIGNAL),
+            signal as usize,
+        ) {
+            Ok(id) => registrations.push(id),
+            Err(error) => {
+                for id in registrations.drain(..) {
+                    signal_hook::low_level::unregister(id);
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(PendingSignalRegistrations(registrations))
+}
+
+fn install_signal_handler_inner(run_id: String, chat_child: bool) {
+    #[cfg(unix)]
+    {
+        use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
+        use signal_hook::iterator::Signals;
+
+        const TERMINATION_SIGNALS: &[libc::c_int] = &[SIGINT, SIGTERM, SIGHUP];
+        PENDING_PARENT_SIGNAL.store(0, Ordering::SeqCst);
+        // These signal-hook actions perform only a SeqCst atomic store inside
+        // signal context. Consequently the main thread can distinguish a
+        // parent signal from a child-only signal before child.wait() returns.
+        // Register them before the iterator so the pending value is visible
+        // regardless of which registered action wakes first.
+        let pending_registrations = match register_pending_parent_signal_flags(TERMINATION_SIGNALS)
+        {
+            Ok(registrations) => registrations,
+            Err(error) => {
+                eprintln!(
+                    "{}: could not install parent signal flags: {}",
+                    "warning".yellow(),
+                    error
+                );
+                return;
+            }
+        };
+        let mut signals = match Signals::new(TERMINATION_SIGNALS) {
+            Ok(signals) => signals,
+            Err(error) => {
+                eprintln!(
+                    "{}: could not install run signal listener: {}",
+                    "warning".yellow(),
+                    error
+                );
+                return;
+            }
+        };
+        let thread_result = std::thread::Builder::new()
+            .name("starling-run-signals".into())
+            .spawn(move || {
+                let _pending_registrations = pending_registrations;
+                let sig = loop {
+                    let pending = PENDING_PARENT_SIGNAL.load(Ordering::SeqCst) as i32;
+                    if pending > 0 {
+                        break pending;
+                    }
+                    if let Some(signal) = signals.pending().next() {
+                        PENDING_PARENT_SIGNAL.store(signal as usize, Ordering::SeqCst);
+                        break signal;
+                    }
+                    // The atomic flag is also a fallback on restricted
+                    // environments where the iterator's self-pipe wakeup is
+                    // unavailable inside signal context.
+                    std::thread::park_timeout(std::time::Duration::from_millis(10));
+                };
+                let child_pid = ACTIVE_CHILD_PID.load(Ordering::SeqCst);
+                if child_pid > 0 {
+                    unsafe {
+                        libc::kill(child_pid as libc::pid_t, sig);
+                    }
+                }
+                mark_run_crashed(&run_id);
+                // Give the main thread time to reap the child and remove its
+                // generated runtime extension before terminating Starling.
+                // Escalate an uncooperative child so it cannot survive its
+                // wrapper. Chat retains its existing cleanup flag; ordinary
+                // runs use the same ordering to avoid racing process::exit(0).
+                let cleanup_done = if chat_child {
+                    &CHAT_SIGNAL_CLEANUP_DONE
+                } else {
+                    &RUN_SIGNAL_CLEANUP_DONE
+                };
+                let started = std::time::Instant::now();
+                let mut escalated = false;
+                while !cleanup_done.load(Ordering::SeqCst) {
+                    if !escalated && started.elapsed() >= std::time::Duration::from_secs(2) {
+                        if child_pid > 0 && ACTIVE_CHILD_PID.load(Ordering::SeqCst) == child_pid {
+                            unsafe {
+                                libc::kill(child_pid as libc::pid_t, libc::SIGKILL);
+                            }
+                        }
+                        escalated = true;
+                    }
+                    std::thread::park_timeout(std::time::Duration::from_millis(10));
+                }
+                // Restore and emulate the original disposition so callers see
+                // termination by the same signal rather than a synthetic code.
+                if let Err(error) = signal_hook::low_level::emulate_default_handler(sig) {
+                    eprintln!(
+                        "{}: could not restore signal {} disposition: {}",
+                        "warning".yellow(),
+                        sig,
+                        error
+                    );
+                    std::process::exit(128 + sig);
+                }
+            });
+        if let Err(error) = thread_result {
+            eprintln!(
+                "{}: could not start run signal listener: {}",
+                "warning".yellow(),
+                error
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (run_id, chat_child);
 }

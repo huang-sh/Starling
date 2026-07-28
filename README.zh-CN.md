@@ -10,10 +10,10 @@
 
 Starling 用来启动、切换和组织 Claude Code、Codex 与 Pi 会话，支持模型配置、Catalog、项目视图、实时监控和 VS Code 集成。
 
-当前版本：**0.1.9**
+当前版本：**0.2.0**
 
 - npm：[`starling-ai`](https://www.npmjs.com/package/starling-ai)
-- GitHub Release：[`rust-v0.1.9`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.9)
+- GitHub Release：[`rust-v0.2.0`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.2.0)
 - VS Code 扩展：[`huangsh.starling-ai`](https://marketplace.visualstudio.com/items?itemName=huangsh.starling-ai)
 
 ## 功能
@@ -26,6 +26,8 @@ Starling 用来启动、切换和组织 Claude Code、Codex 与 Pi 会话，支�
 - 在会话文件提供信息时统计 token 使用量。
 - 在 `~/.starling/session-index.json` 维护本地索引，加速项目和 Catalog 视图。
 - 通过 `starling run` 启动 Claude Code、Codex 或 Pi，并把新会话自动归档到指定 Catalog。
+- 不带子命令运行 `starling`，直接进入 Starling 自己的全屏编码工作台，底层使用 Pi SDK。
+- 通过 `starling chat pi` 以机器可读 JSONL 进程托管同一套 SDK session，供编辑器集成使用。
 - 在 `~/.starling/settings` 下管理 Claude、Codex 和 Pi 的模型配置。
 - 通过类似 `top` 的终端视图混合监控最活跃的 20 个 pinned 和 unpinned sessions，区分 `running`、`waiting`、`idle`、`stopped` 状态。
 - 使用 JSON 输出作为终端渲染和 VS Code 扩展共享的数据契约。
@@ -54,7 +56,7 @@ Linux 和 macOS 下，npm 会安装一个小的 JavaScript 启动器，并自动
 相同的 native 压缩包和 sha256 文件也会附在 GitHub Release 中：
 
 ```text
-https://github.com/huang-sh/Starling/releases/tag/rust-v0.1.9
+https://github.com/huang-sh/Starling/releases/tag/rust-v0.2.0
 ```
 
 npm 安装时还会把 Starling skill 安装到：
@@ -71,9 +73,17 @@ npm 安装时还会把 Starling skill 安装到：
 npm explore -g starling-ai -- npm run install:skill
 ```
 
-Starling 需要 Node.js 16 或更新版本。Claude Code、Codex 和 Pi 需要单独安装；Starling 负责发现、启动和恢复这些 Agent 的会话，但不内置 Agent 本身。使用显式 `--session-id` 的 Pi 功能依赖 Pi 0.76 或更新版本。
+npm 版 Starling 需要 Node.js 22.19.0 或更新版本，并固定依赖 `@earendil-works/pi-coding-agent` 0.82.0。只有启动聊天工作台时才会加载 SDK，普通 session 管理命令不会初始化它。`starling run pi` 继续作为启动 Pi 原生 CLI 的兼容入口；裸 `starling` 与 `starling chat pi` 则使用 Starling 自己的 SDK Host。
 
 ## 快速开始
+
+在当前目录打开新的 SDK 编码会话：
+
+```bash
+starling
+```
+
+这里启动的是 Starling 自己的 TUI，不会启动或复制 Pi 的交互式 TUI。
 
 列出最近会话：
 
@@ -128,6 +138,17 @@ starling run -c paper-review pi
 ```
 
 普通的 `starling run pi` 不会添加 session selector。Pi 按原生方式创建新 session ID，Starling runtime hook 会在启动后记录实际 ID。
+
+供 VS Code 或其他机器客户端启动 SDK Host：
+
+```bash
+starling chat --cwd /path/to/project --title "Review" pi
+starling chat --cwd /path/to/project pi --session /absolute/path/to/session.jsonl
+```
+
+`starling chat pi` 会启动 Starling 的 Node Host，由它直接从 Pi SDK 导入 `createAgentSession`、`ModelRuntime`、`SessionManager` 和 `DefaultResourceLoader`，不会再执行 `pi --mode rpc`。新 chat 由 `SessionManager.create()` 生成真实 session identity，不会预分配 `--session-id`；恢复时的 `--session` 只接受已有 Pi transcript 的绝对路径。标准输入与 SDK 事件采用换行分隔 JSON。标准输出只包含以 LF 结尾的 JSON 记录：Starling 会在兼容消息前后发送 `starling_started` 与 `starling_exited`，其 `schema` 为 `starling.chat`、`schemaVersion` 为 `1`。诊断日志只写到标准错误。
+
+chat runtime 会关闭自动发现的用户级和项目级 Pi extensions，只显式加载 Starling 自己的 runtime gate，并自动允许内置只读工具 `read`、`grep`、`find` 和 `ls`。`bash`、`edit`、`write` 以及未知工具会发出 Pi `extension_ui_request` 确认事件，RPC client 必须响应；拒绝、取消、UI 异常或 30 秒内没有响应时都会阻止工具调用。普通交互式 `starling run pi` 的权限行为不变。
 
 Starling 自己的参数必须放在 Agent 名称之前。`-s` 是 `--setting` 的短别名，`-c` 是 `--catalog` 的短别名。Agent 参数放在 `claude`、`codex` 或 `pi` 后面。Starling 可能额外注入 runtime hook，并把显式的已有 session selector 固定到已锁定的 transcript 路径：
 
@@ -375,6 +396,16 @@ starling config show
 
 `STARLING_HOME` 的优先级最高，会覆盖保存的 CLI 设置。
 
+Starling 按以下优先级解析 Pi 可执行文件：`STARLING_PI_BIN`、保存的 `piPath`、npm launcher 设置的 `STARLING_BUNDLED_PI_BIN`，最后是 `PATH` 中的 `pi`。可以这样设置或检查：
+
+```bash
+starling config set pi /absolute/path/to/pi
+starling config unset pi
+starling config show
+```
+
+npm launcher 会把 Starling SDK Host 暴露为 `STARLING_PI_SDK_HOST`，并把兼容的 Node 可执行文件放在 `STARLING_PI_SDK_NODE`。通过 npm launcher 启动时，Starling 的裸 TUI 和 `starling chat pi` 只使用这对程序，不再解析或执行 Pi CLI；独立分发的 native binary 仍需显式使用 `starling chat pi` 子命令，并提供这两个环境变量。作为独立的兼容路径，launcher 仍可通过公开的 `rpc-entry` export 定位 `cli.js`，并通过 `STARLING_BUNDLED_PI_BIN` 提供给旧的 `starling run pi`。显式设置的 `STARLING_PI_BIN` 或 `STARLING_BUNDLED_PI_BIN` 不会被覆盖。
+
 Starling 不会移动或重写 Claude Code、Codex 和 Pi 的原始会话文件。它会从 Agent 自己的位置读取数据，例如 `~/.claude/projects`、`~/.codex/sessions` 和 `~/.pi/agent/sessions`，并只把 Starling 元数据和模型配置保存在 Starling 数据目录下。当启动 cwd 已知时，Starling 会遵循 Pi 的 `PI_CODING_AGENT_DIR`、`PI_CODING_AGENT_SESSION_DIR`、全局 `settings.json` 和项目级 `<cwd>/.pi/settings.json` 中的 `sessionDir` 设置。
 
 本地会话索引用来优化 CLI 和 VS Code 侧边栏的重复读取：
@@ -439,12 +470,13 @@ VS Code 扩展单独维护在：
 https://github.com/huang-sh/Starling-ext
 ```
 
-Starling 侧边栏包含四个视图：
+扩展会在 VS Code 右侧边栏提供 Starling Chat，并在活动栏保留四个管理视图：
 
 - Catalog：层级 Catalog 树，按需显示会话。
 - Projects：项目目录树和会话数量。
 - Models：Claude、Codex 和 Pi 模型配置。
 - Monitor：pinned、active、recent sessions 的实时状态，包含 context、token、CPU、内存、任务和 PID 等信息。
+- Starling Chat：SDK 驱动的流式对话、工具活动和 VS Code 原生权限确认。
 
 扩展支持常用右键操作：
 

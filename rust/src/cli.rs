@@ -7,7 +7,8 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
     name = "starling",
     version,
     disable_version_flag = true,
-    about = "Agent session manager — discover, pin, and organize AI coding sessions"
+    about = "Agent workspace and session manager — chat, discover, pin, and organize AI coding sessions",
+    after_help = "Run `starling` with no subcommand from the npm installation to open the Starling SDK workspace."
 )]
 pub struct Cli {
     #[arg(short = 'v', long = "version", action = ArgAction::Version, help = "Print version")]
@@ -62,6 +63,12 @@ pub enum Command {
     /// Records the run, maps the spawned process to its session, and optionally
     /// assigns it to a catalog. Use --setting to launch with a model profile.
     Run(#[command(flatten)] RunCommand),
+
+    /// Start the machine-readable Starling SDK host over newline-delimited JSON
+    ///
+    /// Standard output is reserved for the versioned Starling lifecycle
+    /// records and the version-one Starling compatibility protocol.
+    Chat(#[command(flatten)] ChatCommand),
 
     /// Manage model profiles used to launch agents with non-default providers
     #[command(subcommand, alias = "models")]
@@ -520,6 +527,38 @@ pub enum RunSubcommand {
     },
 }
 
+#[derive(Args)]
+pub struct ChatCommand {
+    /// Starling model/profile setting name to use for this chat
+    #[arg(short = 's', long = "setting", alias = "config")]
+    pub setting: Option<String>,
+
+    /// Catalog to associate with the launched chat
+    #[arg(short = 'c', long)]
+    pub catalog: Option<String>,
+
+    /// Optional run/session title
+    #[arg(long)]
+    pub title: Option<String>,
+
+    /// Working directory for the launched agent
+    #[arg(long)]
+    pub cwd: Option<String>,
+
+    #[command(subcommand)]
+    pub command: ChatSubcommand,
+}
+
+#[derive(Subcommand)]
+pub enum ChatSubcommand {
+    /// Start a Pi SDK session through the Starling-owned Node host
+    Pi {
+        /// Resume an existing Pi transcript (must be an absolute path)
+        #[arg(long)]
+        session: Option<String>,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum ModelCommand {
     /// List model profiles and current agent configs
@@ -581,7 +620,7 @@ pub enum ConfigCommand {
     },
     /// Set a setting
     Set {
-        /// Setting key (currently only `home` / `home_path`)
+        /// Setting key (`home` / `home_path` or `pi` / `pi_path`)
         key: String,
         /// Setting value
         value: String,
@@ -591,7 +630,7 @@ pub enum ConfigCommand {
     },
     /// Unset a setting
     Unset {
-        /// Setting key (currently only `home` / `home_path`)
+        /// Setting key (`home` / `home_path` or `pi` / `pi_path`)
         key: String,
         /// Output as JSON
         #[arg(long)]

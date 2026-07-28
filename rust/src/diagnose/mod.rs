@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::constants::resolve_pi_executable;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
@@ -185,27 +187,22 @@ pub fn run_agent_capture(
     timeout_ms: u64,
 ) -> AgentCaptureResult {
     let start = Instant::now();
-    let bin = match spec.provider {
-        Provider::Claude => "claude",
-        Provider::Codex => "codex",
-        Provider::Pi => "pi",
-    };
-
-    let mut cmd = match spec.provider {
+    let (mut cmd, display_bin) = match spec.provider {
         Provider::Claude => {
-            let mut c = Command::new(bin);
+            let mut c = Command::new("claude");
             c.arg("-p").arg(user_prompt);
-            c
+            (c, "claude".to_string())
         }
         Provider::Codex => {
-            let mut c = Command::new(bin);
+            let mut c = Command::new("codex");
             c.arg("exec").arg(user_prompt);
-            c
+            (c, "codex".to_string())
         }
         Provider::Pi => {
-            let mut c = Command::new(bin);
+            let pi = resolve_pi_executable();
+            let mut c = pi.command();
             c.arg("-p").arg(user_prompt).arg("--no-session");
-            c
+            (c, pi.cli_path.to_string_lossy().to_string())
         }
     };
     cmd.stdin(Stdio::null())
@@ -221,7 +218,7 @@ pub fn run_agent_capture(
                 duration_ms: start.elapsed().as_millis() as u64,
                 timed_out: false,
                 stderr: None,
-                spawn_error: Some(format!("{}: {}", bin, e)),
+                spawn_error: Some(format!("{}: {}", display_bin, e)),
             };
         }
     };

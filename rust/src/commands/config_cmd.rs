@@ -10,13 +10,21 @@ use crate::cli::*;
 use crate::constants::{
     cli_config_path, default_claude_settings_dir, default_codex_settings_dir,
     default_pi_settings_dir, default_runs_path, default_starling_home, default_store_path,
-    starling_home_source, StarlingHomeSource,
+    resolve_pi_executable_with_source, starling_home_source, PiExecutableSource,
+    StarlingHomeSource,
 };
 
 #[derive(Debug, Default, Deserialize, serde::Serialize)]
 struct CliConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     home_path: Option<String>,
+    #[serde(
+        default,
+        rename = "piPath",
+        alias = "pi_path",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pi_path: Option<String>,
 }
 
 fn read_cli_config() -> CliConfig {
@@ -56,9 +64,19 @@ fn source_str(s: StarlingHomeSource) -> &'static str {
     }
 }
 
+fn pi_source_str(s: PiExecutableSource) -> &'static str {
+    match s {
+        PiExecutableSource::ExplicitEnv => "env",
+        PiExecutableSource::Config => "config",
+        PiExecutableSource::BundledEnv => "bundled",
+        PiExecutableSource::Path => "path",
+    }
+}
+
 fn show(json: bool) -> Result<()> {
     let cfg = read_cli_config();
     let home_source = starling_home_source();
+    let (pi_executable, pi_source) = resolve_pi_executable_with_source();
     let payload = serde_json::json!({
         "configPath": cli_config_path().to_string_lossy(),
         "configuredHomePath": cfg.home_path,
@@ -69,6 +87,11 @@ fn show(json: bool) -> Result<()> {
         "settingsClaudePath": default_claude_settings_dir().to_string_lossy(),
         "settingsCodexPath": default_codex_settings_dir().to_string_lossy(),
         "settingsPiPath": default_pi_settings_dir().to_string_lossy(),
+        "configuredPiPath": cfg.pi_path,
+        "effectivePiPath": pi_executable.cli_path.to_string_lossy(),
+        "piLauncherPath": pi_executable.program.to_string_lossy(),
+        "piLauncherArgs": pi_executable.prefix_args,
+        "piPathSource": pi_source_str(pi_source),
     });
     if json {
         println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -98,6 +121,11 @@ fn show(json: bool) -> Result<()> {
         "  Runs:     {}",
         payload["runsPath"].as_str().unwrap_or_default()
     );
+    println!(
+        "  Pi:       {} ({})",
+        payload["effectivePiPath"].as_str().unwrap_or_default(),
+        payload["piPathSource"].as_str().unwrap_or_default()
+    );
     Ok(())
 }
 
@@ -106,6 +134,9 @@ fn set(key: &str, value: &str, json: bool) -> Result<()> {
     match key.to_lowercase().as_str() {
         "home" | "homepath" | "home_path" => {
             cfg.home_path = Some(value.to_string());
+        }
+        "pi" | "pipath" | "pi_path" => {
+            cfg.pi_path = Some(value.to_string());
         }
         other => {
             eprintln!("{}: unknown config key '{}'", "error".red(), other);
@@ -130,6 +161,11 @@ fn unset(key: &str, json: bool) -> Result<()> {
         "home" | "homepath" | "home_path" => {
             let had = cfg.home_path.is_some();
             cfg.home_path = None;
+            had
+        }
+        "pi" | "pipath" | "pi_path" => {
+            let had = cfg.pi_path.is_some();
+            cfg.pi_path = None;
             had
         }
         other => {

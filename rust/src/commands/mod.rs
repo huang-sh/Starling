@@ -30,6 +30,7 @@ pub fn dispatch(command: Command) -> Result<()> {
         Command::Catalog(c) => catalog::handle(c),
         Command::Project(c) => project::handle(c),
         Command::Run(c) => run::handle(c),
+        Command::Chat(c) => run::handle_chat(c),
         Command::Model(c) => model::handle(c),
         Command::Config(c) => config_cmd::handle(c),
         Command::Mcp(c) => mcp::handle(c),

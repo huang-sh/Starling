@@ -7,7 +7,6 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Context;
 use serde::Deserialize;
 
 fn home_dir() -> PathBuf {
@@ -143,6 +142,8 @@ fn env_trim(key: &str) -> Option<String> {
 struct CliConfigFile {
     #[serde(default)]
     home_path: Option<String>,
+    #[serde(default, rename = "piPath", alias = "pi_path")]
+    pi_path: Option<String>,
 }
 
 fn read_configured_starling_home() -> Option<String> {
@@ -157,6 +158,199 @@ fn read_configured_starling_home() -> Option<String> {
             Some(trimmed)
         }
     })
+}
+
+fn read_configured_pi_path() -> Option<String> {
+    let raw = std::fs::read_to_string(cli_config_path()).ok()?;
+    let parsed: CliConfigFile = serde_json::from_str(&raw).ok()?;
+    parsed.pi_path.and_then(non_empty_owned)
+}
+
+fn non_empty_owned(value: String) -> Option<String> {
+    let trimmed = value.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PiExecutableSource {
+    ExplicitEnv,
+    Config,
+    BundledEnv,
+    Path,
+}
+
+/// Complete process specification for invoking Pi.
+///
+/// External Pi installations are normal executables and therefore have no
+/// prefix arguments. The npm-bundled Pi is a JavaScript entry point, so it is
+/// always launched as `node <cli.js> ...`. Keeping the two pieces structured
+/// avoids relying on platform-specific shebang handling (notably on Windows).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PiExecutable {
+    pub program: PathBuf,
+    pub prefix_args: Vec<String>,
+    /// User-facing Pi CLI path. For a bundled runtime this is `cli.js`, not the
+    /// Node executable used to launch it.
+    pub cli_path: PathBuf,
+}
+
+impl PiExecutable {
+    fn external(path: PathBuf) -> Self {
+        Self {
+            program: path.clone(),
+            prefix_args: Vec::new(),
+            cli_path: path,
+        }
+    }
+
+    fn bundled(node: PathBuf, cli_path: PathBuf) -> Self {
+        Self {
+            program: node,
+            prefix_args: vec![cli_path.to_string_lossy().to_string()],
+            cli_path,
+        }
+    }
+
+    /// Create a command with the runtime prefix already applied. Callers add
+    /// only Pi's own CLI arguments after this point.
+    pub fn command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(&self.program);
+        command.args(&self.prefix_args);
+        command
+    }
+}
+
+fn resolve_pi_executable_from_sources(
+    explicit: Option<&str>,
+    configured: Option<&str>,
+    bundled: Option<&str>,
+    bundled_node: Option<&str>,
+) -> (PiExecutable, PiExecutableSource) {
+    let candidate = |value: Option<&str>| {
+        value
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(expand_home)
+    };
+    if let Some(path) = candidate(explicit) {
+        return (
+            PiExecutable::external(path),
+            PiExecutableSource::ExplicitEnv,
+        );
+    }
+    if let Some(path) = candidate(configured) {
+        return (PiExecutable::external(path), PiExecutableSource::Config);
+    }
+    if let Some(path) = candidate(bundled) {
+        let executable = if let Some(node) = candidate(bundled_node) {
+            PiExecutable::bundled(node, path)
+        } else {
+            // Compatibility with npm launchers from before the structured
+            // Node + entry-point contract was introduced.
+            PiExecutable::external(path)
+        };
+        return (executable, PiExecutableSource::BundledEnv);
+    }
+    (
+        PiExecutable::external(PathBuf::from("pi")),
+        PiExecutableSource::Path,
+    )
+}
+
+/// Resolve the Pi executable used by every Starling-managed Pi invocation.
+/// Explicit user configuration always wins over the npm wrapper's bundled Pi.
+pub fn resolve_pi_executable_with_source() -> (PiExecutable, PiExecutableSource) {
+    let explicit = env_trim("STARLING_PI_BIN");
+    let configured = read_configured_pi_path();
+    let bundled = env_trim("STARLING_BUNDLED_PI_BIN");
+    let bundled_node = env_trim("STARLING_BUNDLED_PI_NODE");
+    resolve_pi_executable_from_sources(
+        explicit.as_deref(),
+        configured.as_deref(),
+        bundled.as_deref(),
+        bundled_node.as_deref(),
+    )
+}
+
+pub fn resolve_pi_executable() -> PiExecutable {
+    resolve_pi_executable_with_source().0
+}
+
+/// Complete process specification for Starling's Pi SDK host.
+///
+/// Unlike [`PiExecutable`], this is not a Pi CLI fallback. The host is
+/// Starling-owned JavaScript which imports the Pi SDK directly, and it must
+/// always be launched by the explicitly configured Node executable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PiSdkHost {
+    pub node: PathBuf,
+    pub host_path: PathBuf,
+}
+
+impl PiSdkHost {
+    /// Create a command with the Starling SDK host entry point already added.
+    /// Callers append only the host's own arguments after this point.
+    pub fn command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(&self.node);
+        command.arg(&self.host_path);
+        command
+    }
+}
+
+fn resolve_pi_sdk_host_from_sources(
+    host: Option<&str>,
+    node: Option<&str>,
+) -> anyhow::Result<PiSdkHost> {
+    let host = host
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Pi SDK unavailable: STARLING_PI_SDK_HOST is not set; install or configure Starling's Pi SDK host"
+            )
+        })?;
+    let node = node
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Pi SDK unavailable: STARLING_PI_SDK_NODE is not set; configure a Node >=22.19 executable"
+            )
+        })?;
+
+    let host_path = expand_home(host);
+    if !host_path.is_absolute() {
+        anyhow::bail!(
+            "Pi SDK unavailable: STARLING_PI_SDK_HOST must be an absolute path (got {})",
+            host_path.display()
+        );
+    }
+    if !host_path.is_file() {
+        anyhow::bail!(
+            "Pi SDK unavailable: STARLING_PI_SDK_HOST does not point to a file: {}",
+            host_path.display()
+        );
+    }
+
+    let node = expand_home(node);
+    if node.is_absolute() && !node.is_file() {
+        anyhow::bail!(
+            "Pi SDK unavailable: STARLING_PI_SDK_NODE does not point to an executable file: {}",
+            node.display()
+        );
+    }
+
+    Ok(PiSdkHost { node, host_path })
+}
+
+/// Resolve the Starling-owned Node host which embeds the Pi SDK.
+///
+/// Both variables are deliberately required. `starling chat pi` must never
+/// silently fall back to spawning the Pi CLI or `pi --mode rpc`.
+pub fn resolve_pi_sdk_host() -> anyhow::Result<PiSdkHost> {
+    let host = env_trim("STARLING_PI_SDK_HOST");
+    let node = env_trim("STARLING_PI_SDK_NODE");
+    resolve_pi_sdk_host_from_sources(host.as_deref(), node.as_deref())
 }
 
 /// Path to the CLI-side config.json (`~/.config/starling/config.json` by
@@ -563,6 +757,97 @@ mod tests {
             expand_home_from(r"~\foo", Path::new("/home/tester"), false),
             PathBuf::from(r"~\foo")
         );
+    }
+
+    #[test]
+    fn pi_executable_sources_follow_documented_precedence() {
+        let resolved = resolve_pi_executable_from_sources(
+            Some(" /explicit/pi "),
+            Some("/configured/pi"),
+            Some("/bundled/pi"),
+            Some("/node"),
+        );
+        assert_eq!(resolved.0.program, PathBuf::from("/explicit/pi"));
+        assert!(resolved.0.prefix_args.is_empty());
+        assert_eq!(resolved.0.cli_path, PathBuf::from("/explicit/pi"));
+        assert_eq!(resolved.1, PiExecutableSource::ExplicitEnv);
+
+        let resolved = resolve_pi_executable_from_sources(
+            Some("  "),
+            Some("/configured/pi"),
+            Some("/bundled/pi"),
+            Some("/node"),
+        );
+        assert_eq!(resolved.0.program, PathBuf::from("/configured/pi"));
+        assert!(resolved.0.prefix_args.is_empty());
+        assert_eq!(resolved.1, PiExecutableSource::Config);
+
+        let resolved = resolve_pi_executable_from_sources(
+            None,
+            None,
+            Some("/bundled/dist/cli.js"),
+            Some("/runtime/node"),
+        );
+        assert_eq!(resolved.0.program, PathBuf::from("/runtime/node"));
+        assert_eq!(
+            resolved.0.prefix_args,
+            vec!["/bundled/dist/cli.js".to_string()]
+        );
+        assert_eq!(resolved.0.cli_path, PathBuf::from("/bundled/dist/cli.js"));
+        let command = resolved.0.command();
+        assert_eq!(command.get_program(), std::ffi::OsStr::new("/runtime/node"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("/bundled/dist/cli.js")]
+        );
+        assert_eq!(resolved.1, PiExecutableSource::BundledEnv);
+
+        let resolved = resolve_pi_executable_from_sources(None, None, Some("/legacy/pi"), None);
+        assert_eq!(resolved.0.program, PathBuf::from("/legacy/pi"));
+        assert!(resolved.0.prefix_args.is_empty());
+        assert_eq!(resolved.1, PiExecutableSource::BundledEnv);
+
+        let resolved = resolve_pi_executable_from_sources(None, None, None, Some("/node"));
+        assert_eq!(resolved.0.program, PathBuf::from("pi"));
+        assert!(resolved.0.prefix_args.is_empty());
+        assert_eq!(resolved.1, PiExecutableSource::Path);
+    }
+
+    #[test]
+    fn pi_sdk_host_requires_explicit_host_and_node_without_cli_fallback() {
+        let missing_host = resolve_pi_sdk_host_from_sources(None, Some("node")).unwrap_err();
+        assert!(missing_host.to_string().contains("Pi SDK unavailable"));
+        assert!(missing_host.to_string().contains("STARLING_PI_SDK_HOST"));
+
+        let missing_node =
+            resolve_pi_sdk_host_from_sources(Some("/tmp/starling-sdk-host.js"), None).unwrap_err();
+        assert!(missing_node.to_string().contains("Pi SDK unavailable"));
+        assert!(missing_node.to_string().contains("STARLING_PI_SDK_NODE"));
+    }
+
+    #[test]
+    fn pi_sdk_host_command_is_node_followed_by_the_absolute_host() {
+        let root = std::env::temp_dir().join(format!(
+            "starling-sdk-host-constants-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let host_path = root.join("host.js");
+        std::fs::write(&host_path, "// test host\n").unwrap();
+
+        let resolved = resolve_pi_sdk_host_from_sources(
+            Some(host_path.to_string_lossy().as_ref()),
+            Some("node"),
+        )
+        .unwrap();
+        let command = resolved.command();
+        assert_eq!(command.get_program(), std::ffi::OsStr::new("node"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![host_path.as_os_str()]
+        );
+
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

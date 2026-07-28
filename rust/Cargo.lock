@@ -1004,7 +1004,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "starling"
-version = "0.1.9"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1020,6 +1020,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "signal-hook",
  "thiserror",
  "toml",
  "ureq",

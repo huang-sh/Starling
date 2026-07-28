@@ -6,7 +6,7 @@ use std::process::Command;
 use anyhow::{anyhow, Result};
 use colored::*;
 
-use crate::constants::pi_node_compatible_path;
+use crate::constants::{pi_node_compatible_path, resolve_pi_executable};
 use crate::core::discovery::{find_pi_session_by_path, find_session_candidates};
 use crate::core::runs::{is_pid_alive, list_runs, reconcile_stale_runs, RunStatus};
 use crate::core::session_display::short_session_id;
@@ -122,7 +122,8 @@ fn launch_resume(
             ensure_pi_resume_is_exclusive(session_id, project_path)?;
             // Pi's IDs are scoped to a cwd. An absolute transcript path is the
             // only unambiguous resume contract when two projects reuse an ID.
-            let mut c = Command::new("pi");
+            let pi = resolve_pi_executable();
+            let mut c = pi.command();
             let absolute =
                 std::fs::canonicalize(file_path).unwrap_or_else(|_| PathBuf::from(file_path));
             let absolute = pi_node_compatible_path(&absolute);

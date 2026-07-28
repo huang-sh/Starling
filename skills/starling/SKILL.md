@@ -16,6 +16,8 @@ This skill is an operating manual for agents using Starling. Do not treat it as 
 - Do not rewrite agent-owned data under `~/.claude`, `~/.codex`, or `~/.pi`.
 - Use one plain catalog name in examples unless the task is specifically about catalog hierarchy.
 - Put Starling options before the agent name in `starling run`; pass agent-native arguments after `claude`, `codex`, or `pi`.
+- Use bare `starling` for Starling's interactive SDK-backed workspace. It is a Starling-owned TUI and does not launch Pi's TUI.
+- Use `starling chat pi` only when acting as a machine client; its stdin and stdout are a JSONL protocol, not an interactive terminal.
 
 ## Catalogs
 
@@ -211,6 +213,17 @@ Use `starling run pi --continue` for the current project's latest Pi session. St
 For managed `starling run pi --session <path>`, require an existing non-empty valid Pi transcript; legacy v1/v2 transcripts are allowed. Missing and zero-byte explicit paths are a deliberate managed limitation because they have no session ID to lock before spawn. Create new managed sessions with `--session-id`, or initialize the exact path with Pi directly before handing it to Starling.
 
 On Linux, prefer managed launches when an active Pi using a one-shot `--session` or `--session-dir` must be mapped reliably. Native Pi replaces its process command line with `pi` after startup, so an externally launched process no longer exposes those one-shot values; persist custom roots through `PI_CODING_AGENT_SESSION_DIR` or `settings.json` when launching Pi outside Starling.
+
+For an editor or another machine client, put Starling options before `pi` and start the RPC transport with:
+
+```bash
+starling chat --cwd /path/to/project --catalog paper-review --title "Review" pi
+starling chat --cwd /path/to/project pi --session /absolute/path/to/session.jsonl
+```
+
+`starling chat pi` starts Starling's Node SDK Host, which directly imports Pi's public session APIs; it never launches `pi --mode rpc`. A new chat deliberately passes no session selector and no `--session-id`; `SessionManager.create()` owns the identity, while resuming requires an absolute transcript path. Stdout is strict LF-delimited JSON: `starling_started` and `starling_exited` records use `schema: "starling.chat"` and `schemaVersion: 1`; the current compatibility records between them retain the established chat command/event shapes. Treat all stderr as diagnostics. Chat disables discovered user/project Pi extensions and explicitly loads only Starling's runtime gate, so custom tools cannot shadow an auto-allowed built-in name. Read-only `read`, `grep`, `find`, and `ls` calls are auto-allowed. Every other tool needs an `extension_ui_response`; deny, cancellation, UI errors, and a 30-second response timeout fail closed. This gate does not apply to ordinary `starling run pi`.
+
+The npm distribution requires Node 22.19.0 or newer and installs Pi SDK 0.82.0 as a fixed dependency. The wrapper supplies `STARLING_PI_SDK_HOST` and `STARLING_PI_SDK_NODE` for bare `starling` and `starling chat pi`. The separate legacy Pi executable precedence for `starling run pi` remains `STARLING_PI_BIN`, `starling config set pi <path>`, `STARLING_BUNDLED_PI_BIN`, then `pi` on `PATH`. Use `starling config show` to inspect the legacy CLI path, launcher, and source.
 
 To put a run into a nested catalog, use a catalog path:
 

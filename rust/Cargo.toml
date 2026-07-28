@@ -1,6 +1,6 @@
 [package]
 name = "starling"
-version = "0.1.9"
+version = "0.2.0"
 edition = "2021"
 description = "Launch, switch, and organize Claude Code, Codex, and Pi sessions with model profiles, catalogs, project views, and VS Code integration."
 license = "MIT"
@@ -14,6 +14,7 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+signal-hook = "0.3"
 toml = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
