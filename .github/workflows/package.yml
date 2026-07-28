@@ -30,22 +30,27 @@ jobs:
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: starling-linux-x64
+            libc: glibc
           - name: linux-x64-musl
             os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             artifact: starling-linux-x64-musl
+            libc: musl
           - name: linux-arm64
             os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             artifact: starling-linux-arm64
+            libc: glibc
           - name: macos-x64
             os: macos-15-intel
             target: x86_64-apple-darwin
             artifact: starling-darwin-x64
+            libc: ""
           - name: macos-arm64
             os: macos-15
             target: aarch64-apple-darwin
             artifact: starling-darwin-arm64
+            libc: ""
 
     steps:
       - name: Checkout
@@ -60,28 +65,90 @@ jobs:
           cache: npm
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        if: matrix.libc != 'glibc'
+        uses: dtolnay/rust-toolchain@1.91.1
         with:
           targets: ${{ matrix.target }}
 
       - name: Install Linux build tools
-        if: runner.os == 'Linux'
+        if: matrix.libc == 'musl'
         run: |
           sudo apt-get update
-          if [[ "${{ matrix.target }}" == *-musl ]]; then
-            sudo apt-get install -y musl-tools
-          fi
-          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu
-          fi
+          sudo apt-get install -y musl-tools
 
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Build and stage native binary
+      - name: Build GNU binary (GLIBC 2.31 baseline)
+        if: matrix.libc == 'glibc'
+        shell: bash
         env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --env TARGET \
+            --env CARGO_NET_GIT_FETCH_WITH_CLI \
+            --volume "${GITHUB_WORKSPACE}:/workspace" \
+            --workdir /workspace/rust \
+            rust:1.91.1-bullseye@sha256:f02c249a0dd84eda8a3403b6fb1a4a59fee86157f1657cb1f8baaf3d89fe2d88 \
+            bash -c '
+              set -euo pipefail
+              rustup target add "$TARGET"
+              if [[ "$TARGET" == "aarch64-unknown-linux-gnu" ]]; then
+                apt-get update -qq
+                apt-get install -y -qq --no-install-recommends \
+                  gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+                export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+              fi
+              cargo build --release --locked --target "$TARGET"
+            '
+
+      - name: Stage GNU binary
+        if: matrix.libc == 'glibc'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          npm run build:ts
+          mkdir -p "npm/vendor/${TARGET}/bin"
+          cp "rust/target/${TARGET}/release/starling" "npm/vendor/${TARGET}/bin/starling"
+          chmod +x "npm/vendor/${TARGET}/bin/starling"
+
+      - name: Verify GNU GLIBC baseline
+        if: matrix.libc == 'glibc'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          binary="rust/target/${TARGET}/release/starling"
+          max_glibc="$({
+            readelf --version-info "$binary" \
+              | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' \
+              | sed 's/^GLIBC_//' \
+              | sort -Vu \
+              | tail -n 1
+          })"
+          [[ -n "$max_glibc" ]] || { echo "No GLIBC symbol versions found in ${binary}"; exit 1; }
+          newest="$(printf '%s\n%s\n' "$max_glibc" "2.31" | sort -V | tail -n 1)"
+          [[ "$newest" == "2.31" ]] \
+            || { echo "${binary} requires GLIBC ${max_glibc}; maximum supported is 2.31"; exit 1; }
+          echo "Verified ${binary}: maximum GLIBC symbol version ${max_glibc}"
+
+      - name: Build and stage native binary
+        if: matrix.libc != 'glibc'
         run: npm run build -- --target=${{ matrix.target }}
+
+      - name: Verify GNU x64 on GLIBC 2.31
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
+            ubuntu:20.04@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214 \
+            /workspace/npm/vendor/${{ matrix.target }}/bin/starling --version
 
       - name: Test staged binary
         run: |
