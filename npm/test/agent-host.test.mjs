@@ -28,6 +28,19 @@ class FakeSession {
     return [{ role: "user", content: "history" }];
   }
 
+  getCommands() {
+    return [{
+      name: "fake-command",
+      description: "Fake command",
+      source: "extension",
+      sourceInfo: { path: "/fake/extension.mjs" },
+    }];
+  }
+
+  getSessionStats() {
+    return { sessionId: "fake-session", totalMessages: 1 };
+  }
+
   prompt(message, streamingBehavior, accepted) {
     this.calls.push(["prompt", message, streamingBehavior]);
     accepted();
@@ -55,6 +68,18 @@ class FakeSession {
   async compact(customInstructions) {
     this.calls.push(["compact", customInstructions]);
     return { summary: "small" };
+  }
+
+  abortCompaction() {
+    this.calls.push(["abortCompaction"]);
+  }
+
+  setSessionName(name) {
+    this.calls.push(["setSessionName", name]);
+  }
+
+  async reload() {
+    this.calls.push(["reload"]);
   }
 
   async shutdown() {
@@ -119,15 +144,22 @@ test("serves the existing Pi RPC command surface through an injected adapter", a
   for (const command of [
     { id: "state", type: "get_state" },
     { id: "messages", type: "get_messages" },
+    { id: "commands", type: "get_commands" },
+    { id: "stats", type: "get_session_stats" },
+    { id: "name", type: "set_session_name", name: "  Renamed session  " },
+    { id: "reload", type: "reload" },
     { id: "prompt", type: "prompt", message: "hello", streamingBehavior: "followUp" },
     { id: "thinking", type: "set_thinking_level", level: "high" },
     { id: "models", type: "get_available_models" },
     { id: "model", type: "set_model", provider: "fake", modelId: "model-a" },
     { id: "compact", type: "compact", customInstructions: "short" },
-    { id: "abort", type: "abort" },
   ]) {
     input.write(serializeJsonLine(command));
   }
+  await until(() => response(output, "compact") !== undefined);
+  input.write(serializeJsonLine({ id: "abort-compact", type: "abort_compaction" }));
+  await until(() => response(output, "abort-compact") !== undefined);
+  input.write(serializeJsonLine({ id: "abort", type: "abort" }));
   await until(() => response(output, "abort") !== undefined);
   input.end();
 
@@ -138,6 +170,18 @@ test("serves the existing Pi RPC command surface through an injected adapter", a
   assert.deepEqual(response(output, "messages").data.messages, [
     { role: "user", content: "history" },
   ]);
+  assert.deepEqual(response(output, "commands").data.commands, [{
+    name: "fake-command",
+    description: "Fake command",
+    source: "extension",
+    sourceInfo: { path: "/fake/extension.mjs" },
+  }]);
+  assert.deepEqual(response(output, "stats").data, {
+    sessionId: "fake-session",
+    totalMessages: 1,
+  });
+  assert.equal(response(output, "name").success, true);
+  assert.equal(response(output, "reload").success, true);
   assert.equal(response(output, "prompt").success, true);
   assert.ok(output.some((record) => record.type === "agent_start"));
   assert.deepEqual(response(output, "models").data.models, [
@@ -145,13 +189,37 @@ test("serves the existing Pi RPC command surface through an injected adapter", a
   ]);
   assert.deepEqual(response(output, "model").data, { provider: "fake", id: "model-a" });
   assert.deepEqual(response(output, "compact").data, { summary: "small" });
+  assert.equal(response(output, "abort-compact").success, true);
   assert.deepEqual(adapter.session.calls, [
+    ["setSessionName", "Renamed session"],
+    ["reload"],
     ["prompt", "hello", "followUp"],
     ["setThinking", "high"],
     ["setModel", "fake", "model-a"],
     ["compact", "short"],
+    ["abortCompaction"],
     ["abort"],
   ]);
+  assert.deepEqual(adapter.session.shutdownCalls, ["shutdown"]);
+});
+
+test("queues stdin that was already buffered before the SDK host starts", async () => {
+  const input = new PassThrough();
+  const output = [];
+  const adapter = new FakeAdapter();
+  input.end(serializeJsonLine({ id: "early", type: "get_state" }));
+
+  const code = await runAgentHost({
+    argv: [],
+    processCwd: "/work",
+    input,
+    output: (value) => output.push(value),
+    diagnostic: () => {},
+    adapter,
+  });
+
+  assert.equal(code, 0);
+  assert.equal(response(output, "early").data.sessionId, "fake-session");
   assert.deepEqual(adapter.session.shutdownCalls, ["shutdown"]);
 });
 
@@ -311,147 +379,390 @@ test("drains queued commands before shutdown when stdin ends during open", async
   assert.deepEqual(session.shutdownCalls, ["shutdown"]);
 });
 
-test("real adapter uses the public Pi SDK constructors and shuts down in order", async () => {
-  const calls = [];
-  const modelRuntime = {
-    async getAvailable() {
-      return [{ provider: "fake", id: "model-a" }];
-    },
-    getModel(provider, modelId) {
-      return { provider, id: modelId };
+test("a signal upgrades an EOF drain instead of waiting for a stuck command", async () => {
+  const input = new PassThrough();
+  const controller = new AbortController();
+  const gate = deferred();
+  const adapter = {
+    async open(_options, bindings) {
+      const session = new FakeSession(bindings);
+      session.compact = async () => {
+        adapter.compactStarted = true;
+        return gate.promise;
+      };
+      this.session = session;
+      this.opened = true;
+      return session;
     },
   };
-  const sdkSession = {
-    model: { provider: "fake", id: "model-a" },
+  const running = runAgentHost({
+    argv: [],
+    processCwd: "/work",
+    input,
+    output: () => {},
+    diagnostic: () => {},
+    shutdownSignal: controller.signal,
+    adapter,
+  });
+  await until(() => adapter.opened === true);
+  input.write(serializeJsonLine({ id: "compact", type: "compact" }));
+  await until(() => adapter.compactStarted === true);
+
+  input.end();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(adapter.session.shutdownCalls, []);
+  controller.abort();
+  assert.equal(await Promise.race([
+    running,
+    new Promise((resolve) => setTimeout(() => resolve("still-draining"), 100)),
+  ]), 0);
+  assert.deepEqual(adapter.session.shutdownCalls, ["shutdown"]);
+
+  gate.resolve({ summary: "late" });
+});
+
+test("SDK-requested shutdown ends the JSONL host without waiting for EOF", async () => {
+  const input = new PassThrough();
+  const adapter = new FakeAdapter();
+  const running = runAgentHost({
+    argv: [],
+    processCwd: "/work",
+    input,
+    output: () => {},
+    diagnostic: () => {},
+    adapter,
+  });
+  await until(() => adapter.opened === true);
+
+  adapter.session.bindings.requestShutdown();
+  assert.equal(await running, 0);
+  assert.deepEqual(adapter.session.shutdownCalls, ["shutdown"]);
+});
+
+test("SDK-requested shutdown failure is diagnosed once", async () => {
+  const input = new PassThrough();
+  const diagnostics = [];
+  const adapter = new FakeAdapter();
+  const running = runAgentHost({
+    argv: [],
+    processCwd: "/work",
+    input,
+    output: () => {},
+    diagnostic: (message) => diagnostics.push(message),
+    adapter,
+  });
+  await until(() => adapter.opened === true);
+  adapter.session.shutdown = async () => {
+    throw new Error("shutdown boom");
+  };
+
+  adapter.session.bindings.requestShutdown();
+  assert.equal(await running, 1);
+  assert.equal(diagnostics.filter((message) => message.includes("shutdown boom")).length, 1);
+});
+
+test("a distinct cleanup failure remains visible after an input failure", async () => {
+  const input = new PassThrough();
+  const diagnostics = [];
+  const adapter = new FakeAdapter();
+  const running = runAgentHost({
+    argv: [],
+    processCwd: "/work",
+    input,
+    output: () => {},
+    diagnostic: (message) => diagnostics.push(message),
+    adapter,
+  });
+  await until(() => adapter.opened === true);
+  adapter.session.shutdown = async () => {
+    throw new Error("cleanup boom");
+  };
+
+  input.emit("error", new Error("input boom"));
+  assert.equal(await running, 1);
+  assert.ok(diagnostics.some((message) => message.includes("input boom")));
+  assert.ok(diagnostics.some((message) => message.includes("cleanup boom")));
+});
+
+test("EOF followed by a delayed SDK open failure exits unsuccessfully", async () => {
+  const input = new PassThrough();
+  const diagnostics = [];
+  const gate = deferred();
+  const adapter = {
+    async open() {
+      this.started = true;
+      return gate.promise;
+    },
+  };
+  const running = runAgentHost({
+    argv: [],
+    processCwd: "/work",
+    input,
+    output: () => {},
+    diagnostic: (message) => diagnostics.push(message),
+    adapter,
+  });
+  await until(() => adapter.started === true);
+  input.end();
+  gate.reject(new Error("delayed open failure"));
+
+  assert.equal(await running, 1);
+  assert.equal(diagnostics.filter((message) => message.includes("delayed open failure")).length, 1);
+});
+
+test("real adapter follows OMP's public createAgentSession lifecycle", async () => {
+  const calls = [];
+  const extensionPath = "/tmp/starling-gate.mjs";
+  const selectedModel = { provider: "fake", id: "model-a" };
+  const sdkSession = makeSdkSession(calls, {
+    model: selectedModel,
     thinkingLevel: "high",
-    messages: [],
+  });
+  const extensionSource = { path: "/extensions/example.mjs", scope: "project" };
+  const promptSource = { path: "/prompts/review.md", scope: "user" };
+  const skillSource = { path: "/skills/check/SKILL.md", scope: "project" };
+  sdkSession.extensionRunner.getRegisteredCommands = () => [{
+    invocationName: "example:run",
+    description: "Run the example extension",
+    sourceInfo: extensionSource,
+  }];
+  sdkSession.promptTemplates = [{
+    name: "review",
+    description: "Review the current change",
+    sourceInfo: promptSource,
+  }];
+  sdkSession.resourceLoader = {
+    getSkills() {
+      return {
+        skills: [{
+          name: "check",
+          description: "Check the project",
+          sourceInfo: skillSource,
+        }],
+      };
+    },
+  };
+  sdkSession.getSessionStats = () => ({
     sessionId: "sdk-session",
-    extensionRunner: {
-      async emit(event) {
-        calls.push(["session_shutdown", event]);
-      },
-    },
-    async bindExtensions(bindings) {
-      calls.push(["bind", bindings.mode]);
-    },
-    subscribe() {
-      calls.push(["subscribe"]);
-      return () => calls.push(["unsubscribe"]);
-    },
-    async prompt(_message, options) {
-      options.preflightResult(true);
-    },
-    async abort() {
-      calls.push(["abort"]);
-    },
-    async setModel() {},
-    setThinkingLevel() {},
-    async compact() {
-      return {};
-    },
-    setSessionName(name) {
-      calls.push(["name", name]);
-    },
-    dispose() {
-      calls.push(["dispose"]);
-    },
+    totalMessages: 3,
+  });
+  sdkSession.reload = async () => {
+    calls.push(["sessionReload"]);
   };
   let loaderOptions;
-  const fakeSdk = {
-    getAgentDir: () => "/agent",
-    ModelRuntime: {
-      async create(options) {
-        calls.push(["modelRuntime", options]);
-        return modelRuntime;
+  let createOptions;
+  const fakeSdk = makeMinimalPiSdk(calls, {
+    session: sdkSession,
+    modelRuntime: {
+      async getAvailable() {
+        return [selectedModel];
+      },
+      getModel(provider, modelId) {
+        return provider === selectedModel.provider && modelId === selectedModel.id
+          ? selectedModel
+          : undefined;
       },
     },
-    SessionManager: {
-      create(cwd, sessionDir, options) {
-        calls.push(["sessionCreate", cwd, sessionDir, options]);
-        return { getCwd: () => cwd };
-      },
-      open() {
-        throw new Error("unexpected open");
-      },
+    extensionResult: {
+      extensions: [{
+        path: extensionPath,
+        resolvedPath: extensionPath,
+        sourceInfo: { source: extensionPath },
+      }],
+      errors: [],
     },
-    SettingsManager: {
-      create(cwd, agentDir, options) {
-        calls.push(["settings", cwd, agentDir, options]);
-        return { getSessionDir: () => "/settings/sessions" };
-      },
+    onLoader(options) {
+      loaderOptions = options;
     },
-    ProjectTrustStore: class {
-      get() {
-        return null;
-      }
-      set() {}
+    onCreateAgentSession(options) {
+      createOptions = options;
     },
-    hasTrustRequiringProjectResources: () => false,
-    DefaultResourceLoader: class {
-      constructor(options) {
-        loaderOptions = options;
-        calls.push(["loader"]);
-      }
-      async reload() {
-        calls.push(["reload"]);
-      }
-      getExtensions() {
-        return {
-          extensions: [{
-            path: "/tmp/starling-gate.mjs",
-            resolvedPath: "/tmp/starling-gate.mjs",
-            sourceInfo: { source: "/tmp/starling-gate.mjs" },
-          }],
-          errors: [],
-        };
-      }
-    },
-    async createAgentSession(options) {
-      calls.push(["createAgentSession", options]);
-      return { session: sdkSession };
-    },
-  };
+  });
 
   const adapter = createPiSdkAdapter(async () => fakeSdk, {});
   const session = await adapter.open({
     cwd: "/work",
-    sessionId: "fixed-id",
     name: "Starling session",
     provider: "fake",
     model: "model-a",
     thinking: "high",
-    extensions: ["/tmp/starling-gate.mjs"],
+    extensions: [extensionPath],
     noExtensions: true,
-  }, {
-    uiContext: {},
-    emitEvent: () => {},
-    emitExtensionError: () => {},
-    requestShutdown: () => {},
-  });
+    surface: "tui",
+    starlingManaged: true,
+  }, emptyBindings());
 
-  assert.deepEqual(loaderOptions.additionalExtensionPaths, ["/tmp/starling-gate.mjs"]);
+  const sessionCreate = calls.find(([name]) => name === "sessionCreate");
+  assert.deepEqual(sessionCreate, [
+    "sessionCreate",
+    "/work",
+    "/settings/sessions",
+    undefined,
+  ]);
+  assertCallOrder(calls, [
+    "settings",
+    "sessionCreate",
+    "modelRuntime",
+    "loader",
+    "reload",
+    "createAgentSession",
+    "sessionName",
+    "bindExtensions",
+    "subscribe",
+  ]);
+  assert.deepEqual(calls.find(([name]) => name === "sessionName"), [
+    "sessionName",
+    "Starling session",
+  ]);
+  assert.equal(createOptions.cwd, "/work");
+  assert.equal(createOptions.model, selectedModel);
+  assert.equal(createOptions.thinkingLevel, "high");
+  assert.deepEqual(loaderOptions.additionalExtensionPaths, [extensionPath]);
   assert.equal(loaderOptions.noExtensions, true);
-  assert.ok(calls.some(([name]) => name === "modelRuntime"));
-  assert.ok(calls.some(([name]) => name === "settings"));
-  assert.ok(calls.some(([name]) => name === "sessionCreate"));
-  assert.ok(calls.some(([name]) => name === "createAgentSession"));
-  assert.ok(calls.some((call) =>
-    call[0] === "settings" && call[3].projectTrusted === true
-  ));
-  assert.ok(calls.some((call) =>
-    call[0] === "sessionCreate" && call[2] === "/settings/sessions"
-  ));
+  assert.equal(loaderOptions.extensionFactories.length, 1);
+  const inlineExtension = loaderOptions.extensionFactories[0];
+  assert.deepEqual(
+    { name: inlineExtension.name, hidden: inlineExtension.hidden },
+    { name: "starling-managed", hidden: true },
+  );
+  assert.equal(typeof inlineExtension.factory, "function");
 
+  const handlers = {};
+  inlineExtension.factory({
+    on(event, handler) {
+      handlers[event] = handler;
+    },
+  });
+  let confirmCalls = 0;
+  const deniedContext = {
+    ui: {
+      async confirm() {
+        confirmCalls += 1;
+        return false;
+      },
+      notify() {},
+    },
+  };
+  assert.equal(await handlers.tool_call({ toolName: "read", input: {} }, deniedContext), undefined);
+  assert.equal(confirmCalls, 0);
+  assert.deepEqual(
+    await handlers.tool_call({ toolName: "bash", input: { command: "rm nope" } }, deniedContext),
+    {
+      block: true,
+      reason: "Starling denied Pi tool 'bash' because approval was not granted.",
+    },
+  );
+  assert.equal(confirmCalls, 1);
+  assert.deepEqual(await handlers.session_before_switch({}, deniedContext), { cancel: true });
+
+  let accepted = false;
+  session.prompt("hello", undefined, () => {
+    accepted = true;
+  }, assert.fail);
+  await until(() => accepted);
+  assert.equal(sdkSession.bindings.mode, "tui");
+  assert.equal(sdkSession.promptOptions.source, "interactive");
+  assert.equal(typeof sdkSession.promptOptions.preflightResult, "function");
+  assert.deepEqual(session.getCommands(), [
+    {
+      name: "example:run",
+      description: "Run the example extension",
+      source: "extension",
+      sourceInfo: extensionSource,
+    },
+    {
+      name: "review",
+      description: "Review the current change",
+      source: "prompt",
+      sourceInfo: promptSource,
+    },
+    {
+      name: "skill:check",
+      description: "Check the project",
+      source: "skill",
+      sourceInfo: skillSource,
+    },
+  ]);
+  assert.deepEqual(session.getSessionStats(), {
+    sessionId: "sdk-session",
+    totalMessages: 3,
+  });
+  session.setSessionName("Renamed through adapter");
+  await session.reload();
+  assert.deepEqual(calls.filter(([name]) => name === "sessionName"), [
+    ["sessionName", "Starling session"],
+    ["sessionName", "Renamed through adapter"],
+  ]);
+  assert.equal(calls.some(([name]) => name === "sessionReload"), true);
+
+  const shutdownStart = calls.length;
   await session.shutdown();
-  assert.deepEqual(calls.slice(-4).map(([name]) => name), [
+  await session.shutdown();
+  assert.deepEqual(calls.slice(shutdownStart).map(([name]) => name), [
+    "abortCompaction",
     "abort",
+    "abortCompaction",
     "session_shutdown",
     "unsubscribe",
     "dispose",
   ]);
 });
 
-test("resume derives SDK services from the transcript cwd and persists an asked trust decision", async () => {
+test("adapter shutdown cancels and settles compaction before disposing", async () => {
+  const calls = [];
+  let compactionController;
+  const sdkSession = makeSdkSession(calls);
+  sdkSession.compact = async () => {
+    calls.push(["compactStart"]);
+    // Pi creates its compaction controller only after this initial abort.
+    await sdkSession.abort();
+    calls.push(["compactionControllerCreated"]);
+    try {
+      return await new Promise((_resolve, reject) => {
+        compactionController = { reject };
+      });
+    } finally {
+      compactionController = undefined;
+      calls.push(["compactionSettled"]);
+    }
+  };
+  sdkSession.abortCompaction = () => {
+    calls.push(["abortCompaction", compactionController !== undefined]);
+    compactionController?.reject(new Error("Compaction cancelled"));
+  };
+  const adapter = createPiSdkAdapter(
+    async () => makeMinimalPiSdk(calls, { session: sdkSession }),
+    {},
+  );
+  const session = await adapter.open({
+    cwd: "/work",
+    extensions: [],
+    noExtensions: true,
+  }, emptyBindings());
+  const operationStart = calls.length;
+
+  const compact = session.compact();
+  const compactRejected = assert.rejects(compact, /Compaction cancelled/);
+  await session.shutdown();
+  await compactRejected;
+
+  assert.deepEqual(calls.slice(operationStart).map(([name, state]) =>
+    state === undefined ? name : [name, state]
+  ), [
+    "compactStart",
+    "abort",
+    ["abortCompaction", false],
+    "abort",
+    "compactionControllerCreated",
+    ["abortCompaction", true],
+    "compactionSettled",
+    ["session_shutdown", { type: "session_shutdown", reason: "quit" }],
+    "unsubscribe",
+    "dispose",
+  ]);
+});
+
+test("resume derives SDK resources from transcript cwd and persists asked trust", async () => {
   const calls = [];
   const trustWrites = [];
   const transcriptCwd = "/projects/from-transcript";
@@ -463,8 +774,8 @@ test("resume derives SDK services from the transcript cwd and persists an asked 
       calls.push(["sessionOpen", ...args]);
       return { getCwd: () => transcriptCwd };
     },
-    createSettings(cwd, agentDir, options) {
-      calls.push(["settings", cwd, agentDir, options]);
+    createSettings(cwd, agentDir, settingsOptions) {
+      calls.push(["settings", cwd, agentDir, settingsOptions]);
       return { getSessionDir: () => "/settings/sessions" };
     },
     createTrustStore() {
@@ -495,22 +806,23 @@ test("resume derives SDK services from the transcript cwd and persists an asked 
     extensions: [],
     noExtensions: false,
   }, {
+    ...emptyBindings(),
     uiContext: {
       async confirm(...args) {
         confirmCalls.push(args);
         return true;
       },
     },
-    emitEvent: () => {},
-    emitExtensionError: () => {},
-    requestShutdown: () => {},
   });
 
   assert.deepEqual(calls.find(([name]) => name === "sessionOpen"), [
     "sessionOpen",
     "/sessions/resume.jsonl",
   ]);
-  assert.deepEqual(calls.find(([name]) => name === "settings"), [
+  const runtimeSettings = calls.find((call) =>
+    call[0] === "settings" && call[1] === transcriptCwd
+  );
+  assert.deepEqual(runtimeSettings, [
     "settings",
     transcriptCwd,
     "/agent",
@@ -540,7 +852,7 @@ test("a cancelled startup trust prompt defaults to untrusted without persisting"
       };
     },
     createSettings(_cwd, _agentDir, settingsOptions) {
-      settingsTrust = settingsOptions.projectTrusted;
+      if (settingsOptions) settingsTrust = settingsOptions.projectTrusted;
       return { getSessionDir: () => undefined };
     },
   });
@@ -649,36 +961,78 @@ function emptyBindings() {
   };
 }
 
-function makeMinimalPiSdk(calls, options = {}) {
-  const makeSession = () => ({
+function makeSdkSession(calls, overrides = {}) {
+  const session = {
+    model: overrides.model,
+    thinkingLevel: overrides.thinkingLevel,
     messages: [],
-    async bindExtensions() {},
-    subscribe() {
-      return () => {};
+    sessionId: "sdk-session",
+    extensionRunner: {
+      async emit(event) {
+        calls.push(["session_shutdown", event]);
+      },
     },
-    async prompt(_message, promptOptions) {
+    async bindExtensions(bindings) {
+      session.bindings = bindings;
+      calls.push(["bindExtensions", bindings]);
+    },
+    subscribe() {
+      calls.push(["subscribe"]);
+      return () => calls.push(["unsubscribe"]);
+    },
+    async prompt(message, promptOptions) {
+      session.promptOptions = promptOptions;
+      calls.push(["prompt", message, promptOptions]);
       promptOptions?.preflightResult?.(true);
     },
-    async abort() {},
-    async setModel() {},
-    setThinkingLevel() {},
+    async abort() {
+      calls.push(["abort"]);
+    },
+    async setModel(model) {
+      session.model = model;
+    },
+    setThinkingLevel(level) {
+      session.thinkingLevel = level;
+    },
     async compact() {
       return {};
     },
-    dispose() {},
-  });
+    abortCompaction() {
+      calls.push(["abortCompaction"]);
+    },
+    setSessionName(name) {
+      calls.push(["sessionName", name]);
+    },
+    dispose() {
+      calls.push(["dispose"]);
+    },
+    ...overrides,
+  };
+  return session;
+}
+
+function makeMinimalPiSdk(calls, options = {}) {
+  const modelRuntime = options.modelRuntime ?? {
+    async getAvailable() {
+      return [];
+    },
+  };
+  const session = options.session ?? makeSdkSession(calls);
 
   return {
     getAgentDir: () => "/agent",
     ModelRuntime: {
-      async create() {
-        return { async getAvailable() { return []; } };
+      async create(runtimeOptions) {
+        calls.push(["modelRuntime", runtimeOptions]);
+        return modelRuntime;
       },
     },
     SessionManager: {
       create(cwd, sessionDir, sessionOptions) {
         calls.push(["sessionCreate", cwd, sessionDir, sessionOptions]);
-        return { getCwd: () => cwd };
+        return {
+          getCwd: () => cwd,
+        };
       },
       open(...args) {
         if (options.openSessionManager) return options.openSessionManager(...args);
@@ -702,9 +1056,13 @@ function makeMinimalPiSdk(calls, options = {}) {
     hasTrustRequiringProjectResources: () => options.hasProjectResources === true,
     DefaultResourceLoader: class {
       constructor(loaderOptions) {
+        this.options = loaderOptions;
+        calls.push(["loader", loaderOptions]);
         options.onLoader?.(loaderOptions);
       }
-      async reload() {}
+      async reload() {
+        calls.push(["reload"]);
+      }
       getExtensions() {
         return options.extensionResult ?? { extensions: [], errors: [] };
       }
@@ -712,7 +1070,18 @@ function makeMinimalPiSdk(calls, options = {}) {
     async createAgentSession(sessionOptions) {
       calls.push(["createAgentSession", sessionOptions]);
       options.onCreateAgentSession?.(sessionOptions);
-      return { session: makeSession() };
+      return { session };
     },
   };
+}
+
+function assertCallOrder(calls, names) {
+  let previous = -1;
+  for (const name of names) {
+    const index = calls.findIndex((call, candidateIndex) =>
+      candidateIndex > previous && call[0] === name
+    );
+    assert.notEqual(index, -1, `Expected ${name} after call index ${previous}`);
+    previous = index;
+  }
 }

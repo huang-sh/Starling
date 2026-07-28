@@ -1,31 +1,41 @@
+import os from "node:os";
+import { filterSlashCommands } from "./commands.js";
 export const STARLING_TUI_WIDE_MIN_COLUMNS = 100;
-/** Render a complete fixed-size frame. The result never contains cursor-control sequences. */
+/**
+ * Render the visible Starling component flow without cursor controls.
+ *
+ * The frame is intentionally intrinsic-height. The terminal painter keeps it
+ * anchored in the normal screen buffer, so a short conversation stays near
+ * the prompt instead of being stretched into a full-screen dashboard.
+ */
 export function renderStarlingFrame(state, viewport) {
-    const width = Math.max(20, Math.floor(viewport.width));
-    const height = Math.max(10, Math.floor(viewport.height));
-    const wide = width >= STARLING_TUI_WIDE_MIN_COLUMNS;
-    const bodyHeight = height - 8;
-    const header = renderHeader(state, width);
-    const body = wide
-        ? renderWideBody(state, width, bodyHeight)
-        : renderNarrowBody(state, width, bodyHeight);
-    const footer = renderFooter(state, width);
-    const lines = [...header, ...body, ...footer].slice(0, height);
-    while (lines.length < height)
-        lines.push({ text: "" });
+    const width = Math.max(1, Math.floor(viewport.width));
+    const height = Math.max(1, Math.floor(viewport.height));
+    const tick = Math.max(0, Math.floor(viewport.tick ?? 0));
+    if (width < 20 || height < 10) {
+        return renderCompactFrame(state, width, height, tick, viewport.color === true);
+    }
+    const footer = renderFooter(state, width, tick);
+    const transcript = state.timeline.length === 0
+        ? renderEmptyWorkspace(state, width)
+        : renderTranscriptLines(state, width);
+    const bodySource = state.timeline.length === 0 && state.activity.length > 0
+        ? [...transcript, { text: "" }, ...renderActivityLines(state.activity, width)]
+        : transcript;
+    const separator = bodySource.length > 0 && footer.length > 0 ? [{ text: "" }] : [];
+    const bodyHeight = Math.max(0, height - footer.length - separator.length);
+    const body = takeViewport(bodySource, bodyHeight, state.scrollOffset);
+    const lines = body.length === 0
+        ? footer.slice(-height)
+        : [...body, ...separator, ...footer].slice(-height);
     return lines
         .map((line) => colorize(fitTerminalLine(line.text, width), line.tone, viewport.color === true))
         .join("\n");
 }
 export function renderTimelineLines(state, width) {
     const contentWidth = Math.max(10, width);
-    if (state.timeline.length === 0) {
-        return [
-            { text: "", tone: "muted" },
-            { text: "  Start a conversation in this workspace.", tone: "muted" },
-            { text: "  Starling keeps reasoning, tools, and approvals in one timeline.", tone: "muted" },
-        ];
-    }
+    if (state.timeline.length === 0)
+        return [];
     const lines = [];
     for (const entry of state.timeline) {
         if (lines.length > 0)
@@ -35,29 +45,97 @@ export function renderTimelineLines(state, width) {
     return lines;
 }
 export function renderActivityLines(activity, width) {
-    const lines = [{ text: " ACTIVITY", tone: "brand" }];
-    if (activity.length === 0) {
-        lines.push({ text: "", tone: "muted" }, { text: " No activity yet", tone: "muted" });
+    const lines = [];
+    if (activity.length === 0)
         return lines;
-    }
-    for (const item of activity.slice(-12)) {
-        const tone = item.tone === "active"
-            ? "active"
-            : item.tone === "success"
-                ? "success"
-                : item.tone === "error"
-                    ? "error"
-                    : "muted";
-        lines.push({ text: ` ${activityGlyph(item)} ${item.label}`, tone });
-        for (const detail of wrapTerminalText(item.detail, Math.max(4, width - 3)).slice(0, 2)) {
-            lines.push({ text: `   ${detail}`, tone: "muted" });
+    for (const item of activity.slice(-8)) {
+        const tone = activityTone(item);
+        const prefix = `  ${activityGlyph(item)} ${item.label} · `;
+        const details = wrapTerminalText(item.detail, Math.max(4, width - visibleWidth(prefix)));
+        lines.push({ text: `${prefix}${details[0] ?? ""}`, tone });
+        for (const detail of details.slice(1, 2)) {
+            lines.push({ text: `${" ".repeat(visibleWidth(prefix))}${detail}`, tone: "muted" });
         }
     }
     return lines;
 }
+/** Render timeline entries and runtime activity in one chronological transcript. */
+export function renderTranscriptLines(state, width) {
+    const contentWidth = Math.max(10, width);
+    if (state.timeline.length === 0) {
+        return renderActivityLines(state.activity, contentWidth);
+    }
+    const records = [
+        ...state.timeline.map((value) => ({ id: value.id, kind: "timeline", value })),
+        ...state.activity.map((value) => ({ id: value.id, kind: "activity", value })),
+    ].sort((left, right) => left.id - right.id);
+    const lines = [];
+    for (const record of records) {
+        if (lines.length > 0)
+            lines.push({ text: "" });
+        if (record.kind === "activity") {
+            lines.push(...renderActivityLines([record.value], contentWidth));
+            continue;
+        }
+        lines.push(...renderTimelineEntry(record.value, contentWidth));
+    }
+    return lines;
+}
+/** Sanitize untrusted content before it reaches a terminal render path. */
+export function sanitizeTerminalText(value, preserveNewlines = true) {
+    let output = "";
+    for (let index = 0; index < value.length;) {
+        const code = value.charCodeAt(index);
+        if (code === 0x1b) {
+            index = skipEscSequence(value, index);
+            continue;
+        }
+        if (code === 0x9b) {
+            index = skipCsi(value, index + 1);
+            continue;
+        }
+        if (code === 0x9d) {
+            index = skipControlString(value, index + 1, true);
+            continue;
+        }
+        if (code === 0x90 || code === 0x98 || code === 0x9e || code === 0x9f) {
+            index = skipControlString(value, index + 1, false);
+            continue;
+        }
+        if (code === 0x0d) {
+            if (preserveNewlines)
+                output += "\n";
+            if (value.charCodeAt(index + 1) === 0x0a)
+                index += 1;
+            index += 1;
+            continue;
+        }
+        if (code === 0x0a) {
+            if (preserveNewlines)
+                output += "\n";
+            index += 1;
+            continue;
+        }
+        if (code === 0x09) {
+            output += "  ";
+            index += 1;
+            continue;
+        }
+        if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) {
+            index += 1;
+            continue;
+        }
+        const point = value.codePointAt(index);
+        if (point === undefined)
+            break;
+        output += String.fromCodePoint(point);
+        index += point > 0xffff ? 2 : 1;
+    }
+    return output.normalize("NFC");
+}
 export function wrapTerminalText(value, width) {
     const limit = Math.max(1, Math.floor(width));
-    const logicalLines = value.replace(/\t/g, "  ").split("\n");
+    const logicalLines = sanitizeTerminalText(value).split("\n");
     const output = [];
     for (const logical of logicalLines) {
         if (!logical) {
@@ -83,165 +161,254 @@ export function wrapTerminalText(value, width) {
 }
 export function fitTerminalLine(value, width) {
     const limit = Math.max(0, Math.floor(width));
-    const clipped = takeTerminalColumns(stripAnsi(value), limit);
+    const clipped = takeTerminalColumns(sanitizeTerminalText(value, false), limit);
     return clipped + " ".repeat(Math.max(0, limit - visibleWidth(clipped)));
 }
 export function visibleWidth(value) {
     let width = 0;
-    for (const character of Array.from(stripAnsi(value)))
-        width += codePointWidth(character.codePointAt(0) ?? 0);
+    for (const cluster of graphemes(stripAnsi(value))) {
+        width += graphemeWidth(cluster);
+    }
     return width;
 }
-function renderHeader(state, width) {
-    const phase = phaseLabel(state);
-    const left = ` STARLING  ${state.workspace}`;
-    const right = `${phase} `;
-    const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
-    const session = state.sessionName || shorten(state.sessionId || "new session", 28);
-    const meta = [
-        ` ${shorten(state.cwd, Math.max(12, Math.floor(width * 0.45)))}`,
-        `session ${session}`,
-        state.model,
-        state.thinking ? `thinking ${state.thinking}` : "",
-    ].filter(Boolean).join("  ·  ");
-    return [
-        { text: left + " ".repeat(gap) + right, tone: "brand" },
-        { text: meta, tone: "muted" },
-        { text: "─".repeat(width), tone: "muted" },
-    ];
-}
-function renderWideBody(state, width, height) {
-    const railWidth = Math.min(36, Math.max(29, Math.floor(width * 0.27)));
-    const timelineWidth = width - railWidth - 1;
-    const timeline = takeViewport(renderTimelineLines(state, Math.max(10, timelineWidth - 2)), height, state.scrollOffset);
-    const activity = takeTail(renderActivityLines(state.activity, railWidth - 1), height);
-    const rows = [];
-    for (let index = 0; index < height; index += 1) {
-        const left = fitTerminalLine(` ${timeline[index]?.text ?? ""}`, timelineWidth);
-        const right = fitTerminalLine(activity[index]?.text ?? "", railWidth);
-        rows.push({ text: `${left}│${right}`, tone: timeline[index]?.tone || activity[index]?.tone });
+function renderCompactFrame(state, width, height, tick, color) {
+    const lines = [];
+    if (height >= 3 && state.timeline.length === 0) {
+        lines.push({ text: "✦ STARLING", tone: "brand" });
     }
-    return rows;
-}
-function renderNarrowBody(state, width, height) {
-    return takeViewport(renderTimelineLines(state, width - 2), height, state.scrollOffset)
-        .map((line) => ({ ...line, text: ` ${line.text}` }));
-}
-function renderFooter(state, width) {
-    const separator = { text: "─".repeat(width), tone: "muted" };
-    if (state.uiPrompt) {
-        const prompt = state.uiPrompt;
-        const label = ` ACTION · ${prompt.title}${prompt.message ? ` — ${prompt.message}` : ""}`;
-        let input;
-        let hints;
-        if (prompt.method === "confirm" || prompt.method === "select") {
-            input = prompt.options.length > 0
-                ? prompt.options.map((option, index) => index === prompt.selected ? `[${option}]` : ` ${option} `).join("  ")
-                : "No options supplied";
-            hints = prompt.method === "confirm"
-                ? "Y allow · N deny · ←/→ choose · Enter confirm · Esc cancel"
-                : "↑/↓ choose · Enter select · Esc cancel";
+    if (state.busy || state.compacting || state.phase === "starting" || state.phase === "error") {
+        lines.push({
+            text: `${state.busy || state.compacting ? spinner(tick) : phaseGlyph(state, tick)} ${state.status}`,
+            tone: state.phase === "error" ? "error" : state.busy || state.compacting ? "active" : "muted",
+        });
+    }
+    if (state.slashMenuOpen) {
+        const commands = filterSlashCommands(state.composer, state.slashCommands);
+        const selected = commands[state.slashSelected];
+        if (selected) {
+            lines.push({ text: `› /${selected.name}  ${selected.description}`, tone: "active" });
         }
         else {
-            input = `› ${lastLogicalLine(prompt.value)}`;
-            hints = prompt.method === "editor"
-                ? "Enter newline · Ctrl+S submit · Esc cancel"
-                : "Enter submit · Esc cancel";
+            lines.push({ text: "× No matching slash commands", tone: "muted" });
         }
+    }
+    lines.push({
+        text: `› ${lastLogicalLine(state.composer)}▏`,
+        tone: state.composer ? "user" : "brand",
+    });
+    return lines.slice(-height)
+        .map((line) => colorize(fitTerminalLine(line.text, width), line.tone, color))
+        .join("\n");
+}
+function renderEmptyWorkspace(state, width) {
+    const panelWidth = Math.min(100, Math.max(4, width - 2));
+    const indent = " ".repeat(Math.max(0, Math.floor((width - panelWidth) / 2)));
+    const innerWidth = Math.max(1, panelWidth - 2);
+    const session = state.sessionName || shorten(state.sessionId || "new session", 28);
+    const model = shorten(state.model || "default model", 30);
+    const thinking = state.thinking ? `thinking ${state.thinking}` : "thinking default";
+    const path = displayPath(state.cwd, Math.max(8, innerWidth - 4));
+    if (panelWidth < 66) {
+        const contentWidth = Math.max(1, innerWidth - 4);
+        const rows = [
+            { text: "✦  STARLING", tone: "brand" },
+            { text: "Pi SDK agent workspace", tone: "assistant" },
+            { text: path, tone: "muted" },
+            { text: `${model} · ${thinking}`, tone: "muted" },
+            { text: `session ${session}`, tone: "muted" },
+            { text: "Enter send · Alt+Enter newline · Esc interrupt", tone: "muted" },
+        ];
         return [
-            separator,
-            { text: label, tone: "active" },
-            { text: ` ${input}`, tone: "user" },
-            { text: ` ${state.status}`, tone: "active" },
-            { text: ` ${hints}`, tone: "muted" },
+            { text: `${indent}╭${"─".repeat(innerWidth)}╮`, tone: "muted" },
+            ...rows.map((row) => ({
+                text: `${indent}│  ${fitTerminalLine(row.text, contentWidth)}  │`,
+                tone: row.tone,
+            })),
+            { text: `${indent}╰${"─".repeat(innerWidth)}╯`, tone: "muted" },
         ];
     }
-    const logicalLines = state.composer.split("\n");
-    const label = state.ready
-        ? ` MESSAGE${logicalLines.length > 1 ? ` · ${logicalLines.length} lines` : ""}`
-        : " MESSAGE · waiting for runtime";
-    const input = state.composer ? `› ${lastLogicalLine(state.composer)}` : "› Ask Starling to work in this workspace…";
-    const queue = state.queueDepth > 0 ? ` · ${state.queueDepth} queued` : "";
-    const status = ` ${phaseGlyph(state)} ${state.status}${queue}`;
-    const shortcuts = state.ready
-        ? " Enter send · Alt+Enter newline · Esc stop · PgUp/PgDn scroll · Ctrl+C exit"
-        : " Ctrl+C exit";
+    const leftWidth = Math.max(24, Math.floor((innerWidth - 1) * 0.48));
+    const rightWidth = innerWidth - leftWidth - 1;
+    const row = (left, right, tone) => ({
+        text: `${indent}│${fitTerminalLine(`  ${left}`, leftWidth)}│${fitTerminalLine(`  ${right}`, rightWidth)}│`,
+        tone,
+    });
     return [
-        separator,
-        { text: label, tone: "brand" },
-        { text: ` ${input}`, tone: state.composer ? "user" : "muted" },
-        { text: status, tone: state.phase === "error" ? "error" : state.busy ? "active" : "success" },
-        { text: shortcuts, tone: "muted" },
+        { text: `${indent}╭${"─".repeat(leftWidth)}┬${"─".repeat(rightWidth)}╮`, tone: "muted" },
+        row("✦  STARLING", "KEYBOARD", "brand"),
+        row("Pi SDK agent workspace", "Enter      send", "assistant"),
+        row(model, "Alt+Enter  newline", "muted"),
+        row(thinking, "Esc        interrupt", "muted"),
+        row(`session ${session}`, "Ctrl+C     exit", "muted"),
+        { text: `${indent}├${"─".repeat(leftWidth)}┴${"─".repeat(rightWidth)}┤`, tone: "muted" },
+        { text: `${indent}│  ${fitTerminalLine(path, Math.max(1, innerWidth - 4))}  │`, tone: "muted" },
+        { text: `${indent}╰${"─".repeat(innerWidth)}╯`, tone: "muted" },
     ];
+}
+function renderFooter(state, width, tick) {
+    if (state.uiPrompt)
+        return renderInteraction(state, width, tick);
+    const rows = [];
+    if (state.compacting) {
+        rows.push({ text: `  ${spinner(tick)} Compacting context…  (esc to cancel)`, tone: "active" });
+    }
+    else if (state.busy) {
+        const queue = state.queueDepth > 0 ? ` · ${state.queueDepth} queued` : "";
+        rows.push({ text: `  ${spinner(tick)} Working…${queue}  (esc to interrupt)`, tone: "active" });
+    }
+    else if (state.phase === "starting") {
+        rows.push({ text: `  ${phaseGlyph(state, tick)} ${state.status}`, tone: "muted" });
+    }
+    else if (state.phase === "error") {
+        rows.push({ text: `  × ${state.status}`, tone: "error" });
+    }
+    else if (state.scrollOffset > 0) {
+        rows.push({ text: `  ↑ ${state.scrollOffset} lines back · PgDn return`, tone: "muted" });
+    }
+    if (state.slashMenuOpen)
+        rows.push(...renderSlashMenu(state, width));
+    const meta = editorMeta(state, width);
+    const editorWidth = Math.max(1, width - 7);
+    const inputLines = wrapTerminalText(state.composer, editorWidth).slice(-5);
+    const visibleInput = inputLines.length > 0 ? inputLines : [""];
+    rows.push({ text: boxRule("╭─ ", `${meta} `, "╮", width), tone: "brand" });
+    for (const line of visibleInput.slice(0, -1)) {
+        rows.push({ text: boxContent(`· ${line}`, width), tone: "user" });
+    }
+    rows.push({
+        text: editorBottomLine(visibleInput.at(-1) || "", width),
+        tone: state.phase === "error" ? "error" : "brand",
+    });
+    return rows;
+}
+function renderSlashMenu(state, width) {
+    const matches = filterSlashCommands(state.composer, state.slashCommands);
+    if (matches.length === 0) {
+        return [
+            { text: "  × No matching slash commands", tone: "muted" },
+            { text: "  Enter show error · Esc close", tone: "muted" },
+        ];
+    }
+    const limit = Math.min(8, matches.length);
+    const selected = Math.min(state.slashSelected, matches.length - 1);
+    const start = Math.max(0, Math.min(selected - Math.floor(limit / 2), matches.length - limit));
+    const visible = matches.slice(start, start + limit);
+    const compact = width < 58;
+    const rows = visible.map((command, index) => {
+        const absoluteIndex = start + index;
+        const marker = absoluteIndex === selected ? "›" : " ";
+        const name = slashDisplayName(command);
+        const source = command.source === "starling" ? "" : ` [${command.source}]`;
+        const text = compact
+            ? `  ${marker} ${name}${source}`
+            : `  ${marker} ${name.padEnd(28)} ${command.description}${source}`;
+        return {
+            text,
+            tone: absoluteIndex === selected ? "active" : "muted",
+        };
+    });
+    if (matches.length > visible.length) {
+        rows.push({
+            text: `  ${start + 1}–${start + visible.length} of ${matches.length} commands`,
+            tone: "muted",
+        });
+    }
+    rows.push({ text: "  ↑/↓ select · Tab/Enter complete · Esc close", tone: "muted" });
+    return rows;
+}
+function slashDisplayName(command) {
+    return `/${command.name}${command.argumentHint ? ` ${command.argumentHint}` : ""}`;
+}
+function renderInteraction(state, width, tick) {
+    const prompt = state.uiPrompt;
+    const title = prompt.method === "confirm" ? "PERMISSION REQUIRED" : prompt.title;
+    const rows = [{ text: boxRule("╭─ ", title, " ╮", width), tone: "active" }];
+    for (const line of wrapTerminalText(prompt.message || prompt.title, Math.max(4, width - 4)).slice(0, 2)) {
+        rows.push({ text: boxContent(line, width), tone: "assistant" });
+    }
+    if (prompt.method === "confirm" || prompt.method === "select") {
+        const choices = prompt.options.length > 0
+            ? prompt.options.map((option, index) => index === prompt.selected ? `[${option}]` : ` ${option} `).join("  ")
+            : "No options supplied";
+        rows.push({ text: boxContent(choices, width), tone: "user" });
+    }
+    else {
+        const value = lastLogicalLine(prompt.value);
+        rows.push({ text: boxContent(`› ${value}`, width), tone: value ? "user" : "muted" });
+    }
+    rows.push({ text: boxRule("╰─ ", `${spinner(tick)} ${state.status}`, " ╯", width), tone: "active" });
+    rows.push({
+        text: prompt.method === "confirm"
+            ? "  Y allow · N deny · ←/→ choose · Enter confirm · Esc deny"
+            : prompt.method === "select"
+                ? "  ↑/↓ choose · Enter select · Esc cancel"
+                : prompt.method === "editor"
+                    ? "  Enter newline · Ctrl+S submit · Esc cancel"
+                    : "  Enter submit · Esc cancel",
+        tone: "muted",
+    });
+    return rows;
 }
 function renderTimelineEntry(entry, width) {
     if (entry.kind === "user") {
-        const suffix = entry.pending ? " · sending" : "";
-        return [
-            { text: ` YOU${suffix}`, tone: "user" },
-            ...wrapTerminalText(entry.text, width - 3).map((text) => ({ text: `   ${text}`, tone: "user" })),
-        ];
+        return wrapTerminalText(entry.text, Math.max(1, width - 4)).map((text) => ({
+            text: `  ${text}`,
+            tone: "userBlock",
+        }));
     }
     if (entry.kind === "assistant") {
-        const output = [{ text: " STARLING", tone: "assistant" }];
+        const output = [];
         if (entry.thinking) {
-            for (const text of wrapTerminalText(entry.thinking, width - 5).slice(0, 4)) {
-                output.push({ text: `   ◌ ${text}`, tone: "muted" });
-            }
-            if (wrapTerminalText(entry.thinking, width - 5).length > 4) {
-                output.push({ text: "   ◌ … thinking collapsed", tone: "muted" });
-            }
+            const thinking = wrapTerminalText(entry.thinking, Math.max(1, width - 4));
+            for (const text of thinking)
+                output.push({ text: `  ${text}`, tone: "thinking" });
         }
         const body = entry.text || (entry.pending ? "…" : "");
-        output.push(...wrapTerminalText(body, width - 3).map((text) => ({ text: `   ${text}`, tone: "assistant" })));
+        if (entry.thinking && body)
+            output.push({ text: "" });
+        if (body) {
+            output.push(...wrapTerminalText(body, Math.max(1, width - 4)).map((text) => ({
+                text: `  ${text}`,
+                tone: "assistant",
+            })));
+        }
         return output;
     }
     if (entry.kind === "tool") {
         const glyph = entry.toolState === "error" ? "×" : entry.toolState === "done" ? "✓" : "◆";
-        const tone = entry.toolState === "error" ? "error" : entry.toolState === "done" ? "success" : "active";
-        const body = wrapTerminalText(entry.text || "Waiting for output…", width - 5).slice(0, 5);
+        const tone = entry.toolState === "error"
+            ? "toolError"
+            : entry.toolState === "done" ? "tool" : "toolActive";
+        const body = wrapTerminalText(entry.text || "Waiting for output…", Math.max(1, width - 6)).slice(0, 6);
         return [
-            { text: ` ${glyph} TOOL · ${entry.toolName || "tool"}`, tone },
-            ...body.map((text) => ({ text: `     ${text}`, tone: "muted" })),
+            { text: `  ${glyph} ${entry.toolName || "tool"}`, tone },
+            ...body.map((text) => ({ text: `    ${text}`, tone })),
         ];
     }
     const tone = entry.kind === "error" ? "error" : "muted";
-    return wrapTerminalText(entry.text, width - 3).map((text, index) => ({
-        text: index === 0 ? ` ${entry.kind === "error" ? "ERROR" : "NOTE"} · ${text}` : `   ${text}`,
+    return wrapTerminalText(entry.text, Math.max(1, width - 4)).map((text, index) => ({
+        text: index === 0 ? `  ${entry.kind === "error" ? "×" : "·"} ${text}` : `    ${text}`,
         tone,
     }));
 }
 function takeViewport(lines, height, scrollOffset) {
+    if (height <= 0)
+        return [];
     const end = Math.max(0, lines.length - Math.max(0, scrollOffset));
     const start = Math.max(0, end - height);
-    const visible = lines.slice(start, end);
-    return [...Array.from({ length: Math.max(0, height - visible.length) }, () => ({ text: "" })), ...visible];
+    return lines.slice(start, end);
 }
-function takeTail(lines, height) {
-    const visible = lines.slice(-height);
-    return [...visible, ...Array.from({ length: Math.max(0, height - visible.length) }, () => ({ text: "" }))];
-}
-function phaseLabel(state) {
-    if (state.uiPrompt)
-        return "INPUT NEEDED";
-    if (state.phase === "working")
-        return "WORKING";
-    if (state.phase === "ready")
-        return "READY";
-    if (state.phase === "error")
-        return "ERROR";
-    if (state.phase === "stopped")
-        return "STOPPED";
-    return "STARTING";
-}
-function phaseGlyph(state) {
+function phaseGlyph(state, tick) {
     if (state.phase === "error")
         return "×";
-    if (state.busy)
-        return "◆";
+    if (state.busy || state.compacting)
+        return spinner(tick);
     if (state.ready)
         return "●";
     return "○";
+}
+function spinner(tick) {
+    return ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][tick % 10];
 }
 function activityGlyph(item) {
     if (item.tone === "error")
@@ -252,27 +419,122 @@ function activityGlyph(item) {
         return "◆";
     return "·";
 }
+function activityTone(item) {
+    if (item.tone === "active")
+        return "active";
+    if (item.tone === "success")
+        return "success";
+    if (item.tone === "error")
+        return "error";
+    return "muted";
+}
+function editorMeta(state, width) {
+    const session = state.sessionName || shorten(state.sessionId || "new session", 20);
+    const pathWidth = Math.max(8, Math.min(34, Math.floor(width * 0.3)));
+    return [
+        shorten(state.model || "default model", 28),
+        state.thinking ? `thinking ${shorten(state.thinking, 12)}` : "",
+        displayPath(state.cwd, pathWidth),
+        session,
+    ].filter(Boolean).join(" · ");
+}
+function editorBottomLine(value, width) {
+    const left = "╰─ › ";
+    const cursor = "▏";
+    const right = "╯";
+    const textWidth = Math.max(0, width - visibleWidth(left) - visibleWidth(cursor) - visibleWidth(right));
+    const text = takeTerminalColumns(sanitizeTerminalText(value, false), textWidth);
+    const fill = Math.max(0, width - visibleWidth(left) - visibleWidth(text) - visibleWidth(cursor) - visibleWidth(right));
+    return `${left}${text}${cursor}${"─".repeat(fill)}${right}`;
+}
+function boxRule(left, label, right, width) {
+    const cleanLabel = shorten(sanitizeTerminalText(label, false), Math.max(1, width - 6));
+    const prefix = `${left}${cleanLabel}`;
+    const fill = Math.max(0, width - visibleWidth(prefix) - visibleWidth(right));
+    return `${prefix}${"─".repeat(fill)}${right}`;
+}
+function boxContent(value, width) {
+    const innerWidth = Math.max(0, width - 4);
+    const content = fitTerminalLine(value, innerWidth);
+    return `│ ${content} │`;
+}
+function displayPath(value, width) {
+    const home = os.homedir();
+    const compact = value === home
+        ? "~"
+        : value.startsWith(`${home}/`) ? `~/${value.slice(home.length + 1)}` : value;
+    return shorten(compact, width);
+}
 function shorten(value, width) {
-    if (visibleWidth(value) <= width)
-        return value;
+    const clean = sanitizeTerminalText(value, false);
+    if (visibleWidth(clean) <= width)
+        return clean;
     if (width <= 1)
         return "…";
-    return `${takeTerminalColumns(value, width - 1)}…`;
+    return `${takeTerminalColumns(clean, width - 1)}…`;
 }
 function lastLogicalLine(value) {
-    return value.split("\n").at(-1) || "";
+    return sanitizeTerminalText(value).split("\n").at(-1) || "";
 }
 function takeTerminalColumns(value, width) {
     let result = "";
     let used = 0;
-    for (const character of Array.from(value)) {
-        const next = codePointWidth(character.codePointAt(0) ?? 0);
+    for (const character of graphemes(value)) {
+        const next = graphemeWidth(character);
         if (used + next > width)
             break;
         result += character;
         used += next;
     }
     return result;
+}
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+function graphemes(value) {
+    return Array.from(graphemeSegmenter.segment(value), (part) => part.segment);
+}
+function graphemeWidth(value) {
+    if (/\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(value)
+        || value.includes("\ufe0f")
+        || value.includes("\u20e3"))
+        return 2;
+    let width = 0;
+    for (const character of Array.from(value)) {
+        width = Math.max(width, codePointWidth(character.codePointAt(0) ?? 0));
+    }
+    return width;
+}
+function skipEscSequence(value, start) {
+    const introducer = value.charCodeAt(start + 1);
+    if (Number.isNaN(introducer))
+        return value.length;
+    if (introducer === 0x5b)
+        return skipCsi(value, start + 2);
+    if (introducer === 0x5d)
+        return skipControlString(value, start + 2, true);
+    if (introducer === 0x50 || introducer === 0x58 || introducer === 0x5e || introducer === 0x5f) {
+        return skipControlString(value, start + 2, false);
+    }
+    return Math.min(value.length, start + 2);
+}
+function skipCsi(value, start) {
+    for (let index = start; index < value.length; index += 1) {
+        const code = value.charCodeAt(index);
+        if (code >= 0x40 && code <= 0x7e)
+            return index + 1;
+    }
+    return value.length;
+}
+function skipControlString(value, start, bellTerminates) {
+    for (let index = start; index < value.length; index += 1) {
+        const code = value.charCodeAt(index);
+        if (bellTerminates && code === 0x07)
+            return index + 1;
+        if (code === 0x9c)
+            return index + 1;
+        if (code === 0x1b && value.charCodeAt(index + 1) === 0x5c)
+            return index + 2;
+    }
+    return value.length;
 }
 function codePointWidth(codePoint) {
     if (codePoint === 0 || codePoint < 32 || (codePoint >= 0x7f && codePoint < 0xa0))
@@ -308,14 +570,24 @@ function colorize(value, tone, enabled) {
         ? "1;36"
         : tone === "muted"
             ? "2;37"
-            : tone === "user"
-                ? "1;34"
-                : tone === "active"
-                    ? "1;33"
-                    : tone === "success"
-                        ? "1;32"
-                        : tone === "error"
-                            ? "1;31"
-                            : "0;37";
+            : tone === "thinking"
+                ? "2;3;37"
+                : tone === "userBlock"
+                    ? "38;5;255;48;5;236"
+                    : tone === "tool"
+                        ? "38;5;252;48;5;237"
+                        : tone === "toolActive"
+                            ? "38;5;229;48;5;237"
+                            : tone === "toolError"
+                                ? "38;5;210;48;5;237"
+                                : tone === "user"
+                                    ? "1;34"
+                                    : tone === "active"
+                                        ? "1;33"
+                                        : tone === "success"
+                                            ? "1;32"
+                                            : tone === "error"
+                                                ? "1;31"
+                                                : "0;37";
     return `\u001b[${code}m${value}\u001b[0m`;
 }

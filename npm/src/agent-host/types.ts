@@ -12,6 +12,10 @@ export interface AgentHostLaunchOptions {
   thinking?: string;
   extensions: string[];
   noExtensions: boolean;
+  /** Pi extension/input surface. JSONL defaults to rpc; bare Starling uses tui. */
+  surface?: "rpc" | "tui";
+  /** Install Starling's inline permission and session-identity guards. */
+  starlingManaged?: boolean;
 }
 
 export interface ExtensionUiResponse extends JsonObject {
@@ -30,9 +34,19 @@ export interface ExtensionUiBindings {
   requestShutdown(): void;
 }
 
+/** A Pi command that can be invoked through the shared prompt surface. */
+export interface AgentSdkCommand {
+  name: string;
+  description?: string;
+  source: "extension" | "prompt" | "skill";
+  sourceInfo: unknown;
+}
+
 export interface AgentSdkSession {
   getState(): JsonObject;
   getMessages(): unknown[];
+  getCommands(): AgentSdkCommand[];
+  getSessionStats(): unknown;
   prompt(
     message: string,
     streamingBehavior: "steer" | "followUp" | undefined,
@@ -44,6 +58,9 @@ export interface AgentSdkSession {
   setThinkingLevel(level: string): void;
   getAvailableModels(): Promise<unknown[]>;
   compact(customInstructions?: string): Promise<unknown>;
+  abortCompaction(): void;
+  setSessionName(name: string): void;
+  reload(): Promise<void>;
   shutdown(): Promise<void>;
 }
 

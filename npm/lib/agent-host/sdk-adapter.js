@@ -33,11 +33,19 @@ export function createPiSdkAdapter(loadSdk = loadPiSdk, environment = process.en
                 authPath: path.join(agentDir, "auth.json"),
                 modelsPath: path.join(agentDir, "models.json"),
             });
+            const inlineExtensions = options.starlingManaged
+                ? [{
+                        name: "starling-managed",
+                        factory: createStarlingManagedExtension(),
+                        hidden: true,
+                    }]
+                : [];
             const resourceLoader = new sdk.DefaultResourceLoader({
                 cwd: effectiveCwd,
                 agentDir,
                 settingsManager,
                 additionalExtensionPaths: options.extensions,
+                extensionFactories: inlineExtensions,
                 noExtensions: options.noExtensions,
             });
             await resourceLoader.reload();
@@ -51,16 +59,16 @@ export function createPiSdkAdapter(loadSdk = loadPiSdk, environment = process.en
                 settingsManager,
                 resourceLoader,
                 model,
-                thinkingLevel: options.thinking,
+                thinkingLevel: validateThinkingLevel(options.thinking),
             });
             let unsubscribe = () => { };
-            const adaptedSession = new PiSdkSessionAdapter(session, modelRuntime, () => unsubscribe());
+            const adaptedSession = new PiSdkSessionAdapter(session, modelRuntime, () => unsubscribe(), options.surface === "tui" ? "interactive" : "rpc");
             try {
                 if (options.name)
                     session.setSessionName?.(options.name);
                 await session.bindExtensions({
                     uiContext: bindings.uiContext,
-                    mode: "rpc",
+                    mode: options.surface ?? "rpc",
                     commandContextActions: {
                         waitForIdle: () => session.waitForIdle?.() ?? Promise.resolve(),
                         newSession: async () => ({ cancelled: true }),
@@ -103,11 +111,14 @@ class PiSdkSessionAdapter {
     session;
     modelRuntime;
     unsubscribe;
+    promptSource;
+    activeCompaction;
     shutdownPromise;
-    constructor(session, modelRuntime, unsubscribe) {
+    constructor(session, modelRuntime, unsubscribe, promptSource) {
         this.session = session;
         this.modelRuntime = modelRuntime;
         this.unsubscribe = unsubscribe;
+        this.promptSource = promptSource;
     }
     getState() {
         const messages = this.getMessages();
@@ -129,11 +140,45 @@ class PiSdkSessionAdapter {
     getMessages() {
         return Array.isArray(this.session.messages) ? this.session.messages : [];
     }
+    getCommands() {
+        const commands = [];
+        for (const command of this.session.extensionRunner?.getRegisteredCommands?.() ?? []) {
+            commands.push({
+                name: command.invocationName,
+                description: command.description,
+                source: "extension",
+                sourceInfo: command.sourceInfo,
+            });
+        }
+        for (const template of this.session.promptTemplates ?? []) {
+            commands.push({
+                name: template.name,
+                description: template.description,
+                source: "prompt",
+                sourceInfo: template.sourceInfo,
+            });
+        }
+        for (const skill of this.session.resourceLoader?.getSkills?.().skills ?? []) {
+            commands.push({
+                name: `skill:${skill.name}`,
+                description: skill.description,
+                source: "skill",
+                sourceInfo: skill.sourceInfo,
+            });
+        }
+        return commands;
+    }
+    getSessionStats() {
+        const getSessionStats = this.session.getSessionStats;
+        if (!getSessionStats)
+            throw new Error("Pi SDK session does not support getSessionStats");
+        return getSessionStats.call(this.session);
+    }
     prompt(message, streamingBehavior, accepted, rejected) {
         let preflightAccepted = false;
         void this.session.prompt(message, {
             streamingBehavior,
-            source: "rpc",
+            source: this.promptSource,
             preflightResult: (success) => {
                 if (!success || preflightAccepted)
                     return;
@@ -163,7 +208,25 @@ class PiSdkSessionAdapter {
         return this.modelRuntime.getAvailable();
     }
     compact(customInstructions) {
-        return this.session.compact(customInstructions);
+        const activeCompaction = this.session.compact(customInstructions);
+        this.activeCompaction = activeCompaction;
+        void activeCompaction.then(() => this.clearActiveCompaction(activeCompaction), () => this.clearActiveCompaction(activeCompaction));
+        return activeCompaction;
+    }
+    abortCompaction() {
+        this.session.abortCompaction();
+    }
+    setSessionName(name) {
+        const setSessionName = this.session.setSessionName;
+        if (!setSessionName)
+            throw new Error("Pi SDK session does not support setSessionName");
+        setSessionName.call(this.session, name);
+    }
+    async reload() {
+        const reload = this.session.reload;
+        if (!reload)
+            throw new Error("Pi SDK session does not support reload");
+        await reload.call(this.session);
     }
     shutdown() {
         this.shutdownPromise ??= this.shutdownOnce();
@@ -171,11 +234,35 @@ class PiSdkSessionAdapter {
     }
     async shutdownOnce() {
         const errors = [];
+        const activeCompaction = this.activeCompaction;
+        try {
+            this.session.abortCompaction();
+        }
+        catch (error) {
+            errors.push(error);
+        }
         try {
             await this.session.abort();
         }
         catch (error) {
             errors.push(error);
+        }
+        // Pi creates the compaction AbortController only after compact()'s initial
+        // await abort(). Cancel again after that await has had a chance to resume.
+        try {
+            this.session.abortCompaction();
+        }
+        catch (error) {
+            errors.push(error);
+        }
+        if (activeCompaction) {
+            try {
+                await activeCompaction;
+            }
+            catch (error) {
+                if (!isCompactionCancellation(error))
+                    errors.push(error);
+            }
         }
         try {
             await this.session.extensionRunner?.emit({ type: "session_shutdown", reason: "quit" });
@@ -199,6 +286,61 @@ class PiSdkSessionAdapter {
             throw new Error(`Pi SDK shutdown failed: ${errors.map(errorMessage).join("; ")}`);
         }
     }
+    clearActiveCompaction(compaction) {
+        if (this.activeCompaction === compaction)
+            this.activeCompaction = undefined;
+    }
+}
+function isCompactionCancellation(error) {
+    return error instanceof Error
+        && (error.name === "AbortError" || error.message === "Compaction cancelled");
+}
+const STARLING_AUTO_ALLOWED_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const STARLING_PERMISSION_TIMEOUT_MS = 30_000;
+const STARLING_TOOL_INPUT_LIMIT = 4_000;
+/** Starling guards installed through Pi's official inline extension factory. */
+function createStarlingManagedExtension() {
+    return (api) => {
+        const blockSessionChange = (_event, context) => {
+            context.ui?.notify?.("Starling has locked this transcript. Exit the workspace before opening or forking another session.", "warning");
+            return { cancel: true };
+        };
+        api.on("session_before_switch", blockSessionChange);
+        api.on("session_before_fork", blockSessionChange);
+        api.on("tool_call", async (event, context) => {
+            const record = isJsonObject(event) ? event : {};
+            const toolName = typeof record.toolName === "string"
+                ? record.toolName.trim().toLowerCase()
+                : "";
+            if (STARLING_AUTO_ALLOWED_TOOLS.has(toolName))
+                return undefined;
+            let approved = false;
+            try {
+                approved = await context.ui?.confirm?.(`Allow Pi tool: ${toolName || "unknown"}?`, printableToolInput(record.input), { timeout: STARLING_PERMISSION_TIMEOUT_MS }) === true;
+            }
+            catch {
+                approved = false;
+            }
+            if (approved)
+                return undefined;
+            return {
+                block: true,
+                reason: `Starling denied Pi tool '${toolName || "unknown"}' because approval was not granted.`,
+            };
+        });
+    };
+}
+function printableToolInput(value) {
+    let text;
+    try {
+        text = JSON.stringify(value ?? {}, null, 2);
+    }
+    catch {
+        text = "<unserializable tool input>";
+    }
+    if (text.length <= STARLING_TOOL_INPUT_LIMIT)
+        return text;
+    return `${text.slice(0, STARLING_TOOL_INPUT_LIMIT)}\n… <tool input truncated by Starling>`;
 }
 async function resolveRequestedModel(modelRuntime, settingsManager, provider, modelId) {
     if (!provider && !modelId)
@@ -267,6 +409,20 @@ async function resolveProjectTrusted(sdk, agentDir, cwd, bindings, environment) 
     if (explicit)
         trustStore.set(cwd, trusted);
     return trusted;
+}
+const VALID_THINKING_LEVELS = new Set([
+    "off",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+]);
+function validateThinkingLevel(level) {
+    if (level === undefined || VALID_THINKING_LEVELS.has(level))
+        return level;
+    throw new Error(`Invalid thinking level "${level}". Valid values: ${[...VALID_THINKING_LEVELS].join(", ")}`);
 }
 function projectTrustPolicy(value) {
     const normalized = value?.trim().toLowerCase() || "ask";

@@ -1,0 +1,380 @@
+import type { ChatSessionRequest } from "../chat/types.js";
+
+export type SlashCommandSource = "starling" | "extension" | "prompt" | "skill";
+
+export interface SlashCommandItem {
+  name: string;
+  description: string;
+  source: SlashCommandSource;
+  argumentHint?: string;
+  allowArgs: boolean;
+}
+
+export type SlashCommandPlan =
+  | { kind: "error"; message: string }
+  | { kind: "local"; command: SlashCommandItem; action: "help" | "models" | "thinking" | "name" | "quit" }
+  | {
+    kind: "request";
+    command: SlashCommandItem;
+    request: ChatSessionRequest;
+    successMessage?: string;
+    refreshMetadata?: boolean;
+    refreshCommands?: boolean;
+  }
+  | { kind: "dynamic"; command: SlashCommandItem; request: ChatSessionRequest };
+
+export const STARLING_SLASH_COMMANDS: readonly SlashCommandItem[] = [
+  {
+    name: "help",
+    description: "Show available slash commands and keyboard shortcuts",
+    source: "starling",
+    allowArgs: false,
+  },
+  {
+    name: "model",
+    description: "List models or switch the active model",
+    source: "starling",
+    argumentHint: "[provider/model]",
+    allowArgs: true,
+  },
+  {
+    name: "thinking",
+    description: "Show or set the thinking level",
+    source: "starling",
+    argumentHint: "[level]",
+    allowArgs: true,
+  },
+  {
+    name: "compact",
+    description: "Compact the current conversation context",
+    source: "starling",
+    argumentHint: "[instructions]",
+    allowArgs: true,
+  },
+  {
+    name: "name",
+    description: "Show or set the current session name",
+    source: "starling",
+    argumentHint: "[session name]",
+    allowArgs: true,
+  },
+  {
+    name: "session",
+    description: "Show current session statistics",
+    source: "starling",
+    allowArgs: false,
+  },
+  {
+    name: "reload",
+    description: "Reload Pi extensions, prompts, skills, and commands",
+    source: "starling",
+    allowArgs: false,
+  },
+  {
+    name: "quit",
+    description: "Close the Starling workspace",
+    source: "starling",
+    allowArgs: false,
+  },
+] as const;
+
+const VALID_SOURCES = new Set<SlashCommandSource>([
+  "starling",
+  "extension",
+  "prompt",
+  "skill",
+]);
+
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+/** Merge Pi-discovered commands behind Starling's actually implemented builtins. */
+export function mergeSlashCommands(dynamic: readonly unknown[]): SlashCommandItem[] {
+  const merged = STARLING_SLASH_COMMANDS.map((command) => ({ ...command }));
+  const names = new Set(merged.map((command) => command.name));
+
+  for (const value of dynamic) {
+    const command = normalizeDynamicCommand(value);
+    if (!command || names.has(command.name)) continue;
+    names.add(command.name);
+    merged.push(command);
+  }
+  return merged;
+}
+
+/** Parse the `{ commands }` envelope returned by ChatSession.get_commands. */
+export function slashCommandsFromResponse(value: unknown): SlashCommandItem[] {
+  if (!isRecord(value) || !Array.isArray(value.commands)) return mergeSlashCommands([]);
+  return mergeSlashCommands(value.commands);
+}
+
+/** The menu is active only while editing the command-name token. */
+export function slashQuery(composer: string): string | null {
+  const match = /^\/([^/\s]*)$/.exec(composer);
+  return match?.[1] ?? null;
+}
+
+export function filterSlashCommands(
+  composer: string,
+  commands: readonly SlashCommandItem[],
+): SlashCommandItem[] {
+  const rawQuery = slashQuery(composer);
+  if (rawQuery === null) return [];
+  const query = rawQuery.toLocaleLowerCase();
+  if (!query) return [...commands];
+
+  const prefix: SlashCommandItem[] = [];
+  const contains: SlashCommandItem[] = [];
+  for (const command of commands) {
+    const name = command.name.toLocaleLowerCase();
+    const description = command.description.toLocaleLowerCase();
+    if (name.startsWith(query)) prefix.push(command);
+    else if (name.includes(query) || description.includes(query)) contains.push(command);
+  }
+  return [...prefix, ...contains];
+}
+
+export function completeSlashCommand(command: SlashCommandItem): string {
+  return `/${command.name}${command.allowArgs ? " " : ""}`;
+}
+
+/** Convert one slash invocation into a local action or transport request. */
+export function planSlashCommand(
+  text: string,
+  catalog: readonly SlashCommandItem[],
+  busy: boolean,
+): SlashCommandPlan {
+  const invocation = parseSlashInvocation(text);
+  if (!invocation) {
+    return { kind: "error", message: "Slash commands must start with / followed by a command name" };
+  }
+  const command = catalog.find((candidate) => candidate.name === invocation.name);
+  if (!command) {
+    return {
+      kind: "error",
+      message: `Unknown command: /${invocation.name}. Type / to see available commands.`,
+    };
+  }
+  if (!command.allowArgs && invocation.args) {
+    return { kind: "error", message: `/${command.name} does not accept arguments` };
+  }
+
+  if (command.source !== "starling") {
+    const request: ChatSessionRequest = { type: "prompt", message: text.trim() };
+    if (busy) request.streamingBehavior = "followUp";
+    return { kind: "dynamic", command, request };
+  }
+  if (busy && (command.name === "compact" || command.name === "reload")) {
+    return {
+      kind: "error",
+      message: `/${command.name} is unavailable while Pi is working; interrupt or wait for the turn to finish`,
+    };
+  }
+
+  switch (command.name) {
+    case "help":
+      return { kind: "local", command, action: "help" };
+    case "model": {
+      if (!invocation.args) return { kind: "local", command, action: "models" };
+      const separator = invocation.args.indexOf("/");
+      if (separator <= 0 || separator === invocation.args.length - 1) {
+        return { kind: "error", message: "Usage: /model <provider/model>" };
+      }
+      return {
+        kind: "request",
+        command,
+        request: {
+          type: "set_model",
+          provider: invocation.args.slice(0, separator),
+          modelId: invocation.args.slice(separator + 1),
+        },
+        successMessage: `Model changed to ${invocation.args}`,
+        refreshMetadata: true,
+      };
+    }
+    case "thinking":
+      if (!invocation.args) return { kind: "local", command, action: "thinking" };
+      if (!THINKING_LEVELS.includes(invocation.args as typeof THINKING_LEVELS[number])) {
+        return {
+          kind: "error",
+          message: `Invalid thinking level. Choose: ${THINKING_LEVELS.join(", ")}`,
+        };
+      }
+      return {
+        kind: "request",
+        command,
+        request: { type: "set_thinking_level", level: invocation.args },
+        successMessage: `Thinking level changed to ${invocation.args}`,
+        refreshMetadata: true,
+      };
+    case "compact":
+      return {
+        kind: "request",
+        command,
+        request: {
+          type: "compact",
+          ...(invocation.args ? { customInstructions: invocation.args } : {}),
+        },
+        successMessage: "Context compaction complete",
+      };
+    case "name":
+      if (!invocation.args) return { kind: "local", command, action: "name" };
+      return {
+        kind: "request",
+        command,
+        request: { type: "set_session_name", name: invocation.args },
+        successMessage: `Session named ${invocation.args}`,
+        refreshMetadata: true,
+      };
+    case "session":
+      return {
+        kind: "request",
+        command,
+        request: { type: "get_session_stats" },
+      };
+    case "reload":
+      return {
+        kind: "request",
+        command,
+        request: { type: "reload" },
+        successMessage: "Pi resources reloaded",
+        refreshMetadata: true,
+        refreshCommands: true,
+      };
+    case "quit":
+      return { kind: "local", command, action: "quit" };
+    default:
+      return { kind: "error", message: `Unsupported Starling command: /${command.name}` };
+  }
+}
+
+export function formatSlashHelp(commands: readonly SlashCommandItem[]): string {
+  const width = commands.reduce((maximum, command) =>
+    Math.max(maximum, commandDisplayName(command).length), 0);
+  const rows = commands.map((command) => {
+    const name = commandDisplayName(command).padEnd(width);
+    const source = command.source === "starling" ? "" : ` [${command.source}]`;
+    return `  ${name}  ${command.description}${source}`;
+  });
+  return [
+    "Available slash commands",
+    ...rows,
+    "",
+    "Keyboard: ↑/↓ select · Tab/Enter complete · Esc close · Alt+Enter newline",
+  ].join("\n");
+}
+
+export function formatThinkingLevels(current: string): string {
+  return [
+    `Thinking level: ${current || "default"}`,
+    `Choose with /thinking <level>: ${THINKING_LEVELS.join(", ")}`,
+  ].join("\n");
+}
+
+export function formatAvailableModels(value: unknown, current: string): string {
+  const models = isRecord(value) && Array.isArray(value.models) ? value.models : [];
+  const names = models.map(modelName).filter((name): name is string => Boolean(name));
+  const unique = [...new Set(names)];
+  const visible = unique.slice(0, 80);
+  const suffix = unique.length > visible.length
+    ? [`  … ${unique.length - visible.length} more models`]
+    : [];
+  return [
+    `Current model: ${current || "default model"}`,
+    "Switch with /model <provider/model>",
+    ...(visible.length > 0 ? visible.map((name) => `  ${name}`) : ["  No configured models found"]),
+    ...suffix,
+  ].join("\n");
+}
+
+export function formatSessionStats(value: unknown): string {
+  if (!isRecord(value)) return "Session statistics are unavailable";
+  const tokens = isRecord(value.tokens) ? value.tokens : {};
+  const context = isRecord(value.contextUsage) ? value.contextUsage : undefined;
+  const rows = [
+    `Session ${text(value.sessionId) || "unknown"}`,
+    text(value.sessionFile) ? `File: ${text(value.sessionFile)}` : undefined,
+    `Messages: ${number(value.totalMessages)} (${number(value.userMessages)} user, ${number(value.assistantMessages)} assistant)`,
+    `Tools: ${number(value.toolCalls)} calls, ${number(value.toolResults)} results`,
+    `Tokens: ${number(tokens.total)} total (${number(tokens.input)} input, ${number(tokens.output)} output, ${number(tokens.cacheRead)} cache read, ${number(tokens.cacheWrite)} cache write)`,
+    `Cost: $${currency(value.cost)}`,
+    context ? formatContextUsage(context) : undefined,
+  ];
+  return rows.filter((row): row is string => row !== undefined).join("\n");
+}
+
+function parseSlashInvocation(text: string): { name: string; args: string } | null {
+  const match = /^\/([^/\s]+)(?:\s+([\s\S]*))?$/.exec(text.trim());
+  if (!match) return null;
+  return { name: match[1], args: (match[2] ?? "").trim() };
+}
+
+function normalizeDynamicCommand(value: unknown): SlashCommandItem | null {
+  if (!isRecord(value)) return null;
+  const name = text(value.name);
+  const rawSource = text(value.source);
+  if (!name || !isCommandName(name) || !VALID_SOURCES.has(rawSource as SlashCommandSource)) {
+    return null;
+  }
+  const source = rawSource as SlashCommandSource;
+  if (source === "starling") return null;
+  const description = text(value.description) || defaultDescription(source);
+  const argumentHint = text(value.argumentHint) || undefined;
+  return {
+    name,
+    description,
+    source,
+    argumentHint,
+    allowArgs: true,
+  };
+}
+
+function isCommandName(value: string): boolean {
+  return !/[\s/\u0000-\u001f\u007f]/.test(value);
+}
+
+function defaultDescription(source: SlashCommandSource): string {
+  if (source === "extension") return "Run Pi extension command";
+  if (source === "prompt") return "Use Pi prompt template";
+  if (source === "skill") return "Use Pi skill";
+  return "Run Starling command";
+}
+
+function commandDisplayName(command: SlashCommandItem): string {
+  return `/${command.name}${command.argumentHint ? ` ${command.argumentHint}` : ""}`;
+}
+
+function modelName(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  const provider = text(value.provider);
+  const id = text(value.id) || text(value.modelId);
+  return provider && id ? `${provider}/${id}` : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function text(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function number(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, value).toLocaleString("en-US")
+    : "0";
+}
+
+function currency(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(4) : "0.0000";
+}
+
+function formatContextUsage(context: Record<string, unknown>): string {
+  const window = number(context.contextWindow);
+  if (typeof context.tokens !== "number" || !Number.isFinite(context.tokens)) {
+    return `Context: unknown / ${window} tokens`;
+  }
+  const percent = typeof context.percent === "number" && Number.isFinite(context.percent)
+    ? ` (${number(context.percent)}%)`
+    : "";
+  return `Context: ${number(context.tokens)} / ${window} tokens${percent}`;
+}

@@ -169,7 +169,10 @@ function detectPackageManager() {
   return userAgent ? "npm" : null;
 }
 
-const binaryPath = findStarlingExecutable();
+const cliArgs = process.argv.slice(2);
+// The interactive workspace is a same-process Node/Pi SDK application. Native
+// Starling is resolved lazily only for explicit CLI subcommands.
+const binaryPath = cliArgs.length === 0 ? null : findStarlingExecutable();
 
 // Use an asynchronous spawn so that Node is able to respond to signals
 // (e.g. Ctrl-C / SIGINT) while the native binary is executing. This allows
@@ -187,11 +190,17 @@ const env = {
   STARLING_MANAGED_PACKAGE_ROOT: realpathSync(path.join(__dirname, "..")),
 };
 
-configureBundledPi(env);
-configurePiSdkHost(env);
+const usesPiSdkHost = cliArgs[0] === "chat";
+if (cliArgs.length > 0 && cliArgs[0] !== "chat") configureBundledPi(env);
+if (usesPiSdkHost) configurePiSdkHost(env);
 
-const cliArgs = process.argv.slice(2);
-if ((cliArgs.length === 0 || cliArgs[0] === "chat") && !hasConfiguredPiSdkHost(env)) {
+if (cliArgs.length === 0 && !nodeSupportsBundledPi(process.versions.node)) {
+  console.error(
+    `Starling's Pi SDK workspace requires Node.js ${MINIMUM_BUNDLED_PI_NODE_VERSION} or newer; current version is ${process.versions.node}.`,
+  );
+  process.exit(1);
+}
+if (usesPiSdkHost && !hasConfiguredPiSdkHost(env)) {
   const versionHint = nodeSupportsBundledPi(process.versions.node)
     ? "Reinstall starling-ai so its SDK Host files are present."
     : `Upgrade Node.js from ${process.versions.node} to ${MINIMUM_BUNDLED_PI_NODE_VERSION} or newer.`;
@@ -201,7 +210,6 @@ if ((cliArgs.length === 0 || cliArgs[0] === "chat") && !hasConfiguredPiSdkHost(e
 if (cliArgs.length === 0) {
   try {
     const exitCode = await runStarlingTui({
-      executable: binaryPath,
       env,
       cwd: process.cwd(),
     });
@@ -326,6 +334,9 @@ function captureStarling(args) {
 }
 
 function spawnStarling(args, stdio) {
+  if (!binaryPath) {
+    throw new Error("Starling native executable is unavailable for this command.");
+  }
   const child = spawn(binaryPath, args, {
     stdio,
     env,

@@ -26,8 +26,8 @@ Starling 用来启动、切换和组织 Claude Code、Codex 与 Pi 会话，支�
 - 在会话文件提供信息时统计 token 使用量。
 - 在 `~/.starling/session-index.json` 维护本地索引，加速项目和 Catalog 视图。
 - 通过 `starling run` 启动 Claude Code、Codex 或 Pi，并把新会话自动归档到指定 Catalog。
-- 不带子命令运行 `starling`，直接进入 Starling 自己的全屏编码工作台，底层使用 Pi SDK。
-- 通过 `starling chat pi` 以机器可读 JSONL 进程托管同一套 SDK session，供编辑器集成使用。
+- 不带子命令运行 `starling`，直接进入 Starling 自己的交互式编码工作台；底层在同一进程中使用 `ChatSession` 与官方 `@earendil-works/pi-coding-agent` SDK。
+- 通过 `starling chat pi` 把同一个与传输无关的 `ChatSession` 引擎独立暴露为机器可读 JSONL 适配器，供编辑器集成使用。
 - 在 `~/.starling/settings` 下管理 Claude、Codex 和 Pi 的模型配置。
 - 通过类似 `top` 的终端视图混合监控最活跃的 20 个 pinned 和 unpinned sessions，区分 `running`、`waiting`、`idle`、`stopped` 状态。
 - 使用 JSON 输出作为终端渲染和 VS Code 扩展共享的数据契约。
@@ -75,7 +75,7 @@ npm 安装时还会把 Starling skill 安装到：
 npm explore -g starling-ai -- npm run install:skill
 ```
 
-npm 版 Starling 需要 Node.js 22.19.0 或更新版本，并固定依赖 `@earendil-works/pi-coding-agent` 0.82.0。只有启动聊天工作台时才会加载 SDK，普通 session 管理命令不会初始化它。`starling run pi` 继续作为启动 Pi 原生 CLI 的兼容入口；裸 `starling` 与 `starling chat pi` 则使用 Starling 自己的 SDK Host。
+npm 版 Starling 需要 Node.js 22.19.0 或更新版本，并固定依赖 `@earendil-works/pi-coding-agent` 0.82.0。裸 `starling` 会在 launcher 进程内通过 `createAgentSession()` 直接创建 Pi，不会启动 native chat supervisor、Pi CLI 或 JSONL 子进程；普通 session 管理命令不会初始化 SDK。`starling run pi` 继续作为启动 Pi 原生 CLI 的独立兼容入口。
 
 ## 快速开始
 
@@ -85,7 +85,9 @@ npm 版 Starling 需要 Node.js 22.19.0 或更新版本，并固定依赖 `@eare
 starling
 ```
 
-这里启动的是 Starling 自己的 TUI，不会启动或复制 Pi 的交互式 TUI。
+这里启动的是 Starling 自己的 TUI，并在同一个 Node 进程中嵌入 Pi。Starling 会直接记录 run，让活动 SDK session 仍可被 `starling top` 看到，并在等待 SDK shutdown 前先恢复终端。界面归 Starling 所有：只参考 OMP 的布局、输入解码、差量绘制和 synchronized-output 机制，不导入、不依赖也不会启动 Pi/OMP TUI。
+
+在编辑器中输入 `/` 会打开斜杠命令菜单。使用上/下方向键选择，Tab 或 Enter 补全，再按一次 Enter 执行。Starling 自己实现了 `/help`、`/model`、`/thinking`、`/compact`、`/name`、`/session`、`/reload` 和 `/quit`；同一个菜单还会通过公开 SDK 动态发现 Pi extension 命令、prompt template 与 `skill:*` 命令。裸 `starling` 会加载已经信任的 Pi 用户级/项目级资源，因此这些动态命令可以正常出现，同时继续启用 Starling 的权限确认与 transcript 锁定保护。
 
 列出最近会话：
 
@@ -141,14 +143,14 @@ starling run -c paper-review pi
 
 普通的 `starling run pi` 不会添加 session selector。Pi 按原生方式创建新 session ID，Starling runtime hook 会在启动后记录实际 ID。
 
-供 VS Code 或其他机器客户端启动 SDK Host：
+供 VS Code 或其他机器客户端启动外部 JSONL 适配器：
 
 ```bash
 starling chat --cwd /path/to/project --title "Review" pi
 starling chat --cwd /path/to/project pi --session /absolute/path/to/session.jsonl
 ```
 
-`starling chat pi` 会启动 Starling 的 Node Host，由它直接从 Pi SDK 导入 `createAgentSession`、`ModelRuntime`、`SessionManager` 和 `DefaultResourceLoader`，不会再执行 `pi --mode rpc`。新 chat 由 `SessionManager.create()` 生成真实 session identity，不会预分配 `--session-id`；恢复时的 `--session` 只接受已有 Pi transcript 的绝对路径。标准输入与 SDK 事件采用换行分隔 JSON。标准输出只包含以 LF 结尾的 JSON 记录：Starling 会在兼容消息前后发送 `starling_started` 与 `starling_exited`，其 `schema` 为 `starling.chat`、`schemaVersion` 为 `1`。诊断日志只写到标准错误。
+`starling chat pi` 是 Starling 的外部 JSONL 适配器；裸 `starling` 不依赖它。两种入口使用同一个 `ChatSession` 模块，并采用 OMP 的同进程 SDK 生命周期：创建 agent session、订阅 SDK 事件、直接提交 prompt，最后取消订阅并 dispose。在 Starling 固定使用的 Node 兼容 Pi SDK 中，这套生命周期会先构造 `ModelRuntime`、`SessionManager`、`SettingsManager` 和 `DefaultResourceLoader`，再调用 `createAgentSession()`。适配器不会执行 `pi --mode rpc`，也不会启动 Pi TUI。新 chat 由 `SessionManager.create()` 生成真实 session identity，不会预分配 `--session-id`；恢复时的 `--session` 只接受已有 Pi transcript 的绝对路径。标准输入与 SDK 事件采用换行分隔 JSON。标准输出只包含以 LF 结尾的 JSON 记录：Starling 会在兼容消息前后发送 `starling_started` 与 `starling_exited`，其 `schema` 为 `starling.chat`、`schemaVersion` 为 `1`。诊断日志只写到标准错误。
 
 chat runtime 会关闭自动发现的用户级和项目级 Pi extensions，只显式加载 Starling 自己的 runtime gate，并自动允许内置只读工具 `read`、`grep`、`find` 和 `ls`。`bash`、`edit`、`write` 以及未知工具会发出 Pi `extension_ui_request` 确认事件，RPC client 必须响应；拒绝、取消、UI 异常或 30 秒内没有响应时都会阻止工具调用。普通交互式 `starling run pi` 的权限行为不变。
 
@@ -406,7 +408,7 @@ starling config unset pi
 starling config show
 ```
 
-npm launcher 会把 Starling SDK Host 暴露为 `STARLING_PI_SDK_HOST`，并把兼容的 Node 可执行文件放在 `STARLING_PI_SDK_NODE`。通过 npm launcher 启动时，Starling 的裸 TUI 和 `starling chat pi` 只使用这对程序，不再解析或执行 Pi CLI；独立分发的 native binary 仍需显式使用 `starling chat pi` 子命令，并提供这两个环境变量。作为独立的兼容路径，launcher 仍可通过公开的 `rpc-entry` export 定位 `cli.js`，并通过 `STARLING_BUNDLED_PI_BIN` 提供给旧的 `starling run pi`。显式设置的 `STARLING_PI_BIN` 或 `STARLING_BUNDLED_PI_BIN` 不会被覆盖。
+对于显式 `starling chat pi`，npm launcher 会把外部 JSONL SDK Host 暴露为 `STARLING_PI_SDK_HOST`，并把兼容的 Node 可执行文件放在 `STARLING_PI_SDK_NODE`；native chat 命令使用这两个变量启动适配器。裸 `starling` 直接导入 SDK 依赖，不配置也不启动该 Host。作为独立的兼容路径，launcher 仍可通过公开的 `rpc-entry` export 定位 `cli.js`，并通过 `STARLING_BUNDLED_PI_BIN` 提供给旧的 `starling run pi`。显式设置的 `STARLING_PI_BIN` 或 `STARLING_BUNDLED_PI_BIN` 不会被覆盖。
 
 Starling 不会移动或重写 Claude Code、Codex 和 Pi 的原始会话文件。它会从 Agent 自己的位置读取数据，例如 `~/.claude/projects`、`~/.codex/sessions` 和 `~/.pi/agent/sessions`，并只把 Starling 元数据和模型配置保存在 Starling 数据目录下。当启动 cwd 已知时，Starling 会遵循 Pi 的 `PI_CODING_AGENT_DIR`、`PI_CODING_AGENT_SESSION_DIR`、全局 `settings.json` 和项目级 `<cwd>/.pi/settings.json` 中的 `sessionDir` 设置。
 

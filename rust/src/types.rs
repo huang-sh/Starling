@@ -92,6 +92,12 @@ pub struct RunRecord {
     pub run_id: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub session_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub title: Option<String>,
     pub provider: RunProvider,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub project_path: Option<String>,

@@ -21,14 +21,16 @@ use crate::core::osc_state::{
     status_from_osc_sequence, upsert_osc_state, OscSessionState,
 };
 use crate::core::process_metrics::{get_process_tree_metrics, reset_cpu_sampler};
-use crate::core::runs::{detect_running_sessions, reconcile_stale_runs, DetectedSession};
+use crate::core::runs::{
+    detect_running_sessions, load_runs, reconcile_stale_runs, DetectedSession, RunStatus,
+};
 use crate::core::session_display::short_session_id;
 use crate::core::session_index::load_session_index;
 use crate::core::session_metrics::{
     clear_session_metrics_cache, get_session_live_metrics, SessionLive,
 };
 use crate::core::store::{list_bookmarks, list_spaces, BookmarkFilter};
-use crate::types::{Bookmark, SessionMeta};
+use crate::types::{Bookmark, RunProvider, RunRecord, SessionMeta};
 
 const WATCH_INTERVAL_MS: u64 = 1000;
 const EDGE_RUNNING_LEASE_MS: u64 = 15 * 1000;
@@ -1689,6 +1691,19 @@ fn build_snapshot(
         }
     }
 
+    // The SDK-backed Node host is tracked as a Starling run, but it is not a
+    // Pi CLI process and therefore is intentionally absent from process-map
+    // detection. Use the run record only as a fallback: detected pids already
+    // attached above remain authoritative.
+    let runs = load_runs();
+    merge_running_run_fallbacks(
+        &mut rows,
+        &runs.runs,
+        &indexed_sessions,
+        include_unpinned,
+        agent_filter,
+    );
+
     sort_and_truncate_rows(&mut rows, session_limit, sort);
 
     Ok(rows)
@@ -1779,6 +1794,222 @@ fn meta_session_key(meta: &SessionMeta) -> String {
     )
 }
 
+/// Merge live Starling run records into a monitor snapshot without consulting
+/// process state or the filesystem. Rows backed by process detection keep their
+/// pid; a run pid is used only when the matching row has none. Missing sessions
+/// are materialized only when unpinned rows are in scope.
+fn merge_running_run_fallbacks(
+    rows: &mut Vec<Row>,
+    runs: &[RunRecord],
+    indexed_sessions: &[SessionMeta],
+    include_unpinned: bool,
+    agent_filter: Option<MonitorAgent>,
+) {
+    let mut running: Vec<&RunRecord> = runs
+        .iter()
+        .filter(|run| run.status == RunStatus::Running)
+        .filter(|run| run.pid.map(|pid| pid > 0).unwrap_or(false))
+        .filter(|run| provider_matches_agent(run_provider_name(run.provider), agent_filter))
+        .collect();
+    // If stale duplicate records exist for one session, prefer the newest pid.
+    running.sort_by(|a, b| {
+        b.started_at
+            .cmp(&a.started_at)
+            .then_with(|| b.run_id.cmp(&a.run_id))
+    });
+
+    let mut merged_run_scopes = HashSet::new();
+    for run in running {
+        let Some(fallback) = row_from_running_run(run, indexed_sessions) else {
+            continue;
+        };
+        if !merged_run_scopes.insert(row_session_key(&fallback)) {
+            continue;
+        }
+        if let Some(existing) = rows
+            .iter_mut()
+            .find(|row| rows_share_session_scope(row, &fallback))
+        {
+            if existing.pid.is_none() {
+                existing.pid = fallback.pid;
+            }
+            if let Some(session_file) = non_empty_run_metadata(&run.session_file) {
+                existing.file_path = Some(session_file);
+            } else if existing.file_path.is_none() {
+                existing.file_path = fallback.file_path;
+            }
+            if let Some(model) = non_empty_run_metadata(&run.model) {
+                existing.model = model;
+            } else if existing.model.trim().is_empty() {
+                existing.model = fallback.model;
+            }
+            if existing.project.trim().is_empty() {
+                existing.project = fallback.project;
+            }
+            if let Some(title) = non_empty_run_metadata(&run.title) {
+                existing.title = title;
+            } else if existing.title.trim().is_empty()
+                || existing.title == "-"
+                || existing.title == "running session"
+            {
+                existing.title = fallback.title;
+            }
+            continue;
+        }
+        if include_unpinned {
+            rows.push(fallback);
+        }
+    }
+}
+
+fn non_empty_run_metadata(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn row_from_running_run(run: &RunRecord, indexed_sessions: &[SessionMeta]) -> Option<Row> {
+    let session_id = run.session_id.as_deref()?.trim();
+    let pid = run.pid.filter(|pid| *pid > 0)?;
+    if session_id.is_empty() {
+        return None;
+    }
+
+    let provider = run_provider_name(run.provider);
+    let run_project = run
+        .project_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
+    let indexed = find_indexed_session_for_run(indexed_sessions, provider, session_id, run_project);
+    let title = run
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            indexed
+                .and_then(|meta| meta.custom_title.as_deref())
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            indexed
+                .map(|meta| meta.first_prompt.trim())
+                .filter(|title| !title.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "running session".to_string());
+    let model = run
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            indexed
+                .map(|meta| meta.model.trim())
+                .filter(|model| !model.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    let file_path = run
+        .session_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            indexed
+                .map(|meta| meta.file_path.trim())
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+        });
+
+    Some(Row {
+        session_id: indexed
+            .map(|meta| meta.session_id.clone())
+            .unwrap_or_else(|| canonical_session_id(session_id, Some(provider))),
+        provider: provider.to_string(),
+        model,
+        project: run_project
+            .map(str::to_string)
+            .or_else(|| indexed.map(|meta| meta.project_path.clone()))
+            .unwrap_or_default(),
+        title,
+        pinned: false,
+        catalog: None,
+        file_path,
+        pid: Some(pid),
+    })
+}
+
+fn find_indexed_session_for_run<'a>(
+    sessions: &'a [SessionMeta],
+    provider: &str,
+    session_id: &str,
+    project_path: Option<&str>,
+) -> Option<&'a SessionMeta> {
+    let canonical = canonical_session_id(session_id, Some(provider));
+    let matches: Vec<&SessionMeta> = sessions
+        .iter()
+        .filter(|meta| meta.provider.eq_ignore_ascii_case(provider))
+        .filter(|meta| canonical_session_id(&meta.session_id, Some(provider)) == canonical)
+        .collect();
+
+    if let Some(project_path) = project_path {
+        return matches
+            .iter()
+            .copied()
+            .find(|meta| same_project_path(&meta.project_path, project_path));
+    }
+
+    (matches.len() == 1).then(|| matches[0])
+}
+
+fn rows_share_session_scope(left: &Row, right: &Row) -> bool {
+    if !left.provider.eq_ignore_ascii_case(&right.provider) {
+        return false;
+    }
+    let provider = left.provider.to_ascii_lowercase();
+    if canonical_session_id(&left.session_id, Some(&provider))
+        != canonical_session_id(&right.session_id, Some(&provider))
+    {
+        return false;
+    }
+    let left_project = left.project.trim();
+    let right_project = right.project.trim();
+    if !left_project.is_empty() && !right_project.is_empty() {
+        return same_project_path(left_project, right_project);
+    }
+    if provider != "pi" {
+        return true;
+    }
+    match (left.file_path.as_deref(), right.file_path.as_deref()) {
+        (Some(left_path), Some(right_path)) if !left_path.is_empty() && !right_path.is_empty() => {
+            left_path == right_path
+        }
+        (None, None) => left_project.is_empty() && right_project.is_empty(),
+        _ => false,
+    }
+}
+
+fn same_project_path(left: &str, right: &str) -> bool {
+    left.trim().trim_end_matches(['/', '\\']) == right.trim().trim_end_matches(['/', '\\'])
+}
+
+fn run_provider_name(provider: RunProvider) -> &'static str {
+    match provider {
+        RunProvider::Claude => "claude",
+        RunProvider::Codex => "codex",
+        RunProvider::Pi => "pi",
+    }
+}
+
 fn select_detected_for_row<'a>(
     row: &Row,
     candidates: &'a [DetectedSession],
@@ -1835,6 +2066,49 @@ mod session_identity_tests {
         }
     }
 
+    fn run_record(
+        run_id: &str,
+        provider: RunProvider,
+        session_id: Option<&str>,
+        project: Option<&str>,
+        pid: Option<u32>,
+        status: RunStatus,
+        started_at: &str,
+    ) -> RunRecord {
+        RunRecord {
+            run_id: run_id.into(),
+            session_id: session_id.map(str::to_string),
+            session_file: None,
+            model: None,
+            title: None,
+            provider,
+            project_path: project.map(str::to_string),
+            catalog_id: None,
+            setting: None,
+            pid,
+            status,
+            exit_code: None,
+            started_at: started_at.into(),
+            ended_at: None,
+            source: crate::types::RunSource::StarlingRun,
+        }
+    }
+
+    fn indexed_session(provider: &str, session_id: &str, project: &str) -> SessionMeta {
+        SessionMeta {
+            session_id: session_id.into(),
+            provider: provider.into(),
+            model: "indexed-model".into(),
+            project_path: project.into(),
+            first_prompt: "indexed prompt".into(),
+            custom_title: Some("indexed title".into()),
+            file_path: format!("/sessions/{session_id}.jsonl"),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            modified_at: "2026-01-01T00:00:01Z".into(),
+            token_usage: None,
+        }
+    }
+
     #[test]
     fn monitor_keeps_same_pi_id_in_distinct_projects() {
         let mut rows = vec![
@@ -1871,6 +2145,297 @@ mod session_identity_tests {
             select_detected_for_row(&row, &candidates).and_then(|entry| entry.pid),
             Some(20)
         );
+    }
+
+    #[test]
+    fn run_fallback_never_overwrites_detected_pid_but_backfills_a_missing_pid() {
+        let mut run = run_record(
+            "run-1",
+            RunProvider::Pi,
+            Some("SharedID"),
+            Some("/work/a"),
+            Some(20),
+            RunStatus::Running,
+            "2026-01-01T00:00:00Z",
+        );
+        run.session_file = Some("/sessions/from-run.jsonl".into());
+        run.model = Some("run-model".into());
+        let mut detected = pi_row("/work/a", "/sessions/a.jsonl");
+        detected.pid = Some(10);
+        let mut rows = vec![detected];
+
+        merge_running_run_fallbacks(&mut rows, &[run.clone()], &[], false, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, Some(10));
+
+        rows[0].pid = None;
+        rows[0].file_path = None;
+        rows[0].model.clear();
+        merge_running_run_fallbacks(&mut rows, &[run], &[], false, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, Some(20));
+        assert_eq!(
+            rows[0].file_path.as_deref(),
+            Some("/sessions/from-run.jsonl")
+        );
+        assert_eq!(rows[0].model, "run-model");
+    }
+
+    #[test]
+    fn run_fallback_adds_unpinned_indexed_row_and_dedupes_newest_run() {
+        let mut older = run_record(
+            "run-old",
+            RunProvider::Codex,
+            Some("codex-session"),
+            Some("/work/project"),
+            Some(10),
+            RunStatus::Running,
+            "2026-01-01T00:00:00Z",
+        );
+        older.model = Some("old-run-model".into());
+        let mut newer = run_record(
+            "run-new",
+            RunProvider::Codex,
+            Some("codex-session"),
+            Some("/work/project"),
+            Some(20),
+            RunStatus::Running,
+            "2026-01-01T00:01:00Z",
+        );
+        newer.model = Some("new-run-model".into());
+        let indexed = indexed_session("codex", "codex-session", "/work/project");
+        let mut rows = Vec::new();
+
+        merge_running_run_fallbacks(&mut rows, &[older, newer], &[indexed], true, None);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, Some(20));
+        assert_eq!(rows[0].model, "new-run-model");
+        assert_eq!(rows[0].title, "indexed title");
+        assert_eq!(
+            rows[0].file_path.as_deref(),
+            Some("/sessions/codex-session.jsonl")
+        );
+        assert!(!rows[0].pinned);
+    }
+
+    #[test]
+    fn run_fallback_prefers_fresh_run_metadata_over_the_index() {
+        let mut run = run_record(
+            "run-sdk",
+            RunProvider::Pi,
+            Some("pi-session"),
+            Some("/work/project"),
+            Some(20),
+            RunStatus::Running,
+            "2026-01-01T00:01:00Z",
+        );
+        run.session_file = Some(" /sessions/from-sdk.jsonl ".into());
+        run.model = Some(" anthropic/sdk-model ".into());
+        run.title = Some(" SDK session title ".into());
+        let indexed = indexed_session("pi", "pi-session", "/work/project");
+
+        let row =
+            row_from_running_run(&run, std::slice::from_ref(&indexed)).expect("running SDK row");
+
+        assert_eq!(row.file_path.as_deref(), Some("/sessions/from-sdk.jsonl"));
+        assert_eq!(row.model, "anthropic/sdk-model");
+        assert_eq!(row.title, "SDK session title");
+
+        let mut rows = vec![Row {
+            session_id: "pi-session".into(),
+            provider: "pi".into(),
+            model: "indexed-model".into(),
+            project: "/work/project".into(),
+            title: "indexed title".into(),
+            pinned: true,
+            catalog: None,
+            file_path: Some("/sessions/pi-session.jsonl".into()),
+            pid: None,
+        }];
+        merge_running_run_fallbacks(
+            &mut rows,
+            std::slice::from_ref(&run),
+            std::slice::from_ref(&indexed),
+            false,
+            None,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].file_path.as_deref(),
+            Some("/sessions/from-sdk.jsonl")
+        );
+        assert_eq!(rows[0].model, "anthropic/sdk-model");
+        assert_eq!(rows[0].title, "SDK session title");
+        assert_eq!(rows[0].pid, Some(20));
+    }
+
+    #[test]
+    fn run_fallback_without_an_index_exposes_transcript_to_live_metrics() {
+        let transcript = std::env::temp_dir().join(format!(
+            "starling-monitor-sdk-run-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &transcript,
+            concat!(
+                "{\"type\":\"session\",\"version\":3,\"id\":\"pi-sdk-session\",",
+                "\"timestamp\":\"2026-01-01T00:00:00Z\",\"cwd\":\"/work/project\"}\n",
+                "{\"type\":\"message\",\"id\":\"a1\",\"parentId\":null,",
+                "\"timestamp\":\"2026-01-01T00:00:01Z\",\"message\":{",
+                "\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],",
+                "\"provider\":\"anthropic\",\"model\":\"transcript-model\",",
+                "\"usage\":{\"input\":1,\"output\":1,\"cacheRead\":0,\"cacheWrite\":0,",
+                "\"totalTokens\":2,\"cost\":{}},\"stopReason\":\"stop\",",
+                "\"timestamp\":1767225601000}}\n"
+            ),
+        )
+        .expect("write Pi transcript");
+        clear_session_metrics_cache();
+
+        let mut run = run_record(
+            "run-sdk",
+            RunProvider::Pi,
+            Some("pi-sdk-session"),
+            Some("/work/project"),
+            Some(20),
+            RunStatus::Running,
+            "2026-01-01T00:00:00Z",
+        );
+        run.session_file = Some(transcript.to_string_lossy().into_owned());
+        run.model = Some("anthropic/sdk-model".into());
+        run.title = Some("SDK session title".into());
+
+        let row = row_from_running_run(&run, &[]).expect("unindexed SDK row");
+        assert_eq!(row.file_path.as_deref(), run.session_file.as_deref());
+        assert_eq!(row.model, "anthropic/sdk-model");
+        assert_eq!(row.title, "SDK session title");
+
+        let live = live_for(&row.file_path);
+        assert_eq!(live.model, "transcript-model");
+        assert_eq!(live.activity_status.as_deref(), Some("idle"));
+        assert_eq!(
+            live.activity_signal.as_deref(),
+            Some("pi_assistant_message")
+        );
+
+        let _ = std::fs::remove_file(&transcript);
+        clear_session_metrics_cache();
+    }
+
+    #[test]
+    fn run_fallback_only_adds_rows_when_unpinned_sessions_are_in_scope() {
+        let run = run_record(
+            "run-1",
+            RunProvider::Claude,
+            Some("claude-session"),
+            Some("/work/project"),
+            Some(10),
+            RunStatus::Running,
+            "2026-01-01T00:00:00Z",
+        );
+        let mut rows = Vec::new();
+
+        merge_running_run_fallbacks(&mut rows, &[run.clone()], &[], false, None);
+        assert!(rows.is_empty());
+
+        merge_running_run_fallbacks(&mut rows, &[run], &[], true, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].provider, "claude");
+    }
+
+    #[test]
+    fn run_fallback_scopes_pi_ids_by_project() {
+        let mut rows = vec![pi_row("/work/a", "/sessions/a.jsonl")];
+        let run = run_record(
+            "run-b",
+            RunProvider::Pi,
+            Some("SharedID"),
+            Some("/work/b"),
+            Some(20),
+            RunStatus::Running,
+            "2026-01-01T00:00:00Z",
+        );
+
+        merge_running_run_fallbacks(&mut rows, &[run], &[], true, None);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].pid, None);
+        assert_eq!(rows[1].project, "/work/b");
+        assert_eq!(rows[1].pid, Some(20));
+    }
+
+    #[test]
+    fn run_fallback_uses_project_when_matching_every_provider() {
+        let mut existing = pi_row("/work/a", "/sessions/a.jsonl");
+        existing.provider = "codex".into();
+        existing.session_id = "codex-session".into();
+        let mut rows = vec![existing];
+        let run = run_record(
+            "run-b",
+            RunProvider::Codex,
+            Some("codex-session"),
+            Some("/work/b"),
+            Some(20),
+            RunStatus::Running,
+            "2026-01-01T00:00:00Z",
+        );
+
+        merge_running_run_fallbacks(&mut rows, &[run], &[], true, None);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].pid, None);
+        assert_eq!(rows[1].project, "/work/b");
+        assert_eq!(rows[1].pid, Some(20));
+    }
+
+    #[test]
+    fn run_fallback_respects_agent_filter_and_ignores_non_live_records() {
+        let runs = vec![
+            run_record(
+                "claude",
+                RunProvider::Claude,
+                Some("claude-session"),
+                Some("/work"),
+                Some(10),
+                RunStatus::Running,
+                "2026-01-01T00:00:00Z",
+            ),
+            run_record(
+                "codex",
+                RunProvider::Codex,
+                Some("codex-session"),
+                Some("/work"),
+                Some(20),
+                RunStatus::Running,
+                "2026-01-01T00:00:00Z",
+            ),
+            run_record(
+                "pi-complete",
+                RunProvider::Pi,
+                Some("pi-session"),
+                Some("/work"),
+                Some(30),
+                RunStatus::Completed,
+                "2026-01-01T00:00:00Z",
+            ),
+            run_record(
+                "pi-no-pid",
+                RunProvider::Pi,
+                Some("pi-session-2"),
+                Some("/work"),
+                None,
+                RunStatus::Running,
+                "2026-01-01T00:00:00Z",
+            ),
+        ];
+        let mut rows = Vec::new();
+
+        merge_running_run_fallbacks(&mut rows, &runs, &[], true, Some(MonitorAgent::Codex));
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].provider, "codex");
+        assert_eq!(rows[0].pid, Some(20));
     }
 }
 

@@ -1,14 +1,14 @@
-import { spawn } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { parseStarlingKeys } from "./input.js";
-import { forceTerminateManagedProcessTree, stopManagedProcessTree, } from "./process.js";
-import { StarlingRpcClient } from "./protocol.js";
+import { createChatSession } from "../chat/session.js";
+import { createManagedRun, } from "../run-lifecycle.js";
+import { normalizeChatRecord, normalizeChatSnapshot, } from "./events.js";
+import { completeSlashCommand, filterSlashCommands, formatAvailableModels, formatSessionStats, formatSlashHelp, formatThinkingLevels, planSlashCommand, } from "./commands.js";
+import { StarlingInputDecoder, parseStarlingKeys } from "./input.js";
 import { renderStarlingFrame, visibleWidth } from "./render.js";
+import { shouldUseSynchronizedOutput, StarlingScreen } from "./screen.js";
 import { createExtensionUiPrompt, createInitialStarlingTuiState, isRecord, reduceStarlingTui, } from "./state.js";
-export { parseStarlingKeys, renderStarlingFrame, createExtensionUiPrompt, createInitialStarlingTuiState, reduceStarlingTui, visibleWidth, };
-export { buildWindowsTaskkillCommand, forceTerminateManagedProcessTree, stopManagedProcessTree, waitForManagedProcessExit, } from "./process.js";
-export { rpcTimeoutForCommand } from "./protocol.js";
+export { completeSlashCommand, createExtensionUiPrompt, createInitialStarlingTuiState, filterSlashCommands, planSlashCommand, parseStarlingKeys, reduceStarlingTui, renderStarlingFrame, shouldUseSynchronizedOutput, StarlingInputDecoder, StarlingScreen, visibleWidth, };
 export class StarlingTuiError extends Error {
     code;
     constructor(code, message) {
@@ -17,11 +17,14 @@ export class StarlingTuiError extends Error {
         this.name = "StarlingTuiError";
     }
 }
-const ENTER_SCREEN = "\u001b[?1049h\u001b[2J\u001b[H\u001b[?25l";
-const LEAVE_SCREEN = "\u001b[?25h\u001b[0m\u001b[?1049l";
+const ENTER_SCREEN = "\u001b[?25l\u001b[?2004h";
+const LEAVE_SCREEN = "\u001b[?2026l\u001b[?2004l\u001b[?7h\u001b[0m\u001b[?25h\r\n";
+const LONE_ESCAPE_TIMEOUT_MS = 75;
+const TERMINAL_FLUSH_TIMEOUT_MS = 250;
 /**
- * Run Starling's original terminal interface against the existing v1 chat
- * protocol. The terminal and child process are always restored in `finally`.
+ * Starling-owned TUI backed directly by one in-process Pi SDK ChatSession.
+ * OMP informs only this frontend's visual hierarchy and differential terminal
+ * painting; no external terminal UI or JSONL transport participates here.
  */
 export async function runStarlingTui(options) {
     const stdin = process.stdin;
@@ -33,61 +36,114 @@ export async function runStarlingTui(options) {
     if (!existsSync(cwd) || !safeIsDirectory(cwd)) {
         throw new StarlingTuiError("INVALID_CWD", `Starling workspace does not exist or is not a directory: ${cwd}`);
     }
-    if (!options.executable.trim()) {
-        throw new StarlingTuiError("SPAWN_FAILED", "Starling native executable path is empty.");
-    }
+    const environment = options.env ?? process.env;
+    const inputDecoder = new StarlingInputDecoder();
+    const screen = new StarlingScreen((value) => stdout.write(value), {
+        synchronizedOutput: shouldUseSynchronizedOutput(environment),
+    });
+    const wasRaw = stdin.isRaw === true;
+    const wasPaused = stdin.isPaused();
+    const previousEncoding = stdin.readableEncoding;
     let state = createInitialStarlingTuiState(cwd);
-    let child;
-    let client;
+    let session;
+    let managedRun;
     let renderTimer;
+    let animationTimer;
+    let escapeTimer;
     let shutdownPromise;
+    let terminalEntered = false;
     let closing = false;
     let abortArmed = false;
     let activeUi;
     const uiQueue = [];
-    const wasRaw = stdin.isRaw;
-    const wasPaused = stdin.isPaused();
-    const previousEncoding = stdin.readableEncoding;
-    let receivedLifecycleExit = false;
     let requestedSignal;
+    let finalExitCode = 1;
+    let startupFailed = false;
+    let terminalFailed = false;
+    let terminalFlushPromise = Promise.resolve();
+    let tick = 0;
+    let completionSettled = false;
     let resolveCompletion = () => { };
     const completion = new Promise((resolvePromise) => {
         resolveCompletion = resolvePromise;
     });
-    const render = () => {
-        renderTimer = undefined;
-        const width = stdout.columns || 80;
-        const height = stdout.rows || 24;
-        stdout.write(`\u001b[H${renderStarlingFrame(state, { width, height, color: true })}`);
-    };
-    const scheduleRender = (immediate = false) => {
-        if (renderTimer)
+    function settleCompletion(code) {
+        if (completionSettled)
             return;
-        if (immediate) {
-            render();
+        completionSettled = true;
+        resolveCompletion(code);
+    }
+    function ensureAnimation() {
+        if (animationTimer || closing || (!state.busy && !state.compacting && !state.uiPrompt))
+            return;
+        animationTimer = setTimeout(() => {
+            animationTimer = undefined;
+            scheduleRender(true);
+        }, 80);
+    }
+    function render(force = false) {
+        renderTimer = undefined;
+        if (!terminalEntered || closing)
+            return;
+        tick += 1;
+        const frame = renderStarlingFrame(state, {
+            width: stdout.columns || 80,
+            height: stdout.rows || 24,
+            color: true,
+            tick,
+        });
+        try {
+            screen.paint(frame, force);
+        }
+        catch (error) {
+            recordTerminalFailure(error);
+            requestExit();
             return;
         }
-        renderTimer = setTimeout(render, 16);
-    };
-    const dispatch = (action) => {
+        ensureAnimation();
+    }
+    function scheduleRender(immediate = false, force = false) {
+        if (!terminalEntered || closing)
+            return;
+        if (immediate) {
+            if (renderTimer)
+                clearTimeout(renderTimer);
+            render(force);
+            return;
+        }
+        if (!renderTimer)
+            renderTimer = setTimeout(() => render(force), 16);
+    }
+    function dispatch(action) {
         state = reduceStarlingTui(state, action);
-        if (!state.busy)
+        if (!state.busy && !state.compacting)
             abortArmed = false;
         scheduleRender();
-    };
-    const sendUiResponse = (request, response) => {
+    }
+    function sendUiResponse(request, response) {
         if (request.timer)
             clearTimeout(request.timer);
-        client?.send({ type: "extension_ui_response", id: request.prompt.id, ...response });
-    };
-    const activateNextUi = () => {
-        if (activeUi || uiQueue.length === 0)
+        sendSessionRequest({
+            ...response,
+            type: "extension_ui_response",
+            id: request.prompt.id,
+        });
+    }
+    function sendSessionRequest(request) {
+        if (!session)
+            return;
+        void session.request(request).catch((error) => {
+            dispatch({ type: "diagnostic", level: "error", message: asError(error).message });
+        });
+    }
+    function activateNextUi() {
+        if (closing || activeUi || uiQueue.length === 0)
             return;
         activeUi = uiQueue.shift();
         if (activeUi)
             dispatch({ type: "ui.open", prompt: activeUi.prompt });
-    };
-    const finishActiveUi = (response) => {
+    }
+    function finishActiveUi(response) {
         if (!activeUi)
             return;
         const completed = activeUi;
@@ -95,116 +151,309 @@ export async function runStarlingTui(options) {
         sendUiResponse(completed, response);
         dispatch({ type: "ui.close" });
         activateNextUi();
-    };
-    const cancelUiById = (id) => {
+    }
+    function cancelUiById(id) {
         if (activeUi?.prompt.id === id) {
             finishActiveUi({ cancelled: true });
             return;
         }
         const index = uiQueue.findIndex((entry) => entry.prompt.id === id);
-        if (index >= 0) {
-            const [removed] = uiQueue.splice(index, 1);
+        if (index < 0)
+            return;
+        const [removed] = uiQueue.splice(index, 1);
+        if (removed)
             sendUiResponse(removed, { cancelled: true });
+    }
+    function dismissUiById(id) {
+        if (activeUi?.prompt.id === id) {
+            if (activeUi.timer)
+                clearTimeout(activeUi.timer);
+            activeUi = undefined;
+            dispatch({ type: "ui.close" });
+            activateNextUi();
+            return;
         }
-    };
-    const cancelAllUi = () => {
+        const index = uiQueue.findIndex((entry) => entry.prompt.id === id);
+        if (index < 0)
+            return;
+        const [removed] = uiQueue.splice(index, 1);
+        if (removed?.timer)
+            clearTimeout(removed.timer);
+    }
+    function cancelAllUi() {
         if (activeUi) {
             sendUiResponse(activeUi, { cancelled: true });
             activeUi = undefined;
         }
-        for (const request of uiQueue.splice(0))
+        for (const request of uiQueue.splice(0)) {
             sendUiResponse(request, { cancelled: true });
+        }
         dispatch({ type: "ui.close" });
-    };
-    const handleUiRequest = (value) => {
-        const method = typeof value.method === "string" ? value.method : "";
-        if (method === "notify") {
-            dispatch({
-                type: "diagnostic",
-                level: value.notifyType === "error" ? "error" : "info",
-                message: String(value.message ?? "Notification"),
-            });
+    }
+    function queueInteractiveUi(request, timeout) {
+        const queued = {
+            prompt: {
+                id: request.id,
+                method: request.method,
+                title: request.title,
+                message: request.message,
+                options: request.options,
+                selected: 0,
+                value: request.initialValue,
+            },
+        };
+        if (typeof timeout === "number" && timeout > 0) {
+            queued.timer = setTimeout(() => cancelUiById(request.id), Math.min(timeout, 10 * 60_000));
+        }
+        if (closing) {
+            sendUiResponse(queued, { cancelled: true });
             return;
         }
-        const prompt = createExtensionUiPrompt(value);
-        if (!prompt) {
-            if (typeof value.id === "string") {
-                client?.send({ type: "extension_ui_response", id: value.id, cancelled: true });
-            }
-            return;
-        }
-        const request = { raw: value, prompt };
-        const timeout = typeof value.timeout === "number" && value.timeout > 0
-            ? Math.min(value.timeout, 10 * 60_000)
-            : undefined;
-        if (timeout)
-            request.timer = setTimeout(() => cancelUiById(prompt.id), timeout);
-        uiQueue.push(request);
+        uiQueue.push(queued);
         activateNextUi();
-    };
-    const handleRecord = (value) => {
-        if (value.type === "starling_started") {
-            dispatch({ type: "starling.started", value });
-            return;
+    }
+    function handleRecord(value) {
+        const timeout = value.type === "extension_ui_request" ? value.timeout : undefined;
+        let handledInteractiveRequest = false;
+        for (const event of normalizeChatRecord(value)) {
+            if (event.type === "interaction.requested") {
+                handledInteractiveRequest = true;
+                queueInteractiveUi(event.request, timeout);
+                continue;
+            }
+            if (event.type === "interaction.dismissed") {
+                dismissUiById(event.id);
+                continue;
+            }
+            dispatch({ type: "chat.event", event });
         }
-        if (value.type === "starling_exited") {
-            receivedLifecycleExit = true;
-            dispatch({ type: "starling.exited", value });
-            return;
+        if (value.type === "extension_ui_request"
+            && !handledInteractiveRequest
+            && typeof value.id === "string"
+            && !["notify", "setStatus", "setTitle", "set_editor_text"].includes(String(value.method))) {
+            sendSessionRequest({
+                type: "extension_ui_response",
+                id: value.id,
+                cancelled: true,
+            });
         }
-        if (value.type === "extension_ui_request") {
-            handleUiRequest(value);
+    }
+    function beginShutdown() {
+        if (!session || shutdownPromise)
             return;
-        }
-        dispatch({ type: "rpc.event", value });
-    };
-    const requestExit = (signal) => {
+        shutdownPromise = session.close();
+        void shutdownPromise.then(async () => {
+            await terminalFlushPromise;
+            finalExitCode = requestedSignal
+                ? signalExitCode(requestedSignal)
+                : startupFailed || terminalFailed ? 1 : 0;
+            state = reduceStarlingTui(state, {
+                type: "chat.event",
+                event: { type: "runtime.exited", success: true, exitCode: 0 },
+            });
+            settleCompletion(finalExitCode);
+        }, async (error) => {
+            await terminalFlushPromise;
+            finalExitCode = requestedSignal ? signalExitCode(requestedSignal) : 1;
+            state = reduceStarlingTui(state, {
+                type: "diagnostic",
+                level: "error",
+                message: asError(error).message,
+            });
+            settleCompletion(finalExitCode);
+        });
+    }
+    function requestExit(signal) {
         if (signal)
             requestedSignal = signal;
-        if (closing) {
-            if (child) {
-                void forceTerminateManagedProcessTree(child).catch((error) => {
-                    dispatch({ type: "diagnostic", level: "error", message: asError(error).message });
-                    resolveCompletion(1);
-                });
-            }
+        if (closing)
             return;
-        }
         closing = true;
         cancelAllUi();
-        if (state.busy)
-            client?.send({ type: "abort" });
-        if (child) {
-            shutdownPromise ??= stopManagedProcessTree(child);
-            void shutdownPromise.catch((error) => {
-                dispatch({ type: "diagnostic", level: "error", message: asError(error).message });
-                resolveCompletion(1);
+        // Return terminal ownership before awaiting SDK teardown. Signal handlers
+        // are removed here, so a second Ctrl-C can still terminate a stuck close.
+        restoreTerminal();
+        beginShutdown();
+        if (!session) {
+            void terminalFlushPromise.then(() => {
+                finalExitCode = signal
+                    ? signalExitCode(signal)
+                    : startupFailed || terminalFailed ? 1 : 0;
+                settleCompletion(finalExitCode);
             });
         }
-    };
-    const submitComposer = () => {
-        if (!client || !state.ready || closing)
+    }
+    async function loadSlashCommands() {
+        if (!session || closing)
+            return;
+        const response = await session.request({ type: "get_commands" });
+        const commands = isRecord(response) && Array.isArray(response.commands)
+            ? response.commands
+            : [];
+        dispatch({ type: "slash.loaded", commands });
+    }
+    async function refreshSessionMetadata() {
+        if (!session || closing)
+            return {};
+        const response = await session.request({ type: "get_state" });
+        const metadata = sessionMetadata(response);
+        dispatch({ type: "session.metadata", ...metadata });
+        if (managedRun) {
+            try {
+                await managedRun.updateSession({
+                    sessionId: metadata.sessionId,
+                    sessionFile: metadata.sessionFile,
+                    model: metadata.model,
+                    title: metadata.sessionName,
+                });
+            }
+            catch (error) {
+                dispatch({
+                    type: "diagnostic",
+                    level: "info",
+                    message: `Session tracking unavailable: ${asError(error).message}`,
+                });
+            }
+        }
+        return metadata;
+    }
+    function submitComposer() {
+        if (!session || !state.ready || closing)
             return;
         const text = state.composer.trim();
         if (!text)
             return;
-        const queued = state.busy;
+        if (text.startsWith("/")) {
+            void executeSlashCommand(text);
+            return;
+        }
+        const queued = state.busy || state.compacting;
         dispatch({ type: "prompt.submitted", text, queued });
-        const body = { message: text };
+        const request = { type: "prompt", message: text };
         if (queued)
-            body.streamingBehavior = "followUp";
-        void client.request("prompt", body).catch((error) => {
+            request.streamingBehavior = "followUp";
+        void session.request(request).catch((error) => {
             dispatch({ type: "prompt.rejected", message: asError(error).message });
         });
-    };
-    const abortTurn = () => {
-        if (!client || !state.busy)
+    }
+    async function executeSlashCommand(text) {
+        if (!session || closing)
             return;
-        client.send({ type: "abort" });
-        dispatch({ type: "diagnostic", level: "info", message: "Abort requested" });
+        const plan = planSlashCommand(text, state.slashCommands, state.busy || state.compacting);
+        if (plan.kind === "error") {
+            dispatch({ type: "command.submitted", name: commandName(text) });
+            dispatch({ type: "command.failed", message: plan.message });
+            return;
+        }
+        dispatch({ type: "command.submitted", name: plan.command.name });
+        if (plan.kind === "local") {
+            await executeLocalSlashCommand(plan);
+            return;
+        }
+        try {
+            const result = await session.request(plan.request);
+            if (plan.kind === "request") {
+                let refreshedMetadata;
+                if (plan.refreshCommands) {
+                    try {
+                        await loadSlashCommands();
+                    }
+                    catch (error) {
+                        dispatch({
+                            type: "diagnostic",
+                            level: "error",
+                            message: `Commands could not be refreshed: ${asError(error).message}`,
+                        });
+                    }
+                }
+                if (plan.refreshMetadata) {
+                    try {
+                        refreshedMetadata = await refreshSessionMetadata();
+                    }
+                    catch (error) {
+                        dispatch({
+                            type: "diagnostic",
+                            level: "error",
+                            message: `Session metadata could not be refreshed: ${asError(error).message}`,
+                        });
+                    }
+                }
+                const message = requestCompletionMessage(plan, result, refreshedMetadata);
+                dispatch({ type: "command.completed", message });
+            }
+            else {
+                // Dynamic extension/template/skill commands own their transcript and
+                // busy lifecycle. Do not create an optimistic user row here because
+                // Pi may handle the command without starting an agent turn.
+                dispatch({ type: "command.completed" });
+            }
+        }
+        catch (error) {
+            dispatch({ type: "command.failed", message: asError(error).message });
+        }
+    }
+    async function executeLocalSlashCommand(plan) {
+        if (!session || closing)
+            return;
+        try {
+            switch (plan.action) {
+                case "help":
+                    dispatch({ type: "command.completed", message: formatSlashHelp(state.slashCommands) });
+                    return;
+                case "models": {
+                    const models = await session.request({ type: "get_available_models" });
+                    dispatch({
+                        type: "command.completed",
+                        message: formatAvailableModels(models, state.model),
+                    });
+                    return;
+                }
+                case "thinking":
+                    dispatch({
+                        type: "command.completed",
+                        message: formatThinkingLevels(state.thinking),
+                    });
+                    return;
+                case "name":
+                    dispatch({
+                        type: "command.completed",
+                        message: state.sessionName
+                            ? `Session name: ${state.sessionName}`
+                            : "This session has no name. Set one with /name <session name>.",
+                    });
+                    return;
+                case "quit":
+                    requestExit();
+                    return;
+            }
+        }
+        catch (error) {
+            dispatch({ type: "command.failed", message: asError(error).message });
+        }
+    }
+    function completeSelectedSlashCommand() {
+        const matches = filterSlashCommands(state.composer, state.slashCommands);
+        const selected = matches[state.slashSelected];
+        if (!selected)
+            return false;
+        dispatch({ type: "composer.set", value: completeSlashCommand(selected) });
+        dispatch({ type: "slash.dismiss" });
+        return true;
+    }
+    function abortTurn() {
+        if (!session || (!state.busy && !state.compacting))
+            return;
+        if (state.compacting) {
+            sendSessionRequest({ type: "abort_compaction" });
+            dispatch({ type: "diagnostic", level: "info", message: "Compaction cancellation requested" });
+        }
+        else {
+            sendSessionRequest({ type: "abort" });
+            dispatch({ type: "diagnostic", level: "info", message: "Abort requested" });
+        }
         abortArmed = true;
-    };
-    const handleModalKey = (key) => {
+    }
+    function handleModalKey(key) {
         const prompt = state.uiPrompt;
         if (!prompt)
             return;
@@ -213,31 +462,36 @@ export async function runStarlingTui(options) {
             return;
         }
         if (prompt.method === "confirm") {
-            if (key.type === "text" && (key.value.toLowerCase() === "y" || key.value.toLowerCase() === "n")) {
+            if (key.type === "text" && ["y", "n"].includes(key.value.toLowerCase())) {
                 finishActiveUi({ confirmed: key.value.toLowerCase() === "y" });
                 return;
             }
-            if (key.type === "left" || key.type === "up")
+            if (key.type === "left" || key.type === "up") {
                 dispatch({ type: "ui.select", delta: -1 });
-            if (key.type === "right" || key.type === "down" || key.type === "tab")
+            }
+            if (key.type === "right" || key.type === "down" || key.type === "tab") {
                 dispatch({ type: "ui.select", delta: 1 });
+            }
             if (key.type === "enter")
                 finishActiveUi({ confirmed: prompt.selected === 1 });
             return;
         }
         if (prompt.method === "select") {
-            if (key.type === "up" || key.type === "left")
+            if (key.type === "up" || key.type === "left") {
                 dispatch({ type: "ui.select", delta: -1 });
-            if (key.type === "down" || key.type === "right" || key.type === "tab")
+            }
+            if (key.type === "down" || key.type === "right" || key.type === "tab") {
                 dispatch({ type: "ui.select", delta: 1 });
+            }
             if (key.type === "enter") {
                 const value = prompt.options[prompt.selected];
                 finishActiveUi(value === undefined ? { cancelled: true } : { value });
             }
             return;
         }
-        if (key.type === "text")
+        if (key.type === "text" || key.type === "paste") {
             dispatch({ type: "ui.append", value: key.value });
+        }
         if (key.type === "backspace")
             dispatch({ type: "ui.backspace" });
         if (key.type === "ctrl-u")
@@ -248,20 +502,51 @@ export async function runStarlingTui(options) {
         else if ((prompt.method === "input" && key.type === "enter") || key.type === "ctrl-s") {
             finishActiveUi({ value: prompt.value });
         }
-    };
-    const handleKey = (key) => {
+    }
+    function handleKey(key) {
         if (state.uiPrompt) {
             handleModalKey(key);
             return;
         }
+        if (state.slashMenuOpen) {
+            if (key.type === "escape") {
+                dispatch({ type: "slash.dismiss" });
+                return;
+            }
+            if (key.type === "up") {
+                dispatch({ type: "slash.select", delta: -1 });
+                return;
+            }
+            if (key.type === "down") {
+                dispatch({ type: "slash.select", delta: 1 });
+                return;
+            }
+            if (key.type === "tab" || key.type === "enter") {
+                if (!completeSelectedSlashCommand() && key.type === "enter")
+                    submitComposer();
+                return;
+            }
+            if (key.type === "backspace") {
+                dispatch({ type: "composer.backspace" });
+                return;
+            }
+            if (key.type === "ctrl-u") {
+                dispatch({ type: "composer.set", value: "" });
+                return;
+            }
+            if (key.type === "text" || key.type === "paste") {
+                dispatch({ type: "composer.append", value: key.value });
+                return;
+            }
+        }
         if (key.type === "ctrl-c") {
-            if (state.busy && !abortArmed)
+            if ((state.busy || state.compacting) && !abortArmed)
                 abortTurn();
             else
                 requestExit();
             return;
         }
-        if (key.type === "ctrl-d" && !state.busy && !state.composer) {
+        if (key.type === "ctrl-d" && !state.busy && !state.compacting && !state.composer) {
             requestExit();
             return;
         }
@@ -277,140 +562,290 @@ export async function runStarlingTui(options) {
             dispatch({ type: "composer.backspace" });
         if (key.type === "ctrl-u")
             dispatch({ type: "composer.set", value: "" });
-        if (key.type === "text")
+        if (key.type === "text" || key.type === "paste") {
             dispatch({ type: "composer.append", value: key.value });
+        }
+        const page = Math.max(3, Math.floor((stdout.rows || 24) / 2));
         if (key.type === "page-up")
-            dispatch({ type: "scroll", delta: Math.max(3, Math.floor((stdout.rows || 24) / 2)) });
+            dispatch({ type: "scroll", delta: page });
         if (key.type === "page-down")
-            dispatch({ type: "scroll", delta: -Math.max(3, Math.floor((stdout.rows || 24) / 2)) });
+            dispatch({ type: "scroll", delta: -page });
         if (key.type === "up" && !state.composer)
             dispatch({ type: "scroll", delta: 1 });
         if (key.type === "down" && !state.composer)
             dispatch({ type: "scroll", delta: -1 });
-    };
-    const onInput = (chunk) => {
-        for (const key of parseStarlingKeys(chunk.toString()))
+    }
+    function deliverInput(chunk) {
+        if (escapeTimer) {
+            clearTimeout(escapeTimer);
+            escapeTimer = undefined;
+        }
+        for (const key of inputDecoder.push(chunk.toString()))
             handleKey(key);
-    };
-    const onResize = () => scheduleRender(true);
-    const onSigint = () => requestExit("SIGINT");
-    const onSigterm = () => requestExit("SIGTERM");
-    const onSighup = () => requestExit("SIGHUP");
-    try {
+        if (inputDecoder.hasPendingEscape) {
+            escapeTimer = setTimeout(() => {
+                escapeTimer = undefined;
+                for (const key of inputDecoder.flushPendingEscape())
+                    handleKey(key);
+            }, LONE_ESCAPE_TIMEOUT_MS);
+        }
+    }
+    function onResize() {
+        scheduleRender(true, true);
+    }
+    function onInputEnd() {
+        requestExit();
+    }
+    function onSigint() {
+        requestExit("SIGINT");
+    }
+    function onSigterm() {
+        requestExit("SIGTERM");
+    }
+    function onSighup() {
+        requestExit("SIGHUP");
+    }
+    function onTerminalError(error) {
+        recordTerminalFailure(error);
+        requestExit();
+    }
+    function recordTerminalFailure(_error) {
+        terminalFailed = true;
+    }
+    function enterTerminal() {
+        // A dead remote terminal commonly reports EIO/EPIPE asynchronously through
+        // the stream's `error` event, outside this async function's try/catch.
+        stdin.on("error", onTerminalError);
+        stdout.on("error", onTerminalError);
         stdout.write(ENTER_SCREEN);
+        terminalEntered = true;
         stdin.setEncoding("utf8");
         stdin.setRawMode(true);
         stdin.resume();
-        stdin.on("data", onInput);
+        stdin.on("data", deliverInput);
+        stdin.once("end", onInputEnd);
         stdout.on("resize", onResize);
         process.once("SIGINT", onSigint);
         process.once("SIGTERM", onSigterm);
         process.once("SIGHUP", onSighup);
-        scheduleRender(true);
-        child = spawn(options.executable, ["chat", "--cwd", cwd, "pi"], {
-            cwd,
-            env: options.env ?? process.env,
-            stdio: "pipe",
-            // POSIX process groups let escalation kill both the Rust supervisor and
-            // its Node SDK Host. Windows uses taskkill /T instead.
-            detached: process.platform !== "win32",
-            windowsHide: true,
-            shell: false,
-        });
-        client = new StarlingRpcClient(child, {
-            onRecord: handleRecord,
-            onProtocolError: (error) => dispatch({ type: "diagnostic", level: "error", message: error.message }),
-        });
-        child.stderr.on("data", (chunk) => {
-            const message = chunk.toString("utf8").trim();
-            if (message)
+    }
+    function restoreTerminal() {
+        if (!terminalEntered)
+            return;
+        // Mark ownership as returned first so a failed/dead TTY cannot cause a
+        // second cleanup attempt or prevent SDK/run teardown from continuing.
+        terminalEntered = false;
+        try {
+            stdin.off("data", deliverInput);
+            stdin.off("end", onInputEnd);
+            stdout.off("resize", onResize);
+            process.off("SIGINT", onSigint);
+            process.off("SIGTERM", onSigterm);
+            process.off("SIGHUP", onSighup);
+        }
+        catch {
+            // Event-target cleanup is best effort when the terminal has disappeared.
+        }
+        try {
+            stdin.setRawMode(wasRaw);
+        }
+        catch (error) {
+            recordTerminalFailure(error);
+            // Remote disconnects can invalidate the tty before SIGHUP is delivered.
+        }
+        try {
+            if (wasPaused)
+                stdin.pause();
+        }
+        catch (error) {
+            recordTerminalFailure(error);
+            // Best effort only.
+        }
+        try {
+            if (previousEncoding)
+                stdin.setEncoding(previousEncoding);
+            else
+                stdin.setEncoding(null);
+        }
+        catch (error) {
+            recordTerminalFailure(error);
+            // Best effort only.
+        }
+        terminalFlushPromise = queueTerminalLeave(stdout, recordTerminalFailure);
+        screen.reset();
+    }
+    try {
+        enterTerminal();
+        scheduleRender(true, true);
+        if (closing)
+            return await completion;
+        try {
+            managedRun = await (options.createRun ?? createManagedRun)({
+                cwd,
+                pid: process.pid,
+                environment,
+            });
+        }
+        catch (error) {
+            dispatch({
+                type: "diagnostic",
+                level: "info",
+                message: `Run tracking unavailable: ${asError(error).message}`,
+            });
+        }
+        if (closing)
+            return await completion;
+        const createSession = options.createSession ?? createChatSession;
+        session = createSession({
+            launch: {
+                cwd,
+                extensions: [],
+                // Pi's extension commands, prompt templates, and skills are part of
+                // the SDK command surface. Project trust and Starling's managed gate
+                // still control what project resources and tools may execute.
+                noExtensions: false,
+                surface: "tui",
+                starlingManaged: true,
+            },
+            environment,
+            onRecord: (value) => {
+                if (isRecord(value))
+                    handleRecord(value);
+            },
+            onShutdownRequested: requestExit,
+            diagnostic: (message) => {
                 dispatch({ type: "diagnostic", level: "info", message });
+            },
         });
-        child.once("close", (code, signal) => {
-            cancelAllUi();
-            if (!receivedLifecycleExit) {
-                dispatch({
-                    type: "starling.exited",
-                    value: { success: code === 0, exitCode: code, signal },
-                });
-            }
-            resolveCompletion(code ?? signalExitCode(signal));
+        dispatch({
+            type: "chat.event",
+            event: { type: "runtime.started", cwd, runId: managedRun?.runId },
         });
         if (closing) {
-            shutdownPromise ??= stopManagedProcessTree(child);
+            beginShutdown();
+            return await completion;
         }
-        await waitForSpawn(child);
-        const [stateResponse, messagesResponse] = await Promise.all([
-            // SDK startup can pause for the project-trust confirmation delivered
-            // over this same stream. Do not let the ordinary query deadline close
-            // the UI while the user is still making that decision.
-            client.request("get_state", {}, { timeoutMs: null }),
-            client.request("get_messages", {}, { timeoutMs: null }),
-        ]);
-        const sessionState = isRecord(stateResponse.data) ? stateResponse.data : {};
-        const messagesData = isRecord(messagesResponse.data) ? messagesResponse.data : {};
-        dispatch({
-            type: "session.hydrated",
-            state: sessionState,
-            messages: Array.isArray(messagesData.messages) ? messagesData.messages : [],
+        const commandsPromise = session.request({ type: "get_commands" }).catch((error) => {
+            dispatch({
+                type: "diagnostic",
+                level: "error",
+                message: `Slash commands could not be loaded: ${asError(error).message}`,
+            });
+            return { commands: [] };
         });
+        const [stateResponse, messagesResponse, commandsResponse] = await Promise.all([
+            session.request({ type: "get_state" }),
+            session.request({ type: "get_messages" }),
+            commandsPromise,
+        ]);
+        const sessionState = isRecord(stateResponse) ? stateResponse : {};
+        const messagesData = isRecord(messagesResponse) ? messagesResponse : {};
+        const snapshot = normalizeChatSnapshot(sessionState, Array.isArray(messagesData.messages) ? messagesData.messages : []);
+        dispatch({
+            type: "chat.event",
+            event: {
+                type: "session.snapshot",
+                snapshot,
+            },
+        });
+        const slashCommands = isRecord(commandsResponse) && Array.isArray(commandsResponse.commands)
+            ? commandsResponse.commands
+            : [];
+        dispatch({ type: "slash.loaded", commands: slashCommands });
+        if (managedRun
+            && (snapshot.sessionId || snapshot.sessionFile || snapshot.model || snapshot.sessionName)) {
+            try {
+                await managedRun.updateSession({
+                    sessionId: snapshot.sessionId,
+                    sessionFile: snapshot.sessionFile,
+                    model: snapshot.model,
+                    title: snapshot.sessionName,
+                });
+            }
+            catch (error) {
+                dispatch({
+                    type: "diagnostic",
+                    level: "info",
+                    message: `Session tracking unavailable: ${asError(error).message}`,
+                });
+            }
+        }
         const result = await completion;
-        if (requestedSignal)
-            return signalExitCode(requestedSignal);
-        return result;
+        finalExitCode = requestedSignal ? signalExitCode(requestedSignal) : result;
+        return finalExitCode;
     }
     catch (error) {
+        if (closing) {
+            finalExitCode = await completion;
+            return finalExitCode;
+        }
+        startupFailed = true;
+        finalExitCode = requestedSignal ? signalExitCode(requestedSignal) : 1;
         requestExit();
         if (error instanceof StarlingTuiError)
             throw error;
-        throw new StarlingTuiError("SPAWN_FAILED", asError(error).message);
+        throw new StarlingTuiError("SESSION_FAILED", asError(error).message);
     }
     finally {
+        closing = true;
         cancelAllUi();
         if (renderTimer)
             clearTimeout(renderTimer);
+        if (animationTimer)
+            clearTimeout(animationTimer);
+        if (escapeTimer)
+            clearTimeout(escapeTimer);
+        restoreTerminal();
         let cleanupError;
         try {
-            if (child && child.exitCode === null && child.signalCode === null) {
-                shutdownPromise ??= stopManagedProcessTree(child);
-            }
+            if (session)
+                shutdownPromise ??= session.close();
             await shutdownPromise;
         }
         catch (error) {
             cleanupError = asError(error);
         }
-        finally {
-            client?.close();
-            stdin.off("data", onInput);
-            stdout.off("resize", onResize);
-            process.off("SIGINT", onSigint);
-            process.off("SIGTERM", onSigterm);
-            process.off("SIGHUP", onSighup);
-            stdin.setRawMode(wasRaw === true);
-            if (wasPaused)
-                stdin.pause();
-            if (previousEncoding)
-                stdin.setEncoding(previousEncoding);
-            else
-                stdin.setEncoding(null);
-            stdout.write(LEAVE_SCREEN);
+        await terminalFlushPromise;
+        stdin.off("error", onTerminalError);
+        stdout.off("error", onTerminalError);
+        if ((cleanupError || terminalFailed) && !requestedSignal)
+            finalExitCode = 1;
+        if (managedRun) {
+            try {
+                await managedRun.finish({ exitCode: finalExitCode });
+            }
+            catch (error) {
+                process.stderr.write(`Starling could not finalize run tracking: ${asError(error).message}\n`);
+            }
         }
         if (cleanupError)
             throw cleanupError;
     }
 }
-function waitForSpawn(child) {
-    return new Promise((resolvePromise, reject) => {
-        const onSpawn = () => {
-            child.off("error", onError);
+function queueTerminalLeave(stdout, onError) {
+    return new Promise((resolvePromise) => {
+        let settled = false;
+        let timer;
+        const settle = () => {
+            if (settled)
+                return;
+            settled = true;
+            if (timer)
+                clearTimeout(timer);
             resolvePromise();
         };
-        const onError = (error) => {
-            child.off("spawn", onSpawn);
-            reject(error);
-        };
-        child.once("spawn", onSpawn);
-        child.once("error", onError);
+        timer = setTimeout(settle, TERMINAL_FLUSH_TIMEOUT_MS);
+        try {
+            stdout.write(LEAVE_SCREEN, (error) => {
+                if (error)
+                    onError(error);
+                settle();
+            });
+        }
+        catch (error) {
+            onError(error);
+            settle();
+        }
     });
 }
 function signalExitCode(signal) {
@@ -423,9 +858,9 @@ function signalExitCode(signal) {
     };
     return 128 + (numbers[signal] ?? 1);
 }
-function safeIsDirectory(path) {
+function safeIsDirectory(value) {
     try {
-        return statSync(path).isDirectory();
+        return statSync(value).isDirectory();
     }
     catch {
         return false;
@@ -433,4 +868,44 @@ function safeIsDirectory(path) {
 }
 function asError(value) {
     return value instanceof Error ? value : new Error(String(value));
+}
+function requestCompletionMessage(plan, result, metadata) {
+    if (plan.command.name === "session")
+        return formatSessionStats(result);
+    if (plan.command.name === "thinking") {
+        return metadata?.thinking
+            ? `Thinking level changed to ${metadata.thinking}`
+            : "Thinking level updated";
+    }
+    if (plan.command.name === "model") {
+        return metadata?.model ? `Model changed to ${metadata.model}` : "Model updated";
+    }
+    if (plan.command.name === "name") {
+        return metadata?.sessionName
+            ? `Session named ${metadata.sessionName}`
+            : "Session name updated";
+    }
+    return plan.successMessage;
+}
+function commandName(value) {
+    const match = /^\/([^\s/]*)/.exec(value.trim());
+    return match?.[1] || "command";
+}
+function sessionMetadata(value) {
+    if (!isRecord(value))
+        return {};
+    const model = isRecord(value.model) ? value.model : {};
+    const provider = optionalText(model.provider);
+    const modelId = optionalText(model.id) || optionalText(model.modelId);
+    return {
+        model: [provider, modelId].filter(Boolean).join("/") || undefined,
+        thinking: optionalText(value.thinkingLevel) || optionalText(value.thinking),
+        sessionName: optionalText(value.sessionName),
+        sessionId: optionalText(value.sessionId),
+        sessionFile: optionalText(value.sessionFile),
+    };
+}
+function optionalText(value) {
+    const text = typeof value === "string" ? value.trim() : "";
+    return text || undefined;
 }

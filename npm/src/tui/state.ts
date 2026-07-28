@@ -1,8 +1,26 @@
 import { basename } from "node:path";
+import {
+  filterSlashCommands,
+  mergeSlashCommands,
+  slashQuery,
+  type SlashCommandItem,
+} from "./commands.js";
+import {
+  type ChatActivityTone,
+  type ChatEvent,
+  type ChatInteractionMethod,
+  type ChatInteractionRequest,
+  type ChatSessionSnapshot,
+  type ChatToolState,
+  type ChatTranscriptItem,
+  isRecord,
+  normalizeExtensionUiRequest,
+  printable,
+} from "./events.js";
 
 export type StarlingTuiPhase = "starting" | "ready" | "working" | "stopped" | "error";
 export type TimelineKind = "user" | "assistant" | "tool" | "system" | "error";
-export type ToolState = "running" | "done" | "error";
+export type ToolState = ChatToolState;
 
 export interface TimelineEntry {
   id: number;
@@ -19,10 +37,10 @@ export interface ActivityEntry {
   id: number;
   label: string;
   detail: string;
-  tone: "neutral" | "active" | "success" | "error";
+  tone: ChatActivityTone;
 }
 
-export type ExtensionUiMethod = "confirm" | "select" | "input" | "editor";
+export type ExtensionUiMethod = ChatInteractionMethod;
 
 export interface ExtensionUiPrompt {
   id: string;
@@ -41,6 +59,7 @@ export interface StarlingTuiState {
   status: string;
   ready: boolean;
   busy: boolean;
+  compacting: boolean;
   runId?: string;
   sessionId?: string;
   sessionName?: string;
@@ -49,6 +68,9 @@ export interface StarlingTuiState {
   thinking: string;
   queueDepth: number;
   composer: string;
+  slashCommands: SlashCommandItem[];
+  slashMenuOpen: boolean;
+  slashSelected: number;
   scrollOffset: number;
   timeline: TimelineEntry[];
   activity: ActivityEntry[];
@@ -56,16 +78,31 @@ export interface StarlingTuiState {
   nextId: number;
 }
 
+/**
+ * The reducer accepts only Starling semantic events and local view actions.
+ * Raw official Pi/Starling records must pass through normalizeChatRecord() first.
+ */
 export type StarlingTuiAction =
-  | { type: "starling.started"; value: Record<string, unknown> }
-  | { type: "starling.exited"; value: Record<string, unknown> }
-  | { type: "session.hydrated"; state: Record<string, unknown>; messages: unknown[] }
-  | { type: "rpc.event"; value: Record<string, unknown> }
+  | { type: "chat.event"; event: ChatEvent }
   | { type: "composer.set"; value: string }
   | { type: "composer.append"; value: string }
   | { type: "composer.backspace" }
+  | { type: "slash.loaded"; commands: readonly unknown[] }
+  | { type: "slash.select"; delta: number }
+  | { type: "slash.dismiss" }
   | { type: "prompt.submitted"; text: string; queued: boolean }
   | { type: "prompt.rejected"; message: string }
+  | { type: "command.submitted"; name: string }
+  | { type: "command.completed"; message?: string }
+  | { type: "command.failed"; message: string }
+  | {
+    type: "session.metadata";
+    model?: string;
+    thinking?: string;
+    sessionName?: string;
+    sessionId?: string;
+    sessionFile?: string;
+  }
   | { type: "scroll"; delta: number }
   | { type: "diagnostic"; level: "info" | "error"; message: string }
   | { type: "ui.open"; prompt: ExtensionUiPrompt }
@@ -87,10 +124,14 @@ export function createInitialStarlingTuiState(cwd: string): StarlingTuiState {
     status: "Starting agent runtime…",
     ready: false,
     busy: false,
+    compacting: false,
     model: "default model",
     thinking: "",
     queueDepth: 0,
     composer: "",
+    slashCommands: mergeSlashCommands([]),
+    slashMenuOpen: false,
+    slashSelected: 0,
     scrollOffset: 0,
     timeline: [],
     activity: [],
@@ -103,71 +144,42 @@ export function reduceStarlingTui(
   action: StarlingTuiAction,
 ): StarlingTuiState {
   switch (action.type) {
-    case "starling.started": {
-      const cwd = textField(action.value.cwd) || state.cwd;
-      const next = {
-        ...state,
-        cwd,
-        workspace: basename(cwd) || cwd,
-        runId: textField(action.value.runId) || state.runId,
-        sessionId: textField(action.value.sessionId) || state.sessionId,
-        status: "Loading session…",
-      };
-      return addActivity(next, "runtime", "Starling agent host started", "active");
-    }
-    case "starling.exited": {
-      const success = action.value.success === true;
-      const exitCode = numberField(action.value.exitCode);
-      const label = success ? "Session closed" : `Agent stopped (${exitCode ?? "unknown"})`;
-      return addActivity(
-        {
-          ...state,
-          phase: success ? "stopped" : "error",
-          ready: false,
-          busy: false,
-          status: label,
-          uiPrompt: undefined,
-        },
-        "runtime",
-        label,
-        success ? "success" : "error",
-      );
-    }
-    case "session.hydrated": {
-      const model = isRecord(action.state.model) ? action.state.model : {};
-      const provider = textField(model.provider);
-      const modelId = textField(model.id) || textField(model.modelId);
-      const normalized = normalizeHistory(action.messages);
-      const isStreaming = action.state.isStreaming === true;
+    case "chat.event":
+      return reduceChatEvent(state, action.event);
+    case "composer.set":
+      return updateComposer(state, action.value);
+    case "composer.append":
+      return updateComposer(state, state.composer + action.value);
+    case "composer.backspace":
+      return updateComposer(state, removeLastCodePoint(state.composer));
+    case "slash.loaded": {
+      const slashCommands = mergeSlashCommands(action.commands);
+      const menu = filterSlashCommands(state.composer, slashCommands);
       return {
         ...state,
-        phase: isStreaming ? "working" : "ready",
-        status: isStreaming ? "Agent is working…" : "Ready",
-        ready: true,
-        busy: isStreaming,
-        sessionId: textField(action.state.sessionId) || state.sessionId,
-        sessionName: textField(action.state.sessionName) || state.sessionName,
-        sessionFile: textField(action.state.sessionFile) || state.sessionFile,
-        model: [provider, modelId].filter(Boolean).join("/") || "default model",
-        thinking: textField(action.state.thinkingLevel),
-        queueDepth: numberField(action.state.pendingMessageCount) ?? 0,
-        timeline: normalized.timeline,
-        nextId: Math.max(state.nextId, normalized.nextId),
+        slashCommands,
+        slashMenuOpen: state.slashMenuOpen && slashQuery(state.composer) !== null,
+        slashSelected: clampSelection(state.slashSelected, menu.length),
       };
     }
-    case "rpc.event":
-      return reduceRpcEvent(state, action.value);
-    case "composer.set":
-      return { ...state, composer: action.value };
-    case "composer.append":
-      return { ...state, composer: state.composer + action.value };
-    case "composer.backspace":
-      return { ...state, composer: removeLastCodePoint(state.composer) };
+    case "slash.select": {
+      if (!state.slashMenuOpen) return state;
+      const count = filterSlashCommands(state.composer, state.slashCommands).length;
+      if (count === 0) return { ...state, slashSelected: 0 };
+      return {
+        ...state,
+        slashSelected: (state.slashSelected + action.delta + count) % count,
+      };
+    }
+    case "slash.dismiss":
+      return { ...state, slashMenuOpen: false };
     case "prompt.submitted": {
-      const next = appendTimeline(
+      return appendTimeline(
         {
           ...state,
           composer: "",
+          slashMenuOpen: false,
+          slashSelected: 0,
           scrollOffset: 0,
           busy: true,
           phase: "working",
@@ -175,12 +187,6 @@ export function reduceStarlingTui(
           queueDepth: action.queued ? state.queueDepth + 1 : state.queueDepth,
         },
         { kind: "user", text: action.text, pending: true },
-      );
-      return addActivity(
-        next,
-        action.queued ? "queue" : "prompt",
-        action.queued ? "Follow-up queued" : "Prompt accepted",
-        "active",
       );
     }
     case "prompt.rejected":
@@ -193,25 +199,54 @@ export function reduceStarlingTui(
         ),
         { kind: "error", text: action.message },
       );
+    case "command.submitted":
+      return {
+        ...state,
+        composer: "",
+        slashMenuOpen: false,
+        slashSelected: 0,
+        scrollOffset: 0,
+        status: `Running /${action.name}…`,
+      };
+    case "command.completed": {
+      const next = {
+        ...state,
+        phase: state.busy ? state.phase : "ready" as const,
+        status: state.busy ? state.status : "Ready",
+      };
+      return action.message
+        ? appendTimeline(next, { kind: "system", text: action.message })
+        : next;
+    }
+    case "command.failed":
+      return appendTimeline(
+        addActivity(
+          {
+            ...state,
+            phase: state.busy ? state.phase : "ready",
+            status: state.busy ? state.status : "Ready",
+          },
+          "command",
+          action.message,
+          "error",
+        ),
+        { kind: "error", text: action.message },
+      );
+    case "session.metadata":
+      return {
+        ...state,
+        model: action.model || state.model,
+        thinking: action.thinking ?? state.thinking,
+        sessionName: action.sessionName || state.sessionName,
+        sessionId: action.sessionId || state.sessionId,
+        sessionFile: action.sessionFile || state.sessionFile,
+      };
     case "scroll":
       return { ...state, scrollOffset: Math.max(0, state.scrollOffset + action.delta) };
-    case "diagnostic": {
-      const message = compactWhitespace(action.message);
-      if (!message) return state;
-      return addActivity(
-        action.level === "error" ? { ...state, status: message } : state,
-        action.level === "error" ? "error" : "log",
-        message,
-        action.level === "error" ? "error" : "neutral",
-      );
-    }
+    case "diagnostic":
+      return reduceDiagnostic(state, action.level, action.message);
     case "ui.open":
-      return addActivity(
-        { ...state, uiPrompt: action.prompt, status: action.prompt.title || "Input requested" },
-        "attention",
-        action.prompt.title || `${action.prompt.method} requested`,
-        "active",
-      );
+      return openUiPrompt(state, action.prompt);
     case "ui.select": {
       if (!state.uiPrompt || state.uiPrompt.options.length === 0) return state;
       const count = state.uiPrompt.options.length;
@@ -231,161 +266,196 @@ export function reduceStarlingTui(
         ? { ...state, uiPrompt: { ...state.uiPrompt, value: removeLastCodePoint(state.uiPrompt.value) } }
         : state;
     case "ui.close":
-      return { ...state, uiPrompt: undefined, status: state.busy ? "Agent is working…" : "Ready" };
+      return closeUiPrompt(state);
   }
 }
 
+/**
+ * Backwards-compatible helper for callers that still receive raw extension UI
+ * records. Parsing is delegated to the transport normalizer in events.ts.
+ */
 export function createExtensionUiPrompt(value: Record<string, unknown>): ExtensionUiPrompt | null {
-  const id = textField(value.id);
-  const method = textField(value.method);
-  if (!id || !isInteractiveUiMethod(method)) return null;
-  const suppliedOptions = Array.isArray(value.options) ? value.options.map(String) : [];
-  const options = method === "confirm" ? ["No", "Yes"] : suppliedOptions;
-  return {
-    id,
-    method,
-    title: textField(value.title) || "Starling needs your input",
-    message: textField(value.message) || textField(value.placeholder),
-    options,
-    selected: 0,
-    value: method === "editor" ? textField(value.prefill) : "",
-  };
+  const request = normalizeExtensionUiRequest(value);
+  return request ? promptFromRequest(request) : null;
 }
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
+export { isRecord, printable };
 
-export function printable(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (value === undefined || value === null) return "";
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-function reduceRpcEvent(state: StarlingTuiState, value: Record<string, unknown>): StarlingTuiState {
-  switch (value.type) {
-    case "agent_start":
+function reduceChatEvent(state: StarlingTuiState, event: ChatEvent): StarlingTuiState {
+  switch (event.type) {
+    case "runtime.started": {
+      const cwd = event.cwd || state.cwd;
+      return {
+        ...state,
+        cwd,
+        workspace: basename(cwd) || cwd,
+        runId: event.runId || state.runId,
+        sessionId: event.sessionId || state.sessionId,
+        status: "Loading session…",
+      };
+    }
+    case "runtime.exited": {
+      const label = event.success
+        ? "Session closed"
+        : `Agent stopped (${event.exitCode ?? "unknown"})`;
+      const next: StarlingTuiState = {
+        ...state,
+        phase: event.success ? "stopped" : "error",
+        ready: false,
+        busy: false,
+        compacting: false,
+        status: label,
+        uiPrompt: undefined,
+        slashMenuOpen: false,
+      };
+      return event.success ? next : addActivity(next, "runtime", label, "error");
+    }
+    case "session.snapshot":
+      return hydrateSnapshot(state, event.snapshot);
+    case "session.name.changed":
+      return { ...state, sessionName: event.name || state.sessionName };
+    case "session.thinking.changed":
+      return { ...state, thinking: event.level || state.thinking };
+    case "turn.started":
+      return { ...state, busy: true, phase: "working", status: "Agent is working…" };
+    case "turn.generating":
+      return { ...state, busy: true, phase: "working", status: "Generating…" };
+    case "turn.finalizing":
+      return { ...state, status: "Finalizing…" };
+    case "turn.settled":
+      return state.compacting
+        ? { ...state, busy: false, phase: "working", status: "Compacting context…", queueDepth: 0 }
+        : { ...state, busy: false, phase: "ready", status: "Ready", queueDepth: 0 };
+    case "turn.retrying":
       return addActivity(
-        { ...state, busy: true, phase: "working", status: "Agent is working…" },
-        "turn",
-        "Reasoning started",
+        { ...state, busy: true, phase: "working", status: `Retrying (${event.attempt})…` },
+        "retry",
+        event.message,
         "active",
       );
-    case "agent_settled":
-      return addActivity(
-        { ...state, busy: false, phase: "ready", status: "Ready", queueDepth: 0 },
-        "turn",
-        "Agent settled",
-        "success",
-      );
-    case "agent_end":
-      return { ...state, status: value.willRetry === true ? "Retrying…" : "Finishing turn…" };
-    case "turn_start":
-      return { ...state, busy: true, phase: "working", status: "Generating…" };
-    case "turn_end":
-      return { ...state, status: "Finalizing…" };
-    case "message_start":
-      return startMessage(state, value.message);
-    case "message_update":
-      return updateAssistantDelta(state, value.assistantMessageEvent);
-    case "message_end":
-      return finishMessage(state, value.message);
-    case "tool_execution_start": {
-      const id = textField(value.toolCallId) || `tool-${state.nextId}`;
-      const name = textField(value.toolName) || "tool";
-      const next = appendTimeline(state, {
+    case "message.started":
+      return startMessage(state, event.message);
+    case "message.delta":
+      return updateAssistantDelta(state, event.channel, event.delta);
+    case "message.completed":
+      return finishMessage(state, event.message);
+    case "tool.started": {
+      const callId = event.callId || `tool-${state.nextId}`;
+      return appendTimeline(state, {
         kind: "tool",
-        text: printable(value.args),
-        toolCallId: id,
-        toolName: name,
+        text: event.input,
+        toolCallId: callId,
+        toolName: event.name,
         toolState: "running",
       });
-      return addActivity(next, name, "Running", "active");
     }
-    case "tool_execution_update":
-      return updateTool(state, textField(value.toolCallId), printable(value.partialResult), "running");
-    case "tool_execution_end": {
-      const failed = value.isError === true;
-      const id = textField(value.toolCallId);
-      const name = textField(value.toolName) || "tool";
-      const next = updateTool(state, id, printable(value.result), failed ? "error" : "done");
-      return addActivity(next, name, failed ? "Failed" : "Completed", failed ? "error" : "success");
-    }
-    case "queue_update": {
-      const steering = Array.isArray(value.steering) ? value.steering.length : 0;
-      const followUp = Array.isArray(value.followUp) ? value.followUp.length : 0;
-      return { ...state, queueDepth: steering + followUp };
-    }
-    case "session_info_changed":
-      return { ...state, sessionName: textField(value.name) || state.sessionName };
-    case "thinking_level_changed":
-      return { ...state, thinking: textField(value.level) || state.thinking };
-    case "compaction_start":
-      return addActivity({ ...state, status: "Compacting context…" }, "context", "Compacting", "active");
-    case "compaction_end": {
-      const failed = Boolean(value.errorMessage);
-      return addActivity(
-        { ...state, status: failed ? textField(value.errorMessage) : state.status },
-        "context",
-        failed ? textField(value.errorMessage) : "Compaction complete",
-        failed ? "error" : "success",
+    case "tool.updated":
+      return updateTool(state, event.callId, event.output, "running");
+    case "tool.completed":
+      return updateTool(
+        state,
+        event.callId,
+        event.output,
+        event.failed ? "error" : "done",
+        event.name,
       );
-    }
-    case "auto_retry_start":
+    case "queue.changed":
+      return { ...state, queueDepth: event.depth };
+    case "context.compaction.started":
       return addActivity(
-        { ...state, status: `Retrying (${numberField(value.attempt) ?? 1})…` },
-        "retry",
-        textField(value.errorMessage) || "Retry scheduled",
+        { ...state, compacting: true, phase: "working", status: "Compacting context…" },
+        "context",
+        "Compacting",
         "active",
       );
-    case "auto_retry_end":
+    case "context.compaction.completed": {
+      const detail = event.aborted
+        ? "Compaction cancelled"
+        : event.failed ? event.message || "Compaction failed" : "Compaction complete";
+      const tone: ActivityEntry["tone"] = event.aborted
+        ? "neutral"
+        : event.failed ? "error" : "success";
+      return addActivity(
+        {
+          ...state,
+          compacting: false,
+          phase: state.busy ? "working" : "ready",
+          status: state.busy ? "Agent is working…" : event.failed || event.aborted ? detail : "Ready",
+        },
+        "context",
+        detail,
+        tone,
+      );
+    }
+    case "retry.completed":
       return addActivity(
         state,
         "retry",
-        value.success === true ? "Retry recovered" : textField(value.finalError) || "Retry failed",
-        value.success === true ? "success" : "error",
+        event.message,
+        event.success ? "success" : "error",
       );
-    case "bash_execution_update":
-      return addActivity(state, "shell", textField(value.delta), "active");
-    default:
-      return state;
+    case "activity.recorded":
+      return addActivity(state, event.label, event.detail, event.tone);
+    case "diagnostic":
+      return reduceDiagnostic(state, event.level === "error" ? "error" : "info", event.message);
+    case "interaction.requested":
+      return openUiPrompt(state, promptFromRequest(event.request));
+    case "interaction.dismissed":
+      return state.uiPrompt?.id === event.id ? closeUiPrompt(state) : state;
+    case "composer.replaced":
+      return updateComposer(state, event.value);
   }
 }
 
-function startMessage(state: StarlingTuiState, raw: unknown): StarlingTuiState {
-  if (!isRecord(raw)) return state;
-  const role = textField(raw.role);
-  const { text, thinking } = extractContent(raw.content);
-  if (role === "user") {
+function hydrateSnapshot(state: StarlingTuiState, snapshot: ChatSessionSnapshot): StarlingTuiState {
+  const normalized = transcriptToTimeline(snapshot.transcript, state.nextId);
+  return {
+    ...state,
+    phase: snapshot.streaming ? "working" : "ready",
+    status: snapshot.streaming ? "Agent is working…" : "Ready",
+    ready: true,
+    busy: snapshot.streaming,
+    compacting: false,
+    sessionId: snapshot.sessionId || state.sessionId,
+    sessionName: snapshot.sessionName || state.sessionName,
+    sessionFile: snapshot.sessionFile || state.sessionFile,
+    model: snapshot.model,
+    thinking: snapshot.thinking,
+    queueDepth: snapshot.queueDepth,
+    timeline: normalized.timeline,
+    nextId: normalized.nextId,
+  };
+}
+
+function startMessage(state: StarlingTuiState, message: ChatTranscriptItem): StarlingTuiState {
+  if (message.kind === "user") {
     const last = state.timeline.at(-1);
-    if (last?.kind === "user" && last.pending && last.text === text) {
+    if (last?.kind === "user" && last.pending && last.text === message.text) {
       return {
         ...state,
         timeline: state.timeline.map((entry, index) =>
           index === state.timeline.length - 1 ? { ...entry, pending: false } : entry),
       };
     }
-    return text ? appendTimeline(state, { kind: "user", text }) : state;
+    return message.text
+      ? appendTimeline(state, { ...message, kind: "user", pending: false })
+      : state;
   }
-  if (role === "assistant") {
-    return appendTimeline(state, { kind: "assistant", text, thinking, pending: true });
+  if (message.kind === "assistant") {
+    return appendTimeline(state, { ...message, kind: "assistant", pending: true });
   }
-  if (role === "custom" || role === "system") {
-    return text ? appendTimeline(state, { kind: "system", text }) : state;
+  if (message.kind === "system" || message.kind === "error") {
+    return message.text ? appendTimeline(state, message) : state;
   }
   return state;
 }
 
-function updateAssistantDelta(state: StarlingTuiState, raw: unknown): StarlingTuiState {
-  if (!isRecord(raw)) return state;
-  const delta = textField(raw.delta);
+function updateAssistantDelta(
+  state: StarlingTuiState,
+  channel: "text" | "thinking",
+  delta: string,
+): StarlingTuiState {
   if (!delta) return state;
-  const channel = raw.type === "thinking_delta" ? "thinking" : raw.type === "text_delta" ? "text" : "";
-  if (!channel) return state;
   let index = findLastIndex(state.timeline, (entry) => entry.kind === "assistant" && entry.pending === true);
   let next = state;
   if (index < 0) {
@@ -403,20 +473,17 @@ function updateAssistantDelta(state: StarlingTuiState, raw: unknown): StarlingTu
   };
 }
 
-function finishMessage(state: StarlingTuiState, raw: unknown): StarlingTuiState {
-  if (!isRecord(raw)) return state;
-  const role = textField(raw.role);
-  if (role !== "assistant") return state;
-  const content = extractContent(raw.content);
+function finishMessage(state: StarlingTuiState, message: ChatTranscriptItem): StarlingTuiState {
+  if (message.kind !== "assistant") return state;
   const index = findLastIndex(state.timeline, (entry) => entry.kind === "assistant" && entry.pending === true);
-  if (index < 0) return appendTimeline(state, { kind: "assistant", ...content, pending: false });
+  if (index < 0) return appendTimeline(state, { ...message, kind: "assistant", pending: false });
   return {
     ...state,
     timeline: state.timeline.map((entry, entryIndex) => entryIndex === index
       ? {
         ...entry,
-        text: content.text || entry.text,
-        thinking: content.thinking || entry.thinking,
+        text: message.text || entry.text,
+        thinking: message.thinking || entry.thinking,
         pending: false,
       }
       : entry),
@@ -428,6 +495,7 @@ function updateTool(
   toolCallId: string,
   text: string,
   toolState: ToolState,
+  toolName = "tool",
 ): StarlingTuiState {
   if (!toolCallId) return state;
   const index = findLastIndex(state.timeline, (entry) => entry.toolCallId === toolCallId);
@@ -436,69 +504,28 @@ function updateTool(
       kind: "tool",
       text,
       toolCallId,
-      toolName: "tool",
+      toolName,
       toolState,
     });
   }
   return {
     ...state,
     timeline: state.timeline.map((entry, entryIndex) => entryIndex === index
-      ? { ...entry, text: text || entry.text, toolState }
+      ? { ...entry, text: text || entry.text, toolName: entry.toolName || toolName, toolState }
       : entry),
   };
 }
 
-function normalizeHistory(messages: unknown[]): { timeline: TimelineEntry[]; nextId: number } {
-  const timeline: TimelineEntry[] = [];
-  let nextId = 1;
-  const append = (entry: Omit<TimelineEntry, "id">) => timeline.push({ id: nextId++, ...entry });
-  for (const raw of messages) {
-    if (!isRecord(raw)) continue;
-    const role = textField(raw.role);
-    const content = extractContent(raw.content);
-    if (role === "user" && content.text) append({ kind: "user", text: content.text });
-    if (role === "assistant") {
-      if (content.text || content.thinking) append({ kind: "assistant", ...content });
-      if (Array.isArray(raw.content)) {
-        for (const block of raw.content) {
-          if (!isRecord(block) || block.type !== "toolCall") continue;
-          append({
-            kind: "tool",
-            text: printable(block.arguments ?? block.args),
-            toolCallId: textField(block.id),
-            toolName: textField(block.name) || "tool",
-            toolState: "done",
-          });
-        }
-      }
-    }
-    if (role === "toolResult") {
-      append({
-        kind: "tool",
-        text: content.text || printable(raw.content),
-        toolCallId: textField(raw.toolCallId),
-        toolName: textField(raw.toolName) || "tool result",
-        toolState: raw.isError === true ? "error" : "done",
-      });
-    }
-    if ((role === "custom" || role === "system") && content.text) {
-      append({ kind: "system", text: content.text });
-    }
-  }
-  return { timeline: timeline.slice(-MAX_TIMELINE_ENTRIES), nextId };
-}
-
-function extractContent(content: unknown): { text: string; thinking?: string } {
-  if (typeof content === "string") return { text: content };
-  if (!Array.isArray(content)) return { text: "" };
-  let text = "";
-  let thinking = "";
-  for (const block of content) {
-    if (!isRecord(block)) continue;
-    if (block.type === "text") text += textField(block.text);
-    if (block.type === "thinking") thinking += textField(block.thinking) || textField(block.text);
-  }
-  return { text, thinking: thinking || undefined };
+function transcriptToTimeline(
+  transcript: readonly ChatTranscriptItem[],
+  startId: number,
+): { timeline: TimelineEntry[]; nextId: number } {
+  let nextId = startId;
+  const timeline = transcript.slice(-MAX_TIMELINE_ENTRIES).map((entry) => ({
+    id: nextId++,
+    ...entry,
+  }));
+  return { timeline, nextId };
 }
 
 function appendTimeline(
@@ -530,12 +557,49 @@ function addActivity(
   };
 }
 
-function textField(value: unknown): string {
-  return typeof value === "string" ? value : "";
+function reduceDiagnostic(
+  state: StarlingTuiState,
+  level: "info" | "error",
+  rawMessage: string,
+): StarlingTuiState {
+  const message = compactWhitespace(rawMessage);
+  if (!message) return state;
+  return addActivity(
+    level === "error" ? { ...state, status: message } : state,
+    level === "error" ? "error" : "log",
+    message,
+    level === "error" ? "error" : "neutral",
+  );
 }
 
-function numberField(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+function promptFromRequest(request: ChatInteractionRequest): ExtensionUiPrompt {
+  return {
+    id: request.id,
+    method: request.method,
+    title: request.title,
+    message: request.message,
+    options: request.options,
+    selected: 0,
+    value: request.initialValue,
+  };
+}
+
+function openUiPrompt(state: StarlingTuiState, prompt: ExtensionUiPrompt): StarlingTuiState {
+  return addActivity(
+    {
+      ...state,
+      uiPrompt: prompt,
+      slashMenuOpen: false,
+      status: prompt.title || "Input requested",
+    },
+    "attention",
+    prompt.title || `${prompt.method} requested`,
+    "active",
+  );
+}
+
+function closeUiPrompt(state: StarlingTuiState): StarlingTuiState {
+  return { ...state, uiPrompt: undefined, status: state.busy ? "Agent is working…" : "Ready" };
 }
 
 function compactWhitespace(value: string): string {
@@ -546,13 +610,24 @@ function removeLastCodePoint(value: string): string {
   return Array.from(value).slice(0, -1).join("");
 }
 
+function updateComposer(state: StarlingTuiState, composer: string): StarlingTuiState {
+  const slashMenuOpen = slashQuery(composer) !== null && state.slashCommands.length > 0;
+  return {
+    ...state,
+    composer,
+    slashMenuOpen,
+    slashSelected: 0,
+  };
+}
+
+function clampSelection(selected: number, count: number): number {
+  if (count <= 0) return 0;
+  return Math.min(Math.max(0, selected), count - 1);
+}
+
 function findLastIndex<T>(items: readonly T[], predicate: (item: T) => boolean): number {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     if (predicate(items[index])) return index;
   }
   return -1;
-}
-
-function isInteractiveUiMethod(value: string): value is ExtensionUiMethod {
-  return value === "confirm" || value === "select" || value === "input" || value === "editor";
 }

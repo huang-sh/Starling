@@ -30,8 +30,8 @@ use crate::core::mcp_config::{effective_servers, McpServerConfig};
 use crate::core::osc_state::{status_from_osc_sequence, upsert_osc_state, OscSessionState};
 use crate::core::process_map::map_process_tree_to_session_since;
 use crate::core::runs::{
-    create_run, finalize_run, find_run, list_runs, mark_run_crashed, reconcile_stale_runs,
-    remove_run, FinalizePatch, RunStatus,
+    create_run, finalize_run, find_run, list_runs, mark_run_crashed, patch_run,
+    reconcile_stale_runs, remove_run, FinalizePatch, RunPatch, RunStatus,
 };
 use crate::core::session::{
     extract_claude_session_meta, extract_codex_session_meta, extract_pi_session_meta,
@@ -164,6 +164,9 @@ fn chat_pi(cmd_args: &ChatCommand, session: Option<&str>) -> Result<()> {
     create_run(RunRecord {
         run_id: run_id.clone(),
         session_id: prepared.session_id_hint.clone(),
+        session_file: None,
+        model: None,
+        title: cmd_args.title.clone(),
         provider: RunProvider::Pi,
         project_path: effective_project_path.clone(),
         catalog_id: catalog_id.clone(),
@@ -511,6 +514,9 @@ fn launch(
     let record = RunRecord {
         run_id: run_id.clone(),
         session_id: prepared.session_id_hint.clone(),
+        session_file: None,
+        model: None,
+        title: cmd_args.title.clone(),
         provider,
         project_path: effective_project_path.clone(),
         catalog_id: catalog_id.clone(),
@@ -5660,26 +5666,23 @@ fn cleanup_launch_artifacts(prepared: &PreparedLaunch) {
 }
 
 fn update_run_pid(run_id: &str, pid: u32) {
-    // Load → patch → save to inject pid into the existing record.
-    let mut data = crate::core::runs::load_runs();
-    for run in data.runs.iter_mut() {
-        if run.run_id == run_id {
-            run.pid = Some(pid);
-            break;
-        }
-    }
-    crate::core::runs::save_runs(data);
+    patch_run(
+        run_id,
+        RunPatch {
+            pid: Some(pid),
+            ..Default::default()
+        },
+    );
 }
 
 fn update_run_session_id(run_id: &str, session_id: &str) {
-    let mut data = crate::core::runs::load_runs();
-    for run in data.runs.iter_mut() {
-        if run.run_id == run_id {
-            run.session_id = Some(session_id.to_string());
-            break;
-        }
-    }
-    crate::core::runs::save_runs(data);
+    patch_run(
+        run_id,
+        RunPatch {
+            session_id: Some(session_id.to_string()),
+            ..Default::default()
+        },
+    );
 }
 
 fn status(run_id: Option<&str>, json: bool) -> Result<()> {

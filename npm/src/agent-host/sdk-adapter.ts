@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   AgentHostLaunchOptions,
   AgentSdkAdapter,
+  AgentSdkCommand,
   AgentSdkSession,
   ExtensionUiBindings,
   JsonObject,
@@ -34,6 +35,51 @@ interface ResourceLoaderLike {
   };
 }
 
+interface CommandSourceLike {
+  description?: string;
+  sourceInfo: unknown;
+}
+
+interface RegisteredCommandLike extends CommandSourceLike {
+  invocationName: string;
+}
+
+interface PromptTemplateLike extends CommandSourceLike {
+  name: string;
+}
+
+interface SkillLike extends CommandSourceLike {
+  name: string;
+}
+
+interface ManagedExtensionUiLike {
+  confirm?(
+    title: string,
+    message: string,
+    options?: { timeout?: number },
+  ): Promise<boolean>;
+  notify?(message: string, type?: "info" | "warning" | "error"): void;
+}
+
+interface ManagedExtensionContextLike {
+  ui?: ManagedExtensionUiLike;
+}
+
+interface ManagedExtensionApiLike {
+  on(
+    event: string,
+    handler: (event: unknown, context: ManagedExtensionContextLike) => unknown,
+  ): void;
+}
+
+type ManagedExtensionFactory = (api: ManagedExtensionApiLike) => void;
+
+interface InlineExtensionLike {
+  name: string;
+  factory: ManagedExtensionFactory;
+  hidden?: boolean;
+}
+
 interface SessionManagerLike {
   getCwd(): string;
 }
@@ -56,9 +102,14 @@ interface SdkSessionLike {
   autoCompactionEnabled?: boolean;
   pendingMessageCount?: number;
   messages?: unknown[];
+  promptTemplates?: readonly PromptTemplateLike[];
+  resourceLoader?: {
+    getSkills?(): { skills?: readonly SkillLike[] };
+  };
   modelRuntime?: ModelRuntimeLike;
   extensionRunner?: {
     emit(event: unknown): Promise<unknown>;
+    getRegisteredCommands?(): readonly RegisteredCommandLike[];
   };
   bindExtensions(bindings: JsonObject): Promise<void>;
   subscribe(listener: (event: unknown) => void): () => void;
@@ -67,7 +118,9 @@ interface SdkSessionLike {
   setModel(model: unknown): Promise<void>;
   setThinkingLevel(level: unknown): void;
   compact(customInstructions?: string): Promise<unknown>;
+  abortCompaction(): void;
   setSessionName?(name: string): void;
+  getSessionStats?(): unknown;
   waitForIdle?(): Promise<void>;
   navigateTree?(targetId: string, options?: JsonObject): Promise<{ cancelled: boolean }>;
   reload?(): Promise<void>;
@@ -152,11 +205,19 @@ export function createPiSdkAdapter(
         authPath: path.join(agentDir, "auth.json"),
         modelsPath: path.join(agentDir, "models.json"),
       });
+      const inlineExtensions: InlineExtensionLike[] = options.starlingManaged
+        ? [{
+          name: "starling-managed",
+          factory: createStarlingManagedExtension(),
+          hidden: true,
+        }]
+        : [];
       const resourceLoader = new sdk.DefaultResourceLoader({
         cwd: effectiveCwd,
         agentDir,
         settingsManager,
         additionalExtensionPaths: options.extensions,
+        extensionFactories: inlineExtensions,
         noExtensions: options.noExtensions,
       });
       await resourceLoader.reload();
@@ -175,13 +236,14 @@ export function createPiSdkAdapter(
         settingsManager,
         resourceLoader,
         model,
-        thinkingLevel: options.thinking,
+        thinkingLevel: validateThinkingLevel(options.thinking),
       });
       let unsubscribe = () => {};
       const adaptedSession = new PiSdkSessionAdapter(
         session,
         modelRuntime,
         () => unsubscribe(),
+        options.surface === "tui" ? "interactive" : "rpc",
       );
 
       try {
@@ -189,7 +251,7 @@ export function createPiSdkAdapter(
 
         await session.bindExtensions({
           uiContext: bindings.uiContext,
-          mode: "rpc",
+          mode: options.surface ?? "rpc",
           commandContextActions: {
             waitForIdle: () => session.waitForIdle?.() ?? Promise.resolve(),
             newSession: async () => ({ cancelled: true }),
@@ -237,16 +299,20 @@ class PiSdkSessionAdapter implements AgentSdkSession {
   private readonly session: SdkSessionLike;
   private readonly modelRuntime: ModelRuntimeLike;
   private readonly unsubscribe: () => void;
+  private readonly promptSource: "interactive" | "rpc";
+  private activeCompaction: Promise<unknown> | undefined;
   private shutdownPromise: Promise<void> | undefined;
 
   constructor(
     session: SdkSessionLike,
     modelRuntime: ModelRuntimeLike,
     unsubscribe: () => void,
+    promptSource: "interactive" | "rpc",
   ) {
     this.session = session;
     this.modelRuntime = modelRuntime;
     this.unsubscribe = unsubscribe;
+    this.promptSource = promptSource;
   }
 
   getState(): JsonObject {
@@ -271,6 +337,45 @@ class PiSdkSessionAdapter implements AgentSdkSession {
     return Array.isArray(this.session.messages) ? this.session.messages : [];
   }
 
+  getCommands(): AgentSdkCommand[] {
+    const commands: AgentSdkCommand[] = [];
+
+    for (const command of this.session.extensionRunner?.getRegisteredCommands?.() ?? []) {
+      commands.push({
+        name: command.invocationName,
+        description: command.description,
+        source: "extension",
+        sourceInfo: command.sourceInfo,
+      });
+    }
+
+    for (const template of this.session.promptTemplates ?? []) {
+      commands.push({
+        name: template.name,
+        description: template.description,
+        source: "prompt",
+        sourceInfo: template.sourceInfo,
+      });
+    }
+
+    for (const skill of this.session.resourceLoader?.getSkills?.().skills ?? []) {
+      commands.push({
+        name: `skill:${skill.name}`,
+        description: skill.description,
+        source: "skill",
+        sourceInfo: skill.sourceInfo,
+      });
+    }
+
+    return commands;
+  }
+
+  getSessionStats(): unknown {
+    const getSessionStats = this.session.getSessionStats;
+    if (!getSessionStats) throw new Error("Pi SDK session does not support getSessionStats");
+    return getSessionStats.call(this.session);
+  }
+
   prompt(
     message: string,
     streamingBehavior: "steer" | "followUp" | undefined,
@@ -280,7 +385,7 @@ class PiSdkSessionAdapter implements AgentSdkSession {
     let preflightAccepted = false;
     void this.session.prompt(message, {
       streamingBehavior,
-      source: "rpc",
+      source: this.promptSource,
       preflightResult: (success: boolean) => {
         if (!success || preflightAccepted) return;
         preflightAccepted = true;
@@ -312,7 +417,29 @@ class PiSdkSessionAdapter implements AgentSdkSession {
   }
 
   compact(customInstructions?: string): Promise<unknown> {
-    return this.session.compact(customInstructions);
+    const activeCompaction = this.session.compact(customInstructions);
+    this.activeCompaction = activeCompaction;
+    void activeCompaction.then(
+      () => this.clearActiveCompaction(activeCompaction),
+      () => this.clearActiveCompaction(activeCompaction),
+    );
+    return activeCompaction;
+  }
+
+  abortCompaction(): void {
+    this.session.abortCompaction();
+  }
+
+  setSessionName(name: string): void {
+    const setSessionName = this.session.setSessionName;
+    if (!setSessionName) throw new Error("Pi SDK session does not support setSessionName");
+    setSessionName.call(this.session, name);
+  }
+
+  async reload(): Promise<void> {
+    const reload = this.session.reload;
+    if (!reload) throw new Error("Pi SDK session does not support reload");
+    await reload.call(this.session);
   }
 
   shutdown(): Promise<void> {
@@ -322,10 +449,30 @@ class PiSdkSessionAdapter implements AgentSdkSession {
 
   private async shutdownOnce(): Promise<void> {
     const errors: unknown[] = [];
+    const activeCompaction = this.activeCompaction;
+    try {
+      this.session.abortCompaction();
+    } catch (error) {
+      errors.push(error);
+    }
     try {
       await this.session.abort();
     } catch (error) {
       errors.push(error);
+    }
+    // Pi creates the compaction AbortController only after compact()'s initial
+    // await abort(). Cancel again after that await has had a chance to resume.
+    try {
+      this.session.abortCompaction();
+    } catch (error) {
+      errors.push(error);
+    }
+    if (activeCompaction) {
+      try {
+        await activeCompaction;
+      } catch (error) {
+        if (!isCompactionCancellation(error)) errors.push(error);
+      }
     }
     try {
       await this.session.extensionRunner?.emit({ type: "session_shutdown", reason: "quit" });
@@ -346,6 +493,68 @@ class PiSdkSessionAdapter implements AgentSdkSession {
       throw new Error(`Pi SDK shutdown failed: ${errors.map(errorMessage).join("; ")}`);
     }
   }
+
+  private clearActiveCompaction(compaction: Promise<unknown>): void {
+    if (this.activeCompaction === compaction) this.activeCompaction = undefined;
+  }
+}
+
+function isCompactionCancellation(error: unknown): boolean {
+  return error instanceof Error
+    && (error.name === "AbortError" || error.message === "Compaction cancelled");
+}
+
+const STARLING_AUTO_ALLOWED_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const STARLING_PERMISSION_TIMEOUT_MS = 30_000;
+const STARLING_TOOL_INPUT_LIMIT = 4_000;
+
+/** Starling guards installed through Pi's official inline extension factory. */
+function createStarlingManagedExtension(): ManagedExtensionFactory {
+  return (api) => {
+    const blockSessionChange = (_event: unknown, context: ManagedExtensionContextLike) => {
+      context.ui?.notify?.(
+        "Starling has locked this transcript. Exit the workspace before opening or forking another session.",
+        "warning",
+      );
+      return { cancel: true };
+    };
+    api.on("session_before_switch", blockSessionChange);
+    api.on("session_before_fork", blockSessionChange);
+    api.on("tool_call", async (event: unknown, context: ManagedExtensionContextLike) => {
+      const record = isJsonObject(event) ? event : {};
+      const toolName = typeof record.toolName === "string"
+        ? record.toolName.trim().toLowerCase()
+        : "";
+      if (STARLING_AUTO_ALLOWED_TOOLS.has(toolName)) return undefined;
+
+      let approved = false;
+      try {
+        approved = await context.ui?.confirm?.(
+          `Allow Pi tool: ${toolName || "unknown"}?`,
+          printableToolInput(record.input),
+          { timeout: STARLING_PERMISSION_TIMEOUT_MS },
+        ) === true;
+      } catch {
+        approved = false;
+      }
+      if (approved) return undefined;
+      return {
+        block: true,
+        reason: `Starling denied Pi tool '${toolName || "unknown"}' because approval was not granted.`,
+      };
+    });
+  };
+}
+
+function printableToolInput(value: unknown): string {
+  let text: string;
+  try {
+    text = JSON.stringify(value ?? {}, null, 2);
+  } catch {
+    text = "<unserializable tool input>";
+  }
+  if (text.length <= STARLING_TOOL_INPUT_LIMIT) return text;
+  return `${text.slice(0, STARLING_TOOL_INPUT_LIMIT)}\n… <tool input truncated by Starling>`;
 }
 
 async function resolveRequestedModel(
@@ -429,6 +638,24 @@ async function resolveProjectTrusted(
   if (explicit) trustStore.set(cwd, trusted);
   return trusted;
 }
+
+const VALID_THINKING_LEVELS = new Set([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+
+function validateThinkingLevel(level: string | undefined): string | undefined {
+  if (level === undefined || VALID_THINKING_LEVELS.has(level)) return level;
+  throw new Error(
+    `Invalid thinking level "${level}". Valid values: ${[...VALID_THINKING_LEVELS].join(", ")}`,
+  );
+}
+
 
 function projectTrustPolicy(value: string | undefined): ProjectTrustPolicy {
   const normalized = value?.trim().toLowerCase() || "ask";

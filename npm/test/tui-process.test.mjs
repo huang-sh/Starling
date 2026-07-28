@@ -5,7 +5,7 @@ import test from "node:test";
 import {
   buildWindowsTaskkillCommand,
   stopManagedProcessTree,
-} from "../lib/tui/index.js";
+} from "../lib/tui/process.js";
 
 class FakeManagedProcess extends EventEmitter {
   pid = 4242;

@@ -12,7 +12,7 @@ interface DialogOptions {
 
 interface PendingInteraction {
   cancel(): void;
-  resolve(response: ExtensionUiResponse): void;
+  resolve(response: ExtensionUiResponse): boolean;
 }
 
 export interface ExtensionUiBridge {
@@ -36,6 +36,7 @@ export function createExtensionUiBridge(
     options: DialogOptions | undefined,
     fallback: T,
     parse: (response: ExtensionUiResponse) => T,
+    validate: (response: ExtensionUiResponse) => boolean,
     onSettled?: (response: ExtensionUiResponse | undefined) => void,
   ): Promise<T> => {
     if (closed || options?.signal?.aborted) {
@@ -53,6 +54,7 @@ export function createExtensionUiBridge(
       };
       const finish = (value: T, response?: ExtensionUiResponse): void => {
         cleanup();
+        if (!response && !closed) output({ type: "extension_ui_cancelled", id });
         onSettled?.(response);
         resolve(value);
       };
@@ -64,7 +66,11 @@ export function createExtensionUiBridge(
 
       pending.set(id, {
         cancel: () => finish(fallback),
-        resolve: (response) => finish(parse(response), response),
+        resolve: (response) => {
+          if (!validate(response)) return false;
+          finish(parse(response), response);
+          return true;
+        },
       });
       output({ type: "extension_ui_request", id, ...payload });
     });
@@ -89,6 +95,7 @@ export function createExtensionUiBridge(
       dialogOptions,
       undefined,
       (response) => response.cancelled ? undefined : response.value,
+      isCancelledOrString,
     ),
     confirm: (
       title: string,
@@ -99,6 +106,7 @@ export function createExtensionUiBridge(
       dialogOptions,
       false,
       (response) => response.cancelled ? false : response.confirmed === true,
+      (response) => response.cancelled === true || typeof response.confirmed === "boolean",
       (response) => {
         lastConfirmationExplicit = response?.cancelled !== true
           && typeof response?.confirmed === "boolean";
@@ -113,12 +121,14 @@ export function createExtensionUiBridge(
       dialogOptions,
       undefined,
       (response) => response.cancelled ? undefined : response.value,
+      isCancelledOrString,
     ),
     editor: (title: string, prefill?: string) => request(
       { method: "editor", title, prefill },
       undefined,
       undefined,
       (response) => response.cancelled ? undefined : response.value,
+      isCancelledOrString,
     ),
     notify: (message: string, notifyType?: "info" | "warning" | "error") =>
       emit({ method: "notify", message, notifyType }),
@@ -174,9 +184,8 @@ export function createExtensionUiBridge(
         return false;
       }
       const interaction = pending.get(value.id);
-      if (!interaction) return true;
-      interaction.resolve(value as ExtensionUiResponse);
-      return true;
+      if (!interaction) return false;
+      return interaction.resolve(value as ExtensionUiResponse);
     },
     wasLastConfirmationExplicit(): boolean {
       return lastConfirmationExplicit;
@@ -187,4 +196,8 @@ export function createExtensionUiBridge(
       pending.clear();
     },
   };
+}
+
+function isCancelledOrString(response: ExtensionUiResponse): boolean {
+  return response.cancelled === true || typeof response.value === "string";
 }

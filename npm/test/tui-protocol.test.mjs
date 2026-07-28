@@ -3,8 +3,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
-import { rpcTimeoutForCommand } from "../lib/tui/index.js";
-import { StarlingRpcClient } from "../lib/tui/protocol.js";
+import { rpcTimeoutForCommand, StarlingRpcClient } from "../lib/tui/protocol.js";
 
 class FakeChatChild extends EventEmitter {
   stdin = new PassThrough();
