@@ -41,6 +41,8 @@ fn spawn_starling(root: &std::path::Path, child_pid_file: Option<&std::path::Pat
         .env("PATH", search_path)
         .env("STARLING_HOME", root.join("starling-home"))
         .env("STARLING_CLI_CONFIG", root.join("config.json"))
+        .env_remove("STARLING_CONFIG")
+        .env_remove("STARLING_RUNS")
         .env("CLAUDE_CONFIG_DIR", root.join("claude-home"))
         .env("STARLING_RUN_PTY", "0")
         .stdin(Stdio::null())
