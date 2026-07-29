@@ -41,6 +41,7 @@ export interface ChatInteractionRequest {
   message: string;
   options: string[];
   initialValue: string;
+  secret: boolean;
 }
 
 export type ChatEvent =
@@ -316,6 +317,7 @@ export function normalizeExtensionUiRequest(raw: unknown): ChatInteractionReques
     message: textField(raw.message) || textField(raw.placeholder),
     options: method === "confirm" ? ["No", "Yes"] : suppliedOptions,
     initialValue: method === "editor" ? textField(raw.prefill) : "",
+    secret: method === "input" && raw.secret === true,
   };
 }
 

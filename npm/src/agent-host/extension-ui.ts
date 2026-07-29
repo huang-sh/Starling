@@ -8,6 +8,9 @@ import {
 interface DialogOptions {
   signal?: AbortSignal;
   timeout?: number;
+  /** Starling host extensions used by Pi's SDK authentication interaction. */
+  message?: string;
+  secret?: boolean;
 }
 
 interface PendingInteraction {
@@ -117,7 +120,14 @@ export function createExtensionUiBridge(
       placeholder?: string,
       dialogOptions?: DialogOptions,
     ) => request(
-      { method: "input", title, placeholder, timeout: dialogOptions?.timeout },
+      {
+        method: "input",
+        title,
+        placeholder,
+        message: dialogOptions?.message,
+        secret: dialogOptions?.secret === true,
+        timeout: dialogOptions?.timeout,
+      },
       dialogOptions,
       undefined,
       (response) => response.cancelled ? undefined : response.value,

@@ -209,6 +209,371 @@ test("discovers, completes, and invokes Pi SDK slash commands in the Starling TU
   }
 });
 
+test("up arrow in the empty composer does not scroll the entire TUI", async () => {
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  const originalInput = Object.getOwnPropertyDescriptor(process, "stdin");
+  const originalOutput = Object.getOwnPropertyDescriptor(process, "stdout");
+
+  Object.defineProperty(process, "stdin", { configurable: true, value: input });
+  Object.defineProperty(process, "stdout", { configurable: true, value: output });
+
+  try {
+    const running = runStarlingTui({
+      cwd: process.cwd(),
+      env: { STARLING_TUI_SYNC_OUTPUT: "0" },
+      async createRun() {
+        return {
+          runId: "up-arrow-run",
+          async updateSession() {},
+          async finish() {},
+        };
+      },
+      createSession() {
+        return {
+          async request(request) {
+            if (request.type === "get_state") {
+              return { sessionId: "up-arrow-session", model: { provider: "fake", id: "model-a" } };
+            }
+            if (request.type === "get_messages") {
+              return { messages: [{ role: "assistant", content: "visible timeline row" }] };
+            }
+            if (request.type === "get_commands") return { commands: [] };
+            return undefined;
+          },
+          async close() {},
+        };
+      },
+    });
+
+    await until(() => output.text().includes("visible timeline row"));
+    const writesBeforeUp = output.chunks.length;
+    input.write("\u001b[A");
+    output.emit("resize");
+    await until(() => output.chunks.length > writesBeforeUp);
+
+    const upArrowPaint = output.chunks.slice(writesBeforeUp).join("");
+    assert.doesNotMatch(upArrowPaint, /lines? back/, "Up must edit/navigate the composer, not scroll the viewport");
+
+    input.write("\u0004");
+    assert.equal(await running, 0);
+  } finally {
+    if (originalInput) Object.defineProperty(process, "stdin", originalInput);
+    if (originalOutput) Object.defineProperty(process, "stdout", originalOutput);
+    input.destroy();
+    output.destroy();
+  }
+});
+
+test("bare /model selects a Pi SDK model and then configures its role", async () => {
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  const originalInput = Object.getOwnPropertyDescriptor(process, "stdin");
+  const originalOutput = Object.getOwnPropertyDescriptor(process, "stdout");
+  const requests = [];
+  let activeModel = { provider: "zai", id: "glm-5.2" };
+
+  Object.defineProperty(process, "stdin", { configurable: true, value: input });
+  Object.defineProperty(process, "stdout", { configurable: true, value: output });
+
+  try {
+    const running = runStarlingTui({
+      cwd: process.cwd(),
+      env: { STARLING_TUI_SYNC_OUTPUT: "0" },
+      async createRun() {
+        return {
+          runId: "model-picker-run",
+          async updateSession() {},
+          async finish() {},
+        };
+      },
+      createSession() {
+        return {
+          async request(request) {
+            requests.push(request);
+            if (request.type === "get_state") {
+              return { sessionId: "model-picker-session", model: activeModel };
+            }
+            if (request.type === "get_messages") return { messages: [] };
+            if (request.type === "get_commands") return { commands: [] };
+            if (request.type === "get_available_models") {
+              return {
+                models: [
+                  { ...activeModel, name: "GLM-5.2", reasoning: true },
+                  { provider: "openai", id: "gpt-5.5", name: "GPT-5.5", reasoning: true },
+                ],
+              };
+            }
+            if (request.type === "get_model_config") {
+              return {
+                defaultProvider: activeModel.provider,
+                defaultModel: activeModel.id,
+                modelRoles: { default: `${activeModel.provider}/${activeModel.id}` },
+              };
+            }
+            if (request.type === "configure_model") {
+              if (request.role === "default") {
+                activeModel = { provider: request.provider, id: request.modelId };
+              }
+              return { ...activeModel, role: request.role };
+            }
+            return undefined;
+          },
+          async close() {},
+        };
+      },
+    });
+
+    await until(() => requests.some(({ type }) => type === "get_commands"));
+    input.write("/model\r");
+    await until(() => output.text().includes("Models:"));
+    assert.match(output.text(), /Model Name: GLM-5\.2/);
+
+    input.write("g55");
+    await until(() => output.text().includes("Model Name: GPT-5.5"));
+    input.write("\r");
+    await until(() => output.text().includes("Action for: gpt-5.5"));
+    assert.equal(
+      requests.some((request) => request.type === "configure_model"),
+      false,
+      "choosing a model must open the role action menu before changing configuration",
+    );
+    assert.match(output.text(), /Set as DEFAULT \(Default\)/);
+    assert.match(output.text(), /Set as SMOL \(Fast\)/);
+    input.write("\r");
+    await until(() => output.text().includes("Thinking for: gpt-5.5 · DEFAULT"));
+    assert.equal(
+      requests.some((request) => request.type === "configure_model"),
+      false,
+      "choosing a role must open the thinking-level menu before saving",
+    );
+    assert.match(output.text(), /inherit\s+Inherit session default/);
+    assert.match(output.text(), /high\s+Deep reasoning/);
+    input.write("\r");
+    await until(() => requests.some((request) =>
+      request.type === "configure_model"
+      && request.provider === "openai"
+      && request.modelId === "gpt-5.5"
+      && request.role === "default"
+      && request.thinkingLevel === "inherit"));
+    await until(() => output.text().includes("DEFAULT model set to openai/gpt-5.5"));
+
+    input.write("\u0004");
+    assert.equal(await running, 0);
+  } finally {
+    if (originalInput) Object.defineProperty(process, "stdin", originalInput);
+    if (originalOutput) Object.defineProperty(process, "stdout", originalOutput);
+    input.destroy();
+    output.destroy();
+  }
+});
+
+test("/tree navigates the Pi session tree and refreshes the transcript", async () => {
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  const originalInput = Object.getOwnPropertyDescriptor(process, "stdin");
+  const originalOutput = Object.getOwnPropertyDescriptor(process, "stdout");
+  const requests = [];
+  let navigated = false;
+
+  Object.defineProperty(process, "stdin", { configurable: true, value: input });
+  Object.defineProperty(process, "stdout", { configurable: true, value: output });
+
+  try {
+    const running = runStarlingTui({
+      cwd: process.cwd(),
+      env: { STARLING_TUI_SYNC_OUTPUT: "0" },
+      async createRun() {
+        return {
+          runId: "tree-run",
+          async updateSession() {},
+          async finish() {},
+        };
+      },
+      createSession() {
+        return {
+          async request(request) {
+            requests.push(request);
+            if (request.type === "get_state") {
+              return { sessionId: "tree-session", model: { provider: "fake", id: "model-a" } };
+            }
+            if (request.type === "get_messages") {
+              return {
+                messages: navigated
+                  ? [{ role: "user", content: "first question" }]
+                  : [{ role: "assistant", content: "latest answer" }],
+              };
+            }
+            if (request.type === "get_commands") return { commands: [] };
+            if (request.type === "get_tree") {
+              return {
+                leafId: "leaf",
+                tree: [{
+                  entry: {
+                    id: "root",
+                    parentId: null,
+                    type: "message",
+                    message: { role: "user", content: "first question" },
+                  },
+                  children: [{
+                    entry: {
+                      id: "target",
+                      parentId: "root",
+                      type: "message",
+                      message: { role: "user", content: "earlier question" },
+                    },
+                    children: [{
+                      entry: {
+                        id: "leaf",
+                        parentId: "target",
+                        type: "message",
+                        message: { role: "assistant", content: "latest answer" },
+                      },
+                      children: [],
+                    }],
+                  }],
+                }],
+              };
+            }
+            if (request.type === "navigate_tree") {
+              navigated = true;
+              return { cancelled: false, editorText: "earlier question" };
+            }
+            return undefined;
+          },
+          async close() {},
+        };
+      },
+    });
+
+    await until(() => requests.some(({ type }) => type === "get_commands"));
+    input.write("/tree\r");
+    await until(() => output.text().includes("SESSION TREE"));
+    assert.match(output.text(), /latest answer.*CURRENT/);
+
+    input.write("\u001b[A");
+    input.write("\r");
+    await until(() => output.text().includes("Summarize branch?"));
+    assert.match(output.text(), /No summary/);
+    assert.match(output.text(), /Summarize with custom prompt/);
+    input.write("\r");
+
+    await until(() => requests.some((request) => request.type === "navigate_tree"));
+    assert.deepEqual(requests.find(({ type }) => type === "navigate_tree"), {
+      type: "navigate_tree",
+      targetId: "target",
+      summarize: false,
+    });
+    await until(() => output.text().includes("Navigated to selected point"));
+    assert.match(output.text(), /first question/);
+    assert.match(output.text(), /earlier question/);
+    assert.match(output.text(), /Navigated to selected point/);
+
+    input.write("\u0015");
+    input.write("\u0004");
+    assert.equal(await running, 0);
+  } finally {
+    if (originalInput) Object.defineProperty(process, "stdin", originalInput);
+    if (originalOutput) Object.defineProperty(process, "stdout", originalOutput);
+    input.destroy();
+    output.destroy();
+  }
+});
+
+test("/login selects a Pi provider and never renders the entered API key", async () => {
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  const originalInput = Object.getOwnPropertyDescriptor(process, "stdin");
+  const originalOutput = Object.getOwnPropertyDescriptor(process, "stdout");
+  const requests = [];
+  let sessionOptions;
+  let resolveLogin;
+
+  Object.defineProperty(process, "stdin", { configurable: true, value: input });
+  Object.defineProperty(process, "stdout", { configurable: true, value: output });
+
+  try {
+    const running = runStarlingTui({
+      cwd: process.cwd(),
+      env: { STARLING_TUI_SYNC_OUTPUT: "0" },
+      async createRun() {
+        return {
+          runId: "login-run",
+          async updateSession() {},
+          async finish() {},
+        };
+      },
+      createSession(options) {
+        sessionOptions = options;
+        return {
+          async request(request) {
+            requests.push(request);
+            if (request.type === "get_state") {
+              return { sessionId: "login-session", model: { provider: "fake", id: "model-a" } };
+            }
+            if (request.type === "get_messages") return { messages: [] };
+            if (request.type === "get_commands") return { commands: [] };
+            if (request.type === "get_auth_providers") {
+              return {
+                providers: [{
+                  id: "anthropic",
+                  name: "Anthropic",
+                  authType: "api_key",
+                  methodName: "Anthropic API key",
+                  configured: false,
+                  stored: false,
+                  interactive: true,
+                }],
+              };
+            }
+            if (request.type === "login_provider") {
+              queueMicrotask(() => sessionOptions.onRecord({
+                type: "extension_ui_request",
+                id: "api-key-prompt",
+                method: "input",
+                title: "Login to Anthropic",
+                message: "Paste API key",
+                secret: true,
+              }));
+              return await new Promise((resolve) => {
+                resolveLogin = () => resolve({ provider: "anthropic", authType: "api_key" });
+              });
+            }
+            if (request.type === "extension_ui_response" && request.id === "api-key-prompt") {
+              resolveLogin?.();
+            }
+            return undefined;
+          },
+          async close() {},
+        };
+      },
+    });
+
+    await until(() => requests.some(({ type }) => type === "get_commands"));
+    input.write("/login anthropic\r");
+    await until(() => output.text().includes("Paste API key"));
+    input.write("sk-super-secret\r");
+    await until(() => output.text().includes("Saved API key for Anthropic"));
+
+    assert.ok(requests.some((request) =>
+      request.type === "login_provider"
+      && request.provider === "anthropic"
+      && request.authType === "api_key"));
+    assert.ok(requests.some((request) =>
+      request.type === "extension_ui_response"
+      && request.value === "sk-super-secret"));
+    assert.doesNotMatch(output.text(), /sk-super-secret/);
+
+    input.write("\u0004");
+    assert.equal(await running, 0);
+  } finally {
+    if (originalInput) Object.defineProperty(process, "stdin", originalInput);
+    if (originalOutput) Object.defineProperty(process, "stdout", originalOutput);
+    input.destroy();
+    output.destroy();
+  }
+});
+
 test("dead TTY errors cannot skip SDK shutdown or run finalization", async () => {
   const input = new FakeInput();
   const output = new FakeOutput();
@@ -314,6 +679,123 @@ test("asynchronous terminal stream errors still close the SDK and managed run", 
     assert.equal(await running, 1);
     assert.equal(closeCalls, 1);
     assert.deepEqual(finishes, [{ exitCode: 1 }]);
+  } finally {
+    if (originalInput) Object.defineProperty(process, "stdin", originalInput);
+    if (originalOutput) Object.defineProperty(process, "stdout", originalOutput);
+    input.destroy();
+    output.destroy();
+  }
+});
+
+test("login lets the user choose Pi's login method before logout", async () => {
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  const originalInput = Object.getOwnPropertyDescriptor(process, "stdin");
+  const originalOutput = Object.getOwnPropertyDescriptor(process, "stdout");
+  const requests = [];
+  let resolveLogin;
+
+  Object.defineProperty(process, "stdin", { configurable: true, value: input });
+  Object.defineProperty(process, "stdout", { configurable: true, value: output });
+
+  try {
+    const running = runStarlingTui({
+      cwd: process.cwd(),
+      env: { STARLING_TUI_SYNC_OUTPUT: "0" },
+      async createRun() {
+        return {
+          runId: "auth-run",
+          async updateSession() {},
+          async finish() {},
+        };
+      },
+      createSession(options) {
+        return {
+          async request(request) {
+            requests.push(request);
+            if (request.type === "get_state") {
+              return { sessionId: "auth-session", model: { provider: "fake", id: "model-a" } };
+            }
+            if (request.type === "get_messages") return { messages: [] };
+            if (request.type === "get_commands") return { commands: [] };
+            if (request.type === "get_auth_providers") {
+              return {
+                providers: [{
+                  id: "openai-codex",
+                  name: "OpenAI Codex",
+                  authType: "oauth",
+                  methodName: "OpenAI Codex",
+                  configured: request.mode === "logout",
+                  stored: request.mode === "logout",
+                  interactive: true,
+                }],
+              };
+            }
+            if (request.type === "login_provider") {
+              queueMicrotask(() => options.onRecord({
+                type: "extension_ui_request",
+                id: "openai-login-method",
+                method: "select",
+                title: "Select OpenAI Codex login method:",
+                options: ["Browser login (default)", "Device code login (headless)"],
+              }));
+              return await new Promise((resolve) => {
+                resolveLogin = () => resolve({ provider: "openai-codex" });
+              });
+            }
+            if (request.type === "extension_ui_response" && request.id === "openai-login-method") {
+              resolveLogin?.();
+            }
+            if (request.type === "logout_provider") return { provider: "openai-codex" };
+            return undefined;
+          },
+          async close() {},
+        };
+      },
+    });
+
+    await until(() => requests.some(({ type }) => type === "get_commands"));
+    input.write("/login\r");
+    await until(() => output.text().includes("LOGIN · Select provider authentication"));
+    input.write("\r");
+    await until(() => requests.some(({ type }) => type === "login_provider"));
+    await until(() => output.text().includes("Select OpenAI Codex login method:"));
+    assert.match(output.text(), /Browser login \(default\)[\s\S]*Device code login \(headless\)/);
+    input.write("\u001b[B");
+    input.write("\r");
+    await until(() => requests.some((request) =>
+      request.type === "extension_ui_response"
+      && request.id === "openai-login-method"
+      && request.value === "Device code login (headless)"));
+    await until(() => output.text().includes("Logged in to OpenAI Codex"));
+
+    input.write("/logout\r");
+    await until(() => output.text().includes("LOGOUT · Select stored credential"));
+    input.write("\r");
+    await until(() => requests.some(({ type }) => type === "logout_provider"));
+    await until(() => output.text().includes("Logged out of OpenAI Codex"));
+
+    assert.deepEqual(
+      requests.filter(({ type }) =>
+        type.includes("auth")
+        || type.includes("login")
+        || type.includes("logout")
+        || type === "extension_ui_response"),
+      [
+        { type: "get_auth_providers", mode: "login" },
+        { type: "login_provider", provider: "openai-codex", authType: "oauth" },
+        {
+          type: "extension_ui_response",
+          id: "openai-login-method",
+          value: "Device code login (headless)",
+        },
+        { type: "get_auth_providers", mode: "logout" },
+        { type: "logout_provider", provider: "openai-codex" },
+      ],
+    );
+
+    input.write("\u0004");
+    assert.equal(await running, 0);
   } finally {
     if (originalInput) Object.defineProperty(process, "stdin", originalInput);
     if (originalOutput) Object.defineProperty(process, "stdout", originalOutput);
@@ -453,3 +935,65 @@ async function until(predicate, timeoutMs = 1_000) {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
+
+test("Up arrow recalls the previous prompt into the composer", async () => {
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  const originalInput = Object.getOwnPropertyDescriptor(process, "stdin");
+  const originalOutput = Object.getOwnPropertyDescriptor(process, "stdout");
+  const requests = [];
+
+  Object.defineProperty(process, "stdin", { configurable: true, value: input });
+  Object.defineProperty(process, "stdout", { configurable: true, value: output });
+
+  try {
+    const running = runStarlingTui({
+      cwd: process.cwd(),
+      env: { STARLING_TUI_SYNC_OUTPUT: "0" },
+      async createRun() {
+        return { runId: "history-run", async updateSession() {}, async finish() {} };
+      },
+      createSession() {
+        return {
+          async request(request) {
+            requests.push(request);
+            if (request.type === "get_state") {
+              return {
+                sessionId: "history-session",
+                model: { provider: "fake", id: "model-a" },
+                thinkingLevel: "medium",
+                isStreaming: false,
+                pendingMessageCount: 0,
+              };
+            }
+            if (request.type === "get_messages") {
+              return { messages: [{ role: "user", content: "recall this prompt" }] };
+            }
+            return undefined;
+          },
+          async close() {},
+        };
+      },
+    });
+
+    await until(() => requests.some((r) => r.type === "get_messages"));
+    // Transcript hydrates the prior user turn; the composer cursor marker ▏
+    // distinguishes the live composer line from the transcript copy.
+    await until(() => output.text().includes("recall this prompt"), 2500);
+    const composerHasRecall = (text) => /recall this prompt(\u001b\[[0-9;]*m)*▏/.test(text);
+    assert.equal(composerHasRecall(output.text()), false, "composer is empty before Up");
+
+    input.write("\u001b[A"); // Up
+    await until(() => composerHasRecall(output.text()), 2500);
+    assert.equal(composerHasRecall(output.text()), true, "Up recalls the prior prompt");
+
+    // Composer is non-empty after recall; clear it first so ctrl-d exits.
+    input.write("\u0015\u0004");
+    assert.equal(await running, 0);
+  } finally {
+    if (originalInput) Object.defineProperty(process, "stdin", originalInput);
+    if (originalOutput) Object.defineProperty(process, "stdout", originalOutput);
+    input.destroy();
+    output.destroy();
+  }
+});

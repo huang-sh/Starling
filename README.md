@@ -87,7 +87,11 @@ starling
 
 This starts Starling's own TUI and embeds Pi in the same Node process. Starling records the run directly so the active SDK session remains visible to `starling top`, and restores terminal ownership before SDK shutdown. The interface is Starling-owned: it references OMP's layout, input decoding, differential painting, and synchronized-output mechanics, but does not import, depend on, or start the Pi or OMP TUI.
 
-Type `/` in the editor to open the slash-command menu. Use Up/Down to select, Tab or Enter to complete, and Enter again to run. Starling implements `/help`, `/model`, `/thinking`, `/compact`, `/name`, `/session`, `/reload`, and `/quit`; the same menu also discovers Pi extension commands, prompt templates, and `skill:*` commands through the public SDK. Bare `starling` loads trusted Pi user/project resources so those dynamic commands are available, while Starling's managed permission and transcript guards remain active.
+Type `/` in the editor to open the slash-command menu. Use Up/Down to select, Tab to complete, or Enter to run an exact command. Starling implements `/help`, `/model`, `/tree`, `/login`, `/logout`, `/thinking`, `/compact`, `/name`, `/session`, `/reload`, and `/quit`; the same menu also discovers Pi extension commands, prompt templates, and `skill:*` commands through the public SDK. Bare `/model` opens Starling's SDK-backed searchable model picker (Up/Down select, Tab or Left/Right cycle providers). Enter first chooses a model, then assigns it to `DEFAULT`, `SMOL`, `SLOW`, `VISION`, `PLAN`, `DESIGNER`, `COMMIT`, `TINY`, `TASK`, or `ADVISOR`; `/model <provider/model>` remains available for direct session switching.
+
+Use `/tree` to navigate Pi's current session tree without creating a new session file. The picker reads `SessionManager.getTree()`, keeps Pi entry IDs intact, and asks whether to discard, summarize, or custom-summarize the abandoned branch before calling `AgentSession.navigateTree()`.
+
+Use `/login` to choose a Pi provider and configure its subscription/OAuth or API-key method; `/login <provider>` jumps directly to matching providers. OAuth URLs and device codes are shown inside Starling, and secret inputs are masked. `/logout` lists only credentials stored by Pi, while `/logout <provider>` removes one directly. Logout does not alter provider environment variables or `models.json`. Bare `starling` loads trusted Pi user/project resources so dynamic commands remain available, while Starling's managed permission and transcript guards stay active.
 
 List recent sessions:
 

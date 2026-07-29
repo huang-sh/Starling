@@ -13,6 +13,26 @@ export const STARLING_SLASH_COMMANDS = [
         allowArgs: true,
     },
     {
+        name: "tree",
+        description: "Navigate the current Pi session tree",
+        source: "starling",
+        allowArgs: false,
+    },
+    {
+        name: "login",
+        description: "Configure provider authentication",
+        source: "starling",
+        argumentHint: "[provider]",
+        allowArgs: true,
+    },
+    {
+        name: "logout",
+        description: "Remove stored provider authentication",
+        source: "starling",
+        argumentHint: "[provider]",
+        allowArgs: true,
+    },
+    {
         name: "thinking",
         description: "Show or set the thinking level",
         source: "starling",
@@ -127,7 +147,7 @@ export function planSlashCommand(text, catalog, busy) {
             request.streamingBehavior = "followUp";
         return { kind: "dynamic", command, request };
     }
-    if (busy && (command.name === "compact" || command.name === "reload")) {
+    if (busy && ["compact", "tree", "login", "logout", "reload"].includes(command.name)) {
         return {
             kind: "error",
             message: `/${command.name} is unavailable while Pi is working; interrupt or wait for the turn to finish`,
@@ -155,6 +175,22 @@ export function planSlashCommand(text, catalog, busy) {
                 refreshMetadata: true,
             };
         }
+        case "tree":
+            return { kind: "local", command, action: "tree" };
+        case "login":
+            return {
+                kind: "local",
+                command,
+                action: "login",
+                ...(invocation.args ? { argument: invocation.args } : {}),
+            };
+        case "logout":
+            return {
+                kind: "local",
+                command,
+                action: "logout",
+                ...(invocation.args ? { argument: invocation.args } : {}),
+            };
         case "thinking":
             if (!invocation.args)
                 return { kind: "local", command, action: "thinking" };
@@ -223,7 +259,7 @@ export function formatSlashHelp(commands) {
         "Available slash commands",
         ...rows,
         "",
-        "Keyboard: ↑/↓ select · Tab/Enter complete · Esc close · Alt+Enter newline",
+        "Keyboard: ↑/↓ select · Tab complete · Enter run · Esc close · Alt+Enter newline",
     ].join("\n");
 }
 export function formatThinkingLevels(current) {
@@ -268,6 +304,12 @@ function parseSlashInvocation(text) {
     if (!match)
         return null;
     return { name: match[1], args: (match[2] ?? "").trim() };
+}
+/** Whether text is shaped like a slash command (`/name` + optional args).
+ *  A leading `/` alone does not qualify: `/data20T/dev/foo` is a file path,
+ *  not a command, so it must be sent as an ordinary prompt. */
+export function isSlashInvocation(text) {
+    return parseSlashInvocation(text) !== null;
 }
 function normalizeDynamicCommand(value) {
     if (!isRecord(value))

@@ -55,6 +55,15 @@ export interface AgentSdkSession {
   ): void;
   abort(): Promise<void>;
   setModel(provider: string, modelId: string): Promise<unknown>;
+  getModelConfig(): Promise<JsonObject>;
+  configureModel(provider: string, modelId: string, role: string, thinkingLevel: string): Promise<unknown>;
+  getAuthProviders(mode: "login" | "logout"): Promise<JsonObject>;
+  loginProvider(provider: string, authType: "oauth" | "api_key"): Promise<unknown>;
+  logoutProvider(provider: string): Promise<unknown>;
+  abortAuthentication(): void;
+  getTree(): JsonObject;
+  navigateTree(targetId: string, options?: JsonObject): Promise<JsonObject>;
+  abortTreeNavigation(): void;
   setThinkingLevel(level: string): void;
   getAvailableModels(): Promise<unknown[]>;
   compact(customInstructions?: string): Promise<unknown>;

@@ -200,6 +200,7 @@ export function normalizeExtensionUiRequest(raw) {
         message: textField(raw.message) || textField(raw.placeholder),
         options: method === "confirm" ? ["No", "Yes"] : suppliedOptions,
         initialValue: method === "editor" ? textField(raw.prefill) : "",
+        secret: method === "input" && raw.secret === true,
     };
 }
 export function isRecord(value) {

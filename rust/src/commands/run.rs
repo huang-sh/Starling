@@ -4482,39 +4482,52 @@ fn pi_session_switch_guard_registration_source() -> &'static str {
 }
 
 fn pi_chat_permission_gate_source() -> &'static str {
-    r#"const STARLING_AUTO_ALLOWED_TOOLS = new Set(["read", "grep", "find", "ls"]);
+    r#"// Pi-style risk-based permission gate: only intercept genuinely destructive
+// operations, auto-allow everything else. Mirrors pi's official
+// examples/extensions/permission-gate.ts and protected-paths.ts.
 const STARLING_PERMISSION_TIMEOUT_MS = 30000;
+const STARLING_DANGEROUS_BASH_PATTERNS = [
+  /\brm\b\s+(-[a-z]*r|--recursive)/i,
+  /\brm\b\s+(-[a-z]*f|--force)\b/i,
+  /\bsudo\b/i,
+  /\b(chmod|chown)\b[^|\n]*\b777\b/i,
+  /\bgit\b\s+push\b.*--force(?!-)/i,
+  /\bdd\b[^|\n]*\bof=/i,
+  /\bmkfs\b/i,
+  /\b(shutdown|reboot|halt|poweroff)\b/i,
+];
+const STARLING_PROTECTED_WRITE_PATHS = [".env", ".git/", "node_modules/"];
 
 async function enforceStarlingToolPermission(event, ctx) {
   const toolName = String(event?.toolName ?? "").trim().toLowerCase();
-  if (STARLING_AUTO_ALLOWED_TOOLS.has(toolName)) return;
+  const input = (event && typeof event.input === "object" && event.input) ? event.input : {};
 
-  let input = "{}";
-  try {
-    input = JSON.stringify(event?.input ?? {}, null, 2);
-  } catch (_) {
-    input = "<unserializable tool input>";
-  }
-  if (input.length > 4000) {
-    input = `${input.slice(0, 4000)}\n… <tool input truncated by Starling>`;
+  if (toolName === "bash") {
+    const command = String(input.command ?? "");
+    if (STARLING_DANGEROUS_BASH_PATTERNS.some((p) => p.test(command))) {
+      let approved = false;
+      try {
+        approved = (await ctx.ui?.confirm?.(
+          `⚠️ Dangerous command:\n\n  ${command}\n\nAllow?`,
+          command,
+          { timeout: STARLING_PERMISSION_TIMEOUT_MS },
+        )) === true;
+      } catch (_) {
+        approved = false;
+      }
+      if (!approved) {
+        return { block: true, reason: `Starling blocked destructive bash: ${command}` };
+      }
+    }
+    return;
   }
 
-  let approved = false;
-  try {
-    approved = (await ctx.ui?.confirm?.(
-      `Allow Pi tool: ${toolName || "unknown"}?`,
-      input,
-      { timeout: STARLING_PERMISSION_TIMEOUT_MS },
-    )) === true;
-  } catch (_) {
-    approved = false;
-  }
-
-  if (!approved) {
-    return {
-      block: true,
-      reason: `Starling denied Pi tool '${toolName || "unknown"}' because approval was not granted.`,
-    };
+  if (toolName === "write" || toolName === "edit") {
+    const target = String(input.path ?? "");
+    if (STARLING_PROTECTED_WRITE_PATHS.some((p) => target.includes(p))) {
+      ctx.ui?.notify?.(`Blocked write to protected path: ${target}`, "warning");
+      return { block: true, reason: `Path "${target}" is protected by Starling` };
+    }
   }
 }"#
 }

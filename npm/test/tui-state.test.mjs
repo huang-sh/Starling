@@ -225,6 +225,7 @@ test("confirmation prompts default to deny", () => {
     options: ["No", "Yes"],
     selected: 0,
     value: "",
+    secret: false,
     cursor: 0,
   });
 });
@@ -295,6 +296,46 @@ test("compaction is independently interruptible and cancellation is not reported
   ]);
 });
 
+test("session tree navigation keeps tree, summary, and custom-prompt stages explicit", () => {
+  let state = createInitialStarlingTuiState("/work/starling");
+  const entries = [
+    {
+      id: "root",
+      parentId: null,
+      type: "message",
+      text: "user: start",
+      prefix: "",
+      onActivePath: true,
+      current: false,
+    },
+    {
+      id: "leaf",
+      parentId: "root",
+      type: "message",
+      text: "assistant: done",
+      prefix: "└─ ",
+      onActivePath: true,
+      current: true,
+    },
+  ];
+  state = reduceStarlingTui(state, { type: "tree.open", entries, leafId: "leaf" });
+  assert.equal(state.treePicker.selected, 1, "the current Pi leaf starts selected");
+
+  state = reduceStarlingTui(state, { type: "tree.select", delta: -1 });
+  assert.equal(state.treePicker.selected, 0);
+  state = reduceStarlingTui(state, { type: "tree.summary.open", targetId: "root" });
+  assert.equal(state.treePicker.stage, "summary");
+  state = reduceStarlingTui(state, { type: "tree.summary.select", delta: 2 });
+  assert.equal(state.treePicker.summarySelected, 2);
+  state = reduceStarlingTui(state, { type: "tree.custom.open" });
+  state = reduceStarlingTui(state, { type: "tree.custom.append", value: "Keep decisions" });
+  assert.equal(state.treePicker.customPrompt, "Keep decisions");
+  state = reduceStarlingTui(state, { type: "tree.working" });
+  state = reduceStarlingTui(state, { type: "tree.failed", message: "cancelled" });
+  assert.equal(state.treePicker.working, false);
+  assert.equal(state.treePicker.error, "cancelled");
+});
+
 test("strict JSONL decoder preserves Unicode line separators and UTF-8 chunks", () => {
   const decoder = new StrictJsonlDecoder();
   const encoded = Buffer.from('{"text":"一 二"}\n{"ok":true}\r\n', "utf8");
@@ -304,4 +345,66 @@ test("strict JSONL decoder preserves Unicode line separators and UTF-8 chunks", 
     ...decoder.end(),
   ];
   assert.deepEqual(lines, ['{"text":"一 二"}', '{"ok":true}']);
+});
+
+test("input history recalls submitted prompts and slash commands via Up/Down", () => {
+  let state = createInitialStarlingTuiState("/work/starling");
+  state = reduceStarlingTui(state, { type: "composer.set", value: "hello world" });
+  state = reduceStarlingTui(state, { type: "history.push", text: "hello world" });
+  state = reduceStarlingTui(state, { type: "composer.set", value: "/login" });
+  state = reduceStarlingTui(state, { type: "history.push", text: "/login" });
+  assert.deepEqual(state.inputHistory, ["hello world", "/login"]);
+  assert.equal(state.historyIndex, 2);
+  // submitComposer clears the composer after pushing history.
+  state = reduceStarlingTui(state, { type: "composer.set", value: "" });
+
+  state = reduceStarlingTui(state, { type: "history.prev" });
+  assert.equal(state.composer, "/login");
+  state = reduceStarlingTui(state, { type: "history.prev" });
+  assert.equal(state.composer, "hello world");
+  const oldest = reduceStarlingTui(state, { type: "history.prev" });
+  assert.equal(oldest.composer, "hello world");
+
+  state = reduceStarlingTui(state, { type: "history.next" });
+  assert.equal(state.composer, "/login");
+  state = reduceStarlingTui(state, { type: "history.next" });
+  assert.equal(state.composer, "");
+  assert.equal(state.historyIndex, state.inputHistory.length);
+  const newest = reduceStarlingTui(state, { type: "history.next" });
+  assert.equal(newest.composer, "");
+});
+
+test("history preserves an unsent draft and collapses consecutive duplicates", () => {
+  let state = createInitialStarlingTuiState("/work/starling");
+  state = reduceStarlingTui(state, { type: "history.push", text: "first" });
+  state = reduceStarlingTui(state, { type: "composer.set", value: "a draft in progress" });
+  state = reduceStarlingTui(state, { type: "history.prev" });
+  assert.equal(state.composer, "first");
+  state = reduceStarlingTui(state, { type: "history.next" });
+  assert.equal(state.composer, "a draft in progress", "unsent draft is restored");
+
+  state = reduceStarlingTui(state, { type: "history.push", text: "first" });
+  state = reduceStarlingTui(state, { type: "history.push", text: "first" });
+  assert.deepEqual(state.inputHistory, ["first"]);
+});
+
+test("session snapshot seeds history from prior user turns", () => {
+  let state = createInitialStarlingTuiState("/work/starling");
+  state = dispatchRecords(state, [{ type: "starling_started", runId: "r", cwd: "/work/starling" }]);
+  const snapshot = normalizeChatSnapshot(
+    { model: { provider: "p", id: "m" }, thinkingLevel: "high" },
+    [
+      { role: "user", content: "earlier question" },
+      { role: "assistant", content: "an answer" },
+      { role: "user", content: "follow up" },
+      { role: "user", content: "follow up" },
+    ],
+  );
+  state = reduceStarlingTui(state, { type: "chat.event", event: { type: "session.snapshot", snapshot } });
+  assert.deepEqual(state.inputHistory, ["earlier question", "follow up"]);
+  assert.equal(state.historyIndex, state.inputHistory.length);
+  state = reduceStarlingTui(state, { type: "history.prev" });
+  assert.equal(state.composer, "follow up");
+  state = reduceStarlingTui(state, { type: "history.prev" });
+  assert.equal(state.composer, "earlier question");
 });

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
@@ -56,6 +59,22 @@ class FakeSession {
     return { provider, id: modelId };
   }
 
+  async getModelConfig() {
+    return {
+      defaultProvider: "fake",
+      defaultModel: "model-a",
+      modelRoles: { default: "fake/model-a" },
+    };
+  }
+
+  async configureModel(provider, modelId, role, thinkingLevel) {
+    this.calls.push(["configureModel", provider, modelId, role, thinkingLevel]);
+    const selector = thinkingLevel === "inherit"
+      ? `${provider}/${modelId}`
+      : `${provider}/${modelId}:${thinkingLevel}`;
+    return { provider, id: modelId, role, thinkingLevel, selector };
+  }
+
   setThinkingLevel(level) {
     this.thinking = level;
     this.calls.push(["setThinking", level]);
@@ -63,6 +82,23 @@ class FakeSession {
 
   async getAvailableModels() {
     return [{ provider: "fake", id: "model-a" }];
+  }
+
+  getTree() {
+    this.calls.push(["getTree"]);
+    return {
+      tree: [{ entry: { id: "root", parentId: null, type: "message" }, children: [] }],
+      leafId: "root",
+    };
+  }
+
+  async navigateTree(targetId, options) {
+    this.calls.push(["navigateTree", targetId, options]);
+    return { cancelled: false };
+  }
+
+  abortTreeNavigation() {
+    this.calls.push(["abortTreeNavigation"]);
   }
 
   async compact(customInstructions) {
@@ -151,7 +187,18 @@ test("serves the existing Pi RPC command surface through an injected adapter", a
     { id: "prompt", type: "prompt", message: "hello", streamingBehavior: "followUp" },
     { id: "thinking", type: "set_thinking_level", level: "high" },
     { id: "models", type: "get_available_models" },
+    { id: "tree", type: "get_tree" },
+    { id: "navigate-tree", type: "navigate_tree", targetId: "root", summarize: false },
+    { id: "model-config", type: "get_model_config" },
     { id: "model", type: "set_model", provider: "fake", modelId: "model-a" },
+    {
+      id: "configure-model",
+      type: "configure_model",
+      provider: "fake",
+      modelId: "model-a",
+      role: "smol",
+      thinkingLevel: "medium",
+    },
     { id: "compact", type: "compact", customInstructions: "short" },
   ]) {
     input.write(serializeJsonLine(command));
@@ -159,6 +206,8 @@ test("serves the existing Pi RPC command surface through an injected adapter", a
   await until(() => response(output, "compact") !== undefined);
   input.write(serializeJsonLine({ id: "abort-compact", type: "abort_compaction" }));
   await until(() => response(output, "abort-compact") !== undefined);
+  input.write(serializeJsonLine({ id: "abort-tree", type: "abort_tree_navigation" }));
+  await until(() => response(output, "abort-tree") !== undefined);
   input.write(serializeJsonLine({ id: "abort", type: "abort" }));
   await until(() => response(output, "abort") !== undefined);
   input.end();
@@ -187,7 +236,19 @@ test("serves the existing Pi RPC command surface through an injected adapter", a
   assert.deepEqual(response(output, "models").data.models, [
     { provider: "fake", id: "model-a" },
   ]);
+  assert.equal(response(output, "tree").data.leafId, "root");
+  assert.deepEqual(response(output, "navigate-tree").data, { cancelled: false });
+  assert.deepEqual(response(output, "model-config").data.modelRoles, {
+    default: "fake/model-a",
+  });
   assert.deepEqual(response(output, "model").data, { provider: "fake", id: "model-a" });
+  assert.deepEqual(response(output, "configure-model").data, {
+    provider: "fake",
+    id: "model-a",
+    role: "smol",
+    thinkingLevel: "medium",
+    selector: "fake/model-a:medium",
+  });
   assert.deepEqual(response(output, "compact").data, { summary: "small" });
   assert.equal(response(output, "abort-compact").success, true);
   assert.deepEqual(adapter.session.calls, [
@@ -195,9 +256,13 @@ test("serves the existing Pi RPC command surface through an injected adapter", a
     ["reload"],
     ["prompt", "hello", "followUp"],
     ["setThinking", "high"],
+    ["getTree"],
+    ["navigateTree", "root", { summarize: false }],
     ["setModel", "fake", "model-a"],
+    ["configureModel", "fake", "model-a", "smol", "medium"],
     ["compact", "short"],
     ["abortCompaction"],
+    ["abortTreeNavigation"],
     ["abort"],
   ]);
   assert.deepEqual(adapter.session.shutdownCalls, ["shutdown"]);
@@ -517,7 +582,18 @@ test("real adapter follows OMP's public createAgentSession lifecycle", async () 
   const sdkSession = makeSdkSession(calls, {
     model: selectedModel,
     thinkingLevel: "high",
+    async navigateTree(targetId, options) {
+      calls.push(["navigateTree", targetId, options]);
+      return { cancelled: false, editorText: "restored prompt" };
+    },
+    abortBranchSummary() {
+      calls.push(["abortBranchSummary"]);
+    },
   });
+  const sessionTree = [{
+    entry: { id: "root", parentId: null, type: "message" },
+    children: [],
+  }];
   const extensionSource = { path: "/extensions/example.mjs", scope: "project" };
   const promptSource = { path: "/prompts/review.md", scope: "user" };
   const skillSource = { path: "/skills/check/SKILL.md", scope: "project" };
@@ -553,6 +629,11 @@ test("real adapter follows OMP's public createAgentSession lifecycle", async () 
   let createOptions;
   const fakeSdk = makeMinimalPiSdk(calls, {
     session: sdkSession,
+    sessionManager: {
+      getCwd: () => "/work",
+      getTree: () => sessionTree,
+      getLeafId: () => "root",
+    },
     modelRuntime: {
       async getAvailable() {
         return [selectedModel];
@@ -687,6 +768,12 @@ test("real adapter follows OMP's public createAgentSession lifecycle", async () 
     sessionId: "sdk-session",
     totalMessages: 3,
   });
+  assert.deepEqual(session.getTree(), { tree: sessionTree, leafId: "root" });
+  assert.deepEqual(await session.navigateTree("root", { summarize: false }), {
+    cancelled: false,
+    editorText: "restored prompt",
+  });
+  session.abortTreeNavigation();
   session.setSessionName("Renamed through adapter");
   await session.reload();
   assert.deepEqual(calls.filter(([name]) => name === "sessionName"), [
@@ -694,11 +781,16 @@ test("real adapter follows OMP's public createAgentSession lifecycle", async () 
     ["sessionName", "Renamed through adapter"],
   ]);
   assert.equal(calls.some(([name]) => name === "sessionReload"), true);
+  assert.deepEqual(calls.filter(([name]) => name === "navigateTree"), [
+    ["navigateTree", "root", { summarize: false }],
+  ]);
+  assert.equal(calls.filter(([name]) => name === "abortBranchSummary").length, 1);
 
   const shutdownStart = calls.length;
   await session.shutdown();
   await session.shutdown();
   assert.deepEqual(calls.slice(shutdownStart).map(([name]) => name), [
+    "abortBranchSummary",
     "abortCompaction",
     "abort",
     "abortCompaction",
@@ -706,6 +798,276 @@ test("real adapter follows OMP's public createAgentSession lifecycle", async () 
     "unsubscribe",
     "dispose",
   ]);
+});
+
+test("adapter persists the selected default and model role without replacing Pi settings", async (t) => {
+  const agentDir = mkdtempSync(join(tmpdir(), "starling-model-config-"));
+  t.after(() => rmSync(agentDir, { recursive: true, force: true }));
+  const settingsPath = join(agentDir, "settings.json");
+  writeFileSync(settingsPath, JSON.stringify({
+    defaultProvider: "fake",
+    defaultModel: "model-a",
+    defaultThinkingLevel: "low",
+    packages: ["pi-taskflow"],
+    modelRoles: { slow: "fake/model-a" },
+  }, null, 2));
+
+  const calls = [];
+  const models = [
+    { provider: "fake", id: "model-a", name: "Model A", reasoning: true },
+    {
+      provider: "fake",
+      id: "model-b",
+      name: "Model B",
+      reasoning: true,
+      thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+    },
+  ];
+  let defaultProvider = "fake";
+  let defaultModel = "model-a";
+  let defaultThinkingLevel = "low";
+  const settingsManager = {
+    getSessionDir: () => undefined,
+    getDefaultProvider: () => defaultProvider,
+    getDefaultModel: () => defaultModel,
+    getDefaultThinkingLevel: () => defaultThinkingLevel,
+    setDefaultModelAndProvider(provider, modelId) {
+      defaultProvider = provider;
+      defaultModel = modelId;
+      const current = JSON.parse(readFileSync(settingsPath, "utf8"));
+      writeFileSync(settingsPath, JSON.stringify({
+        ...current,
+        defaultProvider: provider,
+        defaultModel: modelId,
+      }, null, 2));
+    },
+    setDefaultThinkingLevel(level) {
+      defaultThinkingLevel = level;
+      const current = JSON.parse(readFileSync(settingsPath, "utf8"));
+      writeFileSync(settingsPath, JSON.stringify({
+        ...current,
+        defaultThinkingLevel: level,
+      }, null, 2));
+    },
+    async flush() {},
+  };
+  const sdkSession = makeSdkSession(calls, { model: models[0] });
+  const fakeSdk = makeMinimalPiSdk(calls, {
+    agentDir,
+    session: sdkSession,
+    createSettings: () => settingsManager,
+    modelRuntime: {
+      async getAvailable() {
+        return models;
+      },
+      getModel(provider, modelId) {
+        return models.find((model) => model.provider === provider && model.id === modelId);
+      },
+    },
+  });
+  const adapter = createPiSdkAdapter(async () => fakeSdk, {});
+  const session = await adapter.open({
+    cwd: "/work",
+    extensions: [],
+    noExtensions: true,
+  }, emptyBindings());
+
+  assert.deepEqual(await session.getModelConfig(), {
+    defaultProvider: "fake",
+    defaultModel: "model-a",
+    defaultThinkingLevel: "low",
+    modelRoles: { slow: "fake/model-a" },
+  });
+  await session.configureModel("fake", "model-b", "smol", "high");
+  await session.configureModel("fake", "model-b", "default", "max");
+
+  const saved = JSON.parse(readFileSync(settingsPath, "utf8"));
+  assert.deepEqual(saved.packages, ["pi-taskflow"], "unrelated Pi settings must survive");
+  assert.deepEqual(saved.modelRoles, {
+    slow: "fake/model-a",
+    smol: "fake/model-b:high",
+    default: "fake/model-b:max",
+  });
+  assert.equal(saved.defaultProvider, "fake");
+  assert.equal(saved.defaultModel, "model-b");
+  assert.equal(saved.defaultThinkingLevel, "max");
+  assert.deepEqual(sdkSession.model, models[1], "DEFAULT also switches the live SDK session");
+  await assert.rejects(
+    () => session.configureModel("fake", "model-b", "unknown-role", "inherit"),
+    /Unsupported model role/,
+  );
+
+  await session.shutdown();
+});
+
+test("adapter registers the OMP-compatible Zhipu Coding Plan provider", async () => {
+  const calls = [];
+  let registered;
+  let requested;
+  const models = [];
+  const modelRuntime = {
+    registerProvider(provider, config) {
+      registered = { provider, config };
+      models.push(...config.models.map((model) => ({
+        ...model,
+        provider,
+        api: config.api,
+        baseUrl: config.baseUrl,
+      })));
+    },
+    async getAvailable() {
+      return models;
+    },
+    getModel(provider, modelId) {
+      return models.find((model) => model.provider === provider && model.id === modelId);
+    },
+  };
+  const adapter = createPiSdkAdapter(
+    async () => makeMinimalPiSdk(calls, { modelRuntime }),
+    { ZHIPU_API_KEY: "zhipu-test-key" },
+    async (input, init) => {
+      requested = { url: String(input), authorization: init?.headers?.Authorization };
+      return new Response(JSON.stringify({
+        data: [
+          { id: "glm-5.1", name: "GLM-5.1" },
+          { id: "glm-5.2", name: "GLM-5.2" },
+        ],
+      }), { headers: { "content-type": "application/json" } });
+    },
+  );
+  const session = await adapter.open({
+    cwd: "/work",
+    extensions: [],
+    noExtensions: true,
+  }, emptyBindings());
+
+  assert.deepEqual(requested, {
+    url: "https://open.bigmodel.cn/api/coding/paas/v4/models",
+    authorization: "Bearer zhipu-test-key",
+  });
+  assert.equal(registered.provider, "zhipu-coding-plan");
+  assert.equal(registered.config.name, "Zhipu Coding Plan (智谱)");
+  assert.equal(registered.config.api, "openai-completions");
+  assert.equal(registered.config.baseUrl, "https://open.bigmodel.cn/api/coding/paas/v4");
+  assert.equal(registered.config.apiKey, "zhipu-test-key");
+  assert.deepEqual(
+    (await session.getAvailableModels()).map((model) => `${model.provider}/${model.id}`),
+    ["zhipu-coding-plan/glm-5.1", "zhipu-coding-plan/glm-5.2"],
+  );
+
+  await session.shutdown();
+});
+
+test("adapter drives Pi SDK provider login and logout through Starling auth UI", async () => {
+  const calls = [];
+  const notices = [];
+  const prompts = [];
+  const provider = {
+    id: "anthropic",
+    name: "Anthropic",
+    auth: {
+      oauth: { name: "Anthropic subscription", login() {} },
+      apiKey: { name: "Anthropic API key", login() {} },
+    },
+  };
+  const modelRuntime = {
+    async getAvailable() {
+      return [];
+    },
+    getProviders() {
+      return [provider];
+    },
+    getProvider(providerId) {
+      return providerId === provider.id ? provider : undefined;
+    },
+    getProviderAuthStatus() {
+      return { configured: false };
+    },
+    async login(providerId, authType, interaction) {
+      interaction.notify({
+        type: "auth_url",
+        url: "https://auth.example.test/start",
+        instructions: "Sign in in your browser",
+      });
+      const value = await interaction.prompt({
+        type: "secret",
+        message: "Paste API key",
+        placeholder: "sk-...",
+      });
+      calls.push(["runtimeLogin", providerId, authType, value]);
+      return { type: "api_key", key: value };
+    },
+    async listCredentials() {
+      return [{ providerId: "anthropic", type: "api_key" }];
+    },
+    async logout(providerId) {
+      calls.push(["runtimeLogout", providerId]);
+    },
+  };
+  const adapter = createPiSdkAdapter(
+    async () => makeMinimalPiSdk(calls, { modelRuntime }),
+    {},
+  );
+  const bindings = {
+    ...emptyBindings(),
+    uiContext: {
+      async input(title, placeholder, options) {
+        prompts.push({ type: "input", title, placeholder, options });
+        return "sk-test-key";
+      },
+      notify(message, type) {
+        notices.push({ message, type });
+      },
+      setStatus() {},
+    },
+  };
+  const session = await adapter.open({
+    cwd: "/work",
+    extensions: [],
+    noExtensions: true,
+  }, bindings);
+
+  const providerOptions = await session.getAuthProviders("login");
+  assert.deepEqual(providerOptions.providers.map(({ id, authType, stored, interactive }) => ({
+    id,
+    authType,
+    stored,
+    interactive,
+  })), [
+    { id: "anthropic", authType: "api_key", stored: true, interactive: true },
+    { id: "anthropic", authType: "oauth", stored: false, interactive: true },
+  ]);
+  assert.deepEqual(await session.loginProvider("anthropic", "api_key"), {
+    provider: "anthropic",
+    name: "Anthropic",
+    authType: "api_key",
+  });
+  assert.deepEqual(prompts, [
+    {
+      type: "input",
+      title: "Login to Anthropic",
+      placeholder: "sk-...",
+      options: {
+        signal: prompts[0].options.signal,
+        message: "Sign in in your browser\nOpen this URL to continue:\nhttps://auth.example.test/start\n\nPaste API key",
+        secret: true,
+      },
+    },
+  ]);
+  assert.deepEqual(notices, [{
+    message: "Sign in in your browser\nOpen this URL to continue:\nhttps://auth.example.test/start",
+    type: "info",
+  }]);
+  assert.ok(!JSON.stringify(notices).includes("sk-test-key"));
+  assert.deepEqual(await session.logoutProvider("anthropic"), {
+    provider: "anthropic",
+    name: "Anthropic",
+    authType: "api_key",
+  });
+  assert.ok(calls.some((call) => call[0] === "runtimeLogin"));
+  assert.ok(calls.some((call) => call[0] === "runtimeLogout"));
+
+  await session.shutdown();
 });
 
 test("adapter shutdown cancels and settles compaction before disposing", async () => {
@@ -1020,7 +1382,7 @@ function makeMinimalPiSdk(calls, options = {}) {
   const session = options.session ?? makeSdkSession(calls);
 
   return {
-    getAgentDir: () => "/agent",
+    getAgentDir: () => options.agentDir ?? "/agent",
     ModelRuntime: {
       async create(runtimeOptions) {
         calls.push(["modelRuntime", runtimeOptions]);
@@ -1030,13 +1392,13 @@ function makeMinimalPiSdk(calls, options = {}) {
     SessionManager: {
       create(cwd, sessionDir, sessionOptions) {
         calls.push(["sessionCreate", cwd, sessionDir, sessionOptions]);
-        return {
+        return options.sessionManager ?? {
           getCwd: () => cwd,
         };
       },
       open(...args) {
         if (options.openSessionManager) return options.openSessionManager(...args);
-        return { getCwd: () => "/work" };
+        return options.sessionManager ?? { getCwd: () => "/work" };
       },
     },
     SettingsManager: {

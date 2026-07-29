@@ -99,7 +99,12 @@ class PiChatSession implements ChatSession {
 
     // Cancellation is a control plane, not ordinary queued work. In
     // particular abort_compaction must be able to interrupt compact itself.
-    if (request.type === "abort" || request.type === "abort_compaction") {
+    if (
+      request.type === "abort"
+      || request.type === "abort_compaction"
+      || request.type === "abort_authentication"
+      || request.type === "abort_tree_navigation"
+    ) {
       return this.opening.then((session) => dispatchRequest(session, request));
     }
 
@@ -206,6 +211,84 @@ async function dispatchRequest(
         throw new Error("set_model requires provider and modelId strings");
       }
       return await session.setModel(request.provider, request.modelId);
+    case "get_model_config":
+      assertOnlyFields(request, "get_model_config", ["type", "id"]);
+      return await session.getModelConfig();
+    case "configure_model":
+      if (
+        typeof request.provider !== "string"
+        || typeof request.modelId !== "string"
+        || typeof request.role !== "string"
+      ) {
+        throw new Error("configure_model requires provider, modelId, and role strings");
+      }
+      if (request.thinkingLevel !== undefined && typeof request.thinkingLevel !== "string") {
+        throw new Error("configure_model.thinkingLevel must be a string");
+      }
+      return await session.configureModel(
+        request.provider,
+        request.modelId,
+        request.role,
+        request.thinkingLevel ?? "inherit",
+      );
+    case "get_auth_providers":
+      assertOnlyFields(request, "get_auth_providers", ["type", "id", "mode"]);
+      if (request.mode !== "login" && request.mode !== "logout") {
+        throw new Error("get_auth_providers.mode must be login or logout");
+      }
+      return await session.getAuthProviders(request.mode);
+    case "login_provider":
+      assertOnlyFields(request, "login_provider", ["type", "id", "provider", "authType"]);
+      if (
+        typeof request.provider !== "string"
+        || (request.authType !== "oauth" && request.authType !== "api_key")
+      ) {
+        throw new Error("login_provider requires provider and oauth or api_key authType");
+      }
+      return await session.loginProvider(request.provider, request.authType);
+    case "logout_provider":
+      assertOnlyFields(request, "logout_provider", ["type", "id", "provider"]);
+      if (typeof request.provider !== "string") {
+        throw new Error("logout_provider.provider must be a string");
+      }
+      return await session.logoutProvider(request.provider);
+    case "abort_authentication":
+      assertOnlyFields(request, "abort_authentication", ["type", "id"]);
+      session.abortAuthentication();
+      return undefined;
+    case "get_tree":
+      assertOnlyFields(request, "get_tree", ["type", "id"]);
+      return session.getTree();
+    case "navigate_tree":
+      assertOnlyFields(request, "navigate_tree", [
+        "type",
+        "id",
+        "targetId",
+        "summarize",
+        "customInstructions",
+      ]);
+      if (typeof request.targetId !== "string" || !request.targetId.trim()) {
+        throw new Error("navigate_tree.targetId must be a non-empty string");
+      }
+      if (request.summarize !== undefined && typeof request.summarize !== "boolean") {
+        throw new Error("navigate_tree.summarize must be a boolean");
+      }
+      if (
+        request.customInstructions !== undefined
+        && typeof request.customInstructions !== "string"
+      ) {
+        throw new Error("navigate_tree.customInstructions must be a string");
+      }
+      return await session.navigateTree(request.targetId.trim(), {
+        summarize: request.summarize === true,
+        ...(typeof request.customInstructions === "string" && request.customInstructions.trim()
+          ? { customInstructions: request.customInstructions.trim() }
+          : {}),
+      });
+    case "abort_tree_navigation":
+      assertOnlyFields(request, "abort_tree_navigation", ["type", "id"]);
+      session.abortTreeNavigation();
+      return undefined;
     case "set_thinking_level":
       if (typeof request.level !== "string") {
         throw new Error("set_thinking_level.level must be a string");

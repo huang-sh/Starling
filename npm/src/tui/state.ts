@@ -17,6 +17,26 @@ import {
   normalizeExtensionUiRequest,
   printable,
 } from "./events.js";
+import {
+  visibleAuthProviders,
+  type AuthPickerMode,
+  type AuthPickerState,
+  type AuthProviderOption,
+} from "./auth-picker.js";
+import {
+  visibleTreeEntries,
+  type TreePickerEntry,
+  type TreePickerState,
+} from "./tree-picker.js";
+import {
+  MODEL_CONFIG_ACTIONS,
+  modelPickerProviders,
+  modelRoleThinkingLevel,
+  thinkingOptionsForModel,
+  visibleModelPickerModels,
+  type ModelPickerModel,
+  type ModelPickerState,
+} from "./model-picker.js";
 
 export type StarlingTuiPhase = "starting" | "ready" | "working" | "stopped" | "error";
 export type TimelineKind = "user" | "assistant" | "tool" | "system" | "error";
@@ -50,6 +70,7 @@ export interface ExtensionUiPrompt {
   options: string[];
   selected: number;
   value: string;
+  secret: boolean;
   /** UTF-16 index kept on a grapheme boundary. */
   cursor?: number;
 }
@@ -80,9 +101,18 @@ export interface StarlingTuiState {
   composer: string;
   /** UTF-16 index kept on a grapheme boundary. */
   composerCursor: number;
+  /** Submitted prompts/commands, oldest first; consecutive duplicates collapsed. */
+  inputHistory: string[];
+  /** Cursor into inputHistory; === inputHistory.length means editing the live draft. */
+  historyIndex: number;
+  /** Composer text saved when history navigation leaves the live draft. */
+  historyDraft: string;
   slashCommands: SlashCommandItem[];
   slashMenuOpen: boolean;
   slashSelected: number;
+  authPicker?: AuthPickerState;
+  treePicker?: TreePickerState;
+  modelPicker?: ModelPickerState;
   scrollOffset: number;
   timeline: TimelineEntry[];
   activity: ActivityEntry[];
@@ -107,9 +137,51 @@ export type StarlingTuiAction =
   | { type: "composer.line"; delta: -1 | 1 }
   | { type: "composer.home" }
   | { type: "composer.end" }
+  | { type: "history.push"; text: string }
+  | { type: "history.prev" }
+  | { type: "history.next" }
   | { type: "slash.loaded"; commands: readonly unknown[] }
   | { type: "slash.select"; delta: number }
   | { type: "slash.dismiss" }
+  | { type: "auth.open"; mode: AuthPickerMode; providers: AuthProviderOption[] }
+  | { type: "auth.close" }
+  | { type: "auth.query.append"; value: string }
+  | { type: "auth.query.backspace" }
+  | { type: "auth.query.clear" }
+  | { type: "auth.select"; delta: number }
+  | { type: "auth.working" }
+  | { type: "auth.failed"; message: string }
+  | { type: "tree.open"; entries: TreePickerEntry[]; leafId: string | null }
+  | { type: "tree.close" }
+  | { type: "tree.query.append"; value: string }
+  | { type: "tree.query.backspace" }
+  | { type: "tree.query.clear" }
+  | { type: "tree.select"; delta: number }
+  | { type: "tree.summary.open"; targetId: string }
+  | { type: "tree.summary.close" }
+  | { type: "tree.summary.select"; delta: number }
+  | { type: "tree.custom.open" }
+  | { type: "tree.custom.close" }
+  | { type: "tree.custom.append"; value: string }
+  | { type: "tree.custom.backspace" }
+  | { type: "tree.custom.clear" }
+  | { type: "tree.working" }
+  | { type: "tree.failed"; message: string }
+  | { type: "model.open"; models: ModelPickerModel[]; current: string; roles: Record<string, string> }
+  | { type: "model.close" }
+  | { type: "model.query.append"; value: string }
+  | { type: "model.query.backspace" }
+  | { type: "model.query.clear" }
+  | { type: "model.select"; delta: number }
+  | { type: "model.provider"; delta: number }
+  | { type: "model.action.open"; model: ModelPickerModel }
+  | { type: "model.action.close" }
+  | { type: "model.action.select"; delta: number }
+  | { type: "model.thinking.open" }
+  | { type: "model.thinking.close" }
+  | { type: "model.thinking.select"; delta: number }
+  | { type: "model.switching" }
+  | { type: "model.failed"; message: string }
   | { type: "prompt.submitted"; text: string; queued: boolean }
   | {
     type: "prompt.rejected";
@@ -160,6 +232,9 @@ export function createInitialStarlingTuiState(cwd: string): StarlingTuiState {
     queueDepth: 0,
     composer: "",
     composerCursor: 0,
+    inputHistory: [],
+    historyIndex: 0,
+    historyDraft: "",
     slashCommands: mergeSlashCommands([]),
     slashMenuOpen: false,
     slashSelected: 0,
@@ -199,6 +274,31 @@ export function reduceStarlingTui(
       return { ...state, composerCursor: lineStart(state.composer, state.composerCursor) };
     case "composer.end":
       return { ...state, composerCursor: lineEnd(state.composer, state.composerCursor) };
+    case "history.push": {
+      const text = action.text.trim();
+      if (!text) return state;
+      const inputHistory = state.inputHistory[state.inputHistory.length - 1] === text
+        ? state.inputHistory
+        : [...state.inputHistory, text];
+      return { ...state, inputHistory, historyIndex: inputHistory.length, historyDraft: "" };
+    }
+    case "history.prev": {
+      if (state.historyIndex === 0) return state;
+      const historyDraft = state.historyIndex === state.inputHistory.length
+        ? state.composer
+        : state.historyDraft;
+      const historyIndex = state.historyIndex - 1;
+      const composer = state.inputHistory[historyIndex] ?? "";
+      return { ...state, historyIndex, historyDraft, composer, composerCursor: composer.length };
+    }
+    case "history.next": {
+      if (state.historyIndex >= state.inputHistory.length) return state;
+      const historyIndex = state.historyIndex + 1;
+      const composer = historyIndex === state.inputHistory.length
+        ? state.historyDraft
+        : (state.inputHistory[historyIndex] ?? "");
+      return { ...state, historyIndex, composer, composerCursor: composer.length };
+    }
     case "slash.loaded": {
       const slashCommands = mergeSlashCommands(action.commands);
       const menu = filterSlashCommands(state.composer, slashCommands);
@@ -220,6 +320,327 @@ export function reduceStarlingTui(
     }
     case "slash.dismiss":
       return { ...state, slashMenuOpen: false };
+    case "auth.open":
+      return {
+        ...state,
+        authPicker: {
+          mode: action.mode,
+          providers: action.providers,
+          query: "",
+          selected: 0,
+          working: false,
+        },
+        slashMenuOpen: false,
+      };
+    case "auth.close":
+      return { ...state, authPicker: undefined };
+    case "auth.query.append": {
+      if (!state.authPicker || state.authPicker.working) return state;
+      const value = action.value.replace(/[\r\n\t]+/g, " ").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+      if (!value) return state;
+      return {
+        ...state,
+        authPicker: {
+          ...state.authPicker,
+          query: state.authPicker.query + value,
+          selected: 0,
+          error: undefined,
+        },
+      };
+    }
+    case "auth.query.backspace": {
+      if (!state.authPicker || state.authPicker.working) return state;
+      const edit = removeTextGrapheme(state.authPicker.query, state.authPicker.query.length, -1);
+      return {
+        ...state,
+        authPicker: { ...state.authPicker, query: edit.value, selected: 0, error: undefined },
+      };
+    }
+    case "auth.query.clear":
+      return state.authPicker && !state.authPicker.working
+        ? { ...state, authPicker: { ...state.authPicker, query: "", selected: 0, error: undefined } }
+        : state;
+    case "auth.select": {
+      if (!state.authPicker || state.authPicker.working) return state;
+      const count = visibleAuthProviders(state.authPicker).length;
+      if (count === 0) return { ...state, authPicker: { ...state.authPicker, selected: 0 } };
+      return {
+        ...state,
+        authPicker: {
+          ...state.authPicker,
+          selected: (state.authPicker.selected + action.delta % count + count) % count,
+          error: undefined,
+        },
+      };
+    }
+    case "auth.working":
+      return state.authPicker
+        ? { ...state, authPicker: { ...state.authPicker, working: true, error: undefined } }
+        : state;
+    case "auth.failed":
+      return state.authPicker
+        ? { ...state, authPicker: { ...state.authPicker, working: false, error: action.message } }
+        : state;
+    case "tree.open": {
+      const selected = Math.max(0, action.entries.findIndex((entry) => entry.id === action.leafId));
+      return {
+        ...state,
+        treePicker: {
+          entries: action.entries,
+          leafId: action.leafId,
+          query: "",
+          selected,
+          stage: "tree",
+          summarySelected: 0,
+          customPrompt: "",
+          working: false,
+        },
+        authPicker: undefined,
+        modelPicker: undefined,
+        slashMenuOpen: false,
+      };
+    }
+    case "tree.close":
+      return { ...state, treePicker: undefined };
+    case "tree.query.append": {
+      if (!state.treePicker || state.treePicker.stage !== "tree" || state.treePicker.working) return state;
+      const value = action.value.replace(/[\r\n\t]+/g, " ").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+      return value ? {
+        ...state,
+        treePicker: { ...state.treePicker, query: state.treePicker.query + value, selected: 0, error: undefined },
+      } : state;
+    }
+    case "tree.query.backspace": {
+      if (!state.treePicker || state.treePicker.stage !== "tree" || state.treePicker.working) return state;
+      const edit = removeTextGrapheme(state.treePicker.query, state.treePicker.query.length, -1);
+      return { ...state, treePicker: { ...state.treePicker, query: edit.value, selected: 0, error: undefined } };
+    }
+    case "tree.query.clear":
+      return state.treePicker && state.treePicker.stage === "tree" && !state.treePicker.working
+        ? { ...state, treePicker: { ...state.treePicker, query: "", selected: 0, error: undefined } }
+        : state;
+    case "tree.select": {
+      if (!state.treePicker || state.treePicker.stage !== "tree" || state.treePicker.working) return state;
+      const count = visibleTreeEntries(state.treePicker).length;
+      if (count === 0) return { ...state, treePicker: { ...state.treePicker, selected: 0 } };
+      return {
+        ...state,
+        treePicker: {
+          ...state.treePicker,
+          selected: (state.treePicker.selected + action.delta % count + count) % count,
+          error: undefined,
+        },
+      };
+    }
+    case "tree.summary.open":
+      return state.treePicker ? {
+        ...state,
+        treePicker: {
+          ...state.treePicker,
+          stage: "summary",
+          targetId: action.targetId,
+          summarySelected: 0,
+          error: undefined,
+        },
+      } : state;
+    case "tree.summary.close":
+      return state.treePicker
+        ? { ...state, treePicker: { ...state.treePicker, stage: "tree", targetId: undefined, error: undefined } }
+        : state;
+    case "tree.summary.select":
+      return state.treePicker && state.treePicker.stage === "summary" && !state.treePicker.working
+        ? {
+          ...state,
+          treePicker: {
+            ...state.treePicker,
+            summarySelected: (state.treePicker.summarySelected + action.delta % 3 + 3) % 3,
+          },
+        }
+        : state;
+    case "tree.custom.open":
+      return state.treePicker
+        ? { ...state, treePicker: { ...state.treePicker, stage: "custom", customPrompt: "", error: undefined } }
+        : state;
+    case "tree.custom.close":
+      return state.treePicker
+        ? { ...state, treePicker: { ...state.treePicker, stage: "summary", error: undefined } }
+        : state;
+    case "tree.custom.append":
+      return state.treePicker && state.treePicker.stage === "custom" && !state.treePicker.working
+        ? { ...state, treePicker: { ...state.treePicker, customPrompt: state.treePicker.customPrompt + action.value } }
+        : state;
+    case "tree.custom.backspace": {
+      if (!state.treePicker || state.treePicker.stage !== "custom" || state.treePicker.working) return state;
+      const edit = removeTextGrapheme(state.treePicker.customPrompt, state.treePicker.customPrompt.length, -1);
+      return { ...state, treePicker: { ...state.treePicker, customPrompt: edit.value } };
+    }
+    case "tree.custom.clear":
+      return state.treePicker && state.treePicker.stage === "custom" && !state.treePicker.working
+        ? { ...state, treePicker: { ...state.treePicker, customPrompt: "" } }
+        : state;
+    case "tree.working":
+      return state.treePicker
+        ? { ...state, treePicker: { ...state.treePicker, working: true, error: undefined } }
+        : state;
+    case "tree.failed":
+      return state.treePicker
+        ? { ...state, treePicker: { ...state.treePicker, working: false, error: action.message } }
+        : state;
+    case "model.open": {
+      const picker: ModelPickerState = {
+        models: action.models,
+        current: action.current,
+        roles: action.roles ?? {},
+        stage: "models",
+        provider: "",
+        query: "",
+        selected: 0,
+        actionSelected: 0,
+        thinkingSelected: 0,
+        switching: false,
+      };
+      return { ...state, modelPicker: picker, authPicker: undefined, treePicker: undefined, slashMenuOpen: false };
+    }
+    case "model.close":
+      return { ...state, modelPicker: undefined };
+    case "model.query.append": {
+      if (!state.modelPicker || state.modelPicker.stage !== "models" || state.modelPicker.switching) return state;
+      const value = action.value.replace(/[\r\n\t]+/g, " ").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+      if (!value) return state;
+      return {
+        ...state,
+        modelPicker: { ...state.modelPicker, query: state.modelPicker.query + value, selected: 0, error: undefined },
+      };
+    }
+    case "model.query.backspace": {
+      if (!state.modelPicker || state.modelPicker.stage !== "models" || state.modelPicker.switching) return state;
+      const edit = removeTextGrapheme(state.modelPicker.query, state.modelPicker.query.length, -1);
+      return {
+        ...state,
+        modelPicker: { ...state.modelPicker, query: edit.value, selected: 0, error: undefined },
+      };
+    }
+    case "model.query.clear":
+      return state.modelPicker
+        ? { ...state, modelPicker: { ...state.modelPicker, query: "", selected: 0, error: undefined } }
+        : state;
+    case "model.select": {
+      if (!state.modelPicker || state.modelPicker.stage !== "models" || state.modelPicker.switching) return state;
+      const count = visibleModelPickerModels(state.modelPicker).length;
+      if (count === 0) return { ...state, modelPicker: { ...state.modelPicker, selected: 0 } };
+      return {
+        ...state,
+        modelPicker: {
+          ...state.modelPicker,
+          selected: (state.modelPicker.selected + action.delta % count + count) % count,
+          error: undefined,
+        },
+      };
+    }
+    case "model.provider": {
+      if (!state.modelPicker || state.modelPicker.stage !== "models" || state.modelPicker.switching) return state;
+      const providers = modelPickerProviders(state.modelPicker);
+      const current = Math.max(0, providers.indexOf(state.modelPicker.provider));
+      const provider = providers[(current + action.delta % providers.length + providers.length) % providers.length] ?? "";
+      return {
+        ...state,
+        modelPicker: { ...state.modelPicker, provider, selected: 0, error: undefined },
+      };
+    }
+    case "model.action.open":
+      return state.modelPicker
+        ? {
+          ...state,
+          modelPicker: {
+            ...state.modelPicker,
+            stage: "actions",
+            actionModel: action.model,
+            actionSelected: 0,
+            thinkingSelected: 0,
+            error: undefined,
+          },
+        }
+        : state;
+    case "model.action.close":
+      return state.modelPicker
+        ? {
+          ...state,
+          modelPicker: {
+            ...state.modelPicker,
+            stage: "models",
+            actionModel: undefined,
+            actionSelected: 0,
+            thinkingSelected: 0,
+            switching: false,
+            error: undefined,
+          },
+        }
+        : state;
+    case "model.action.select": {
+      if (!state.modelPicker || state.modelPicker.stage !== "actions" || state.modelPicker.switching) return state;
+      const count = MODEL_CONFIG_ACTIONS.length;
+      return {
+        ...state,
+        modelPicker: {
+          ...state.modelPicker,
+          actionSelected: (state.modelPicker.actionSelected + action.delta % count + count) % count,
+          error: undefined,
+        },
+      };
+    }
+    case "model.thinking.open": {
+      if (!state.modelPicker || state.modelPicker.stage !== "actions" || !state.modelPicker.actionModel) return state;
+      const model = state.modelPicker.actionModel;
+      const action = MODEL_CONFIG_ACTIONS[state.modelPicker.actionSelected];
+      if (!action) return state;
+      const options = thinkingOptionsForModel(model);
+      const current = modelRoleThinkingLevel(state.modelPicker.roles[action.role], model.selector);
+      const selected = options.findIndex(({ level }) => level === current);
+      return {
+        ...state,
+        modelPicker: {
+          ...state.modelPicker,
+          stage: "thinking",
+          thinkingSelected: selected < 0 ? 0 : selected,
+          error: undefined,
+        },
+      };
+    }
+    case "model.thinking.close":
+      return state.modelPicker
+        ? {
+          ...state,
+          modelPicker: {
+            ...state.modelPicker,
+            stage: "actions",
+            thinkingSelected: 0,
+            switching: false,
+            error: undefined,
+          },
+        }
+        : state;
+    case "model.thinking.select": {
+      if (!state.modelPicker || state.modelPicker.stage !== "thinking" || state.modelPicker.switching) return state;
+      const model = state.modelPicker.actionModel;
+      if (!model) return state;
+      const count = thinkingOptionsForModel(model).length;
+      return {
+        ...state,
+        modelPicker: {
+          ...state.modelPicker,
+          thinkingSelected: (state.modelPicker.thinkingSelected + action.delta % count + count) % count,
+          error: undefined,
+        },
+      };
+    }
+    case "model.switching":
+      return state.modelPicker
+        ? { ...state, modelPicker: { ...state.modelPicker, switching: true, error: undefined } }
+        : state;
+    case "model.failed":
+      return state.modelPicker
+        ? { ...state, modelPicker: { ...state.modelPicker, switching: false, error: action.message } }
+        : state;
     case "prompt.submitted": {
       return appendTimeline(
         {
@@ -410,6 +831,9 @@ function reduceChatEvent(state: StarlingTuiState, event: ChatEvent): StarlingTui
         compacting: false,
         status: label,
         uiPrompt: undefined,
+        authPicker: undefined,
+        treePicker: undefined,
+        modelPicker: undefined,
         slashMenuOpen: false,
       };
       return event.success ? next : addActivity(next, "runtime", label, "error");
@@ -527,10 +951,26 @@ function reduceChatEvent(state: StarlingTuiState, event: ChatEvent): StarlingTui
   }
 }
 
+/** Collapse only-adjacent duplicates while preserving order. */
+function dedupeHistory(entries: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const entry of entries) {
+    if (out[out.length - 1] !== entry) out.push(entry);
+  }
+  return out;
+}
+
 function hydrateSnapshot(state: StarlingTuiState, snapshot: ChatSessionSnapshot): StarlingTuiState {
   const normalized = transcriptToTimeline(snapshot.transcript, state.nextId);
   const compacting = snapshot.compacting === true;
   const working = snapshot.streaming || compacting;
+  // Seed recall history from the resumed session's prior user turns so Up can
+  // surface them immediately, not just prompts typed this run.
+  const inputHistory = dedupeHistory(
+    snapshot.transcript
+      .filter((item) => item.kind === "user" && item.text.trim())
+      .map((item) => item.text.trim()),
+  );
   return {
     ...state,
     phase: working ? "working" : "ready",
@@ -548,6 +988,9 @@ function hydrateSnapshot(state: StarlingTuiState, snapshot: ChatSessionSnapshot)
     queueDepth: snapshot.queueDepth,
     timeline: normalized.timeline,
     nextId: normalized.nextId,
+    inputHistory,
+    historyIndex: inputHistory.length,
+    historyDraft: "",
   };
 }
 
@@ -709,6 +1152,7 @@ function promptFromRequest(request: ChatInteractionRequest): ExtensionUiPrompt {
     options: request.options,
     selected: 0,
     value: request.initialValue,
+    secret: request.secret,
     cursor: request.initialValue.length,
   };
 }

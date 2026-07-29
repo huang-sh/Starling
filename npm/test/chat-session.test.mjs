@@ -47,12 +47,64 @@ class FakeSession {
     return { provider, id: modelId };
   }
 
+  async getModelConfig() {
+    return {
+      defaultProvider: "fake",
+      defaultModel: "model-a",
+      modelRoles: { default: "fake/model-a" },
+    };
+  }
+
+  async configureModel(provider, modelId, role, thinkingLevel) {
+    this.calls.push(["configureModel", provider, modelId, role, thinkingLevel]);
+    const selector = thinkingLevel === "inherit"
+      ? `${provider}/${modelId}`
+      : `${provider}/${modelId}:${thinkingLevel}`;
+    return { provider, id: modelId, role, thinkingLevel, selector };
+  }
+
   setThinkingLevel(level) {
     this.calls.push(["setThinking", level]);
   }
 
   async getAvailableModels() {
     return [{ provider: "fake", id: "model-a" }];
+  }
+
+  async getAuthProviders(mode) {
+    this.calls.push(["getAuthProviders", mode]);
+    return { providers: [{ id: "anthropic", authType: "oauth" }] };
+  }
+
+  async loginProvider(provider, authType) {
+    this.calls.push(["loginProvider", provider, authType]);
+    return { provider, authType };
+  }
+
+  async logoutProvider(provider) {
+    this.calls.push(["logoutProvider", provider]);
+    return { provider };
+  }
+
+  abortAuthentication() {
+    this.calls.push(["abortAuthentication"]);
+  }
+
+  getTree() {
+    this.calls.push(["getTree"]);
+    return {
+      tree: [{ entry: { id: "root", parentId: null, type: "message" }, children: [] }],
+      leafId: "root",
+    };
+  }
+
+  async navigateTree(targetId, options) {
+    this.calls.push(["navigateTree", targetId, options]);
+    return { cancelled: false, editorText: "restored prompt" };
+  }
+
+  abortTreeNavigation() {
+    this.calls.push(["abortTreeNavigation"]);
   }
 
   async compact(customInstructions) {
@@ -126,11 +178,55 @@ test("exposes Pi SDK commands in-process and forwards lifecycle records", async 
   assert.deepEqual(await chat.request({ type: "get_available_models" }), {
     models: [{ provider: "fake", id: "model-a" }],
   });
+  assert.deepEqual(await chat.request({ type: "get_model_config" }), {
+    defaultProvider: "fake",
+    defaultModel: "model-a",
+    modelRoles: { default: "fake/model-a" },
+  });
   assert.deepEqual(await chat.request({
     type: "set_model",
     provider: "fake",
     modelId: "model-a",
   }), { provider: "fake", id: "model-a" });
+  assert.deepEqual(await chat.request({
+    type: "configure_model",
+    provider: "fake",
+    modelId: "model-a",
+    role: "slow",
+    thinkingLevel: "high",
+  }), {
+    provider: "fake",
+    id: "model-a",
+    role: "slow",
+    thinkingLevel: "high",
+    selector: "fake/model-a:high",
+  });
+  assert.deepEqual(await chat.request({ type: "get_auth_providers", mode: "login" }), {
+    providers: [{ id: "anthropic", authType: "oauth" }],
+  });
+  assert.deepEqual(await chat.request({
+    type: "login_provider",
+    provider: "anthropic",
+    authType: "oauth",
+  }), {
+    provider: "anthropic",
+    authType: "oauth",
+  });
+  assert.deepEqual(await chat.request({ type: "logout_provider", provider: "anthropic" }), {
+    provider: "anthropic",
+  });
+  await chat.request({ type: "abort_authentication" });
+  assert.deepEqual(await chat.request({ type: "get_tree" }), {
+    tree: [{ entry: { id: "root", parentId: null, type: "message" }, children: [] }],
+    leafId: "root",
+  });
+  assert.deepEqual(await chat.request({
+    type: "navigate_tree",
+    targetId: " root ",
+    summarize: true,
+    customInstructions: " keep decisions ",
+  }), { cancelled: false, editorText: "restored prompt" });
+  await chat.request({ type: "abort_tree_navigation" });
   await chat.request({ type: "set_thinking_level", level: "high" });
   assert.deepEqual(await chat.request({
     type: "compact",
@@ -145,6 +241,14 @@ test("exposes Pi SDK commands in-process and forwards lifecycle records", async 
     ["reload"],
     ["prompt", "hello", "followUp"],
     ["setModel", "fake", "model-a"],
+    ["configureModel", "fake", "model-a", "slow", "high"],
+    ["getAuthProviders", "login"],
+    ["loginProvider", "anthropic", "oauth"],
+    ["logoutProvider", "anthropic"],
+    ["abortAuthentication"],
+    ["getTree"],
+    ["navigateTree", "root", { summarize: true, customInstructions: "keep decisions" }],
+    ["abortTreeNavigation"],
     ["setThinking", "high"],
     ["compact", "short"],
     ["abortCompaction"],

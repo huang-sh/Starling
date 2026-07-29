@@ -95,7 +95,7 @@ test("editor keeps exactly one cursor at wrap and newline boundaries", () => {
   let exact = createInitialStarlingTuiState("/work/starling");
   exact = reduceStarlingTui(exact, { type: "composer.set", value: "abcdefghijklm" });
   const exactFrame = renderStarlingFrame(exact, { width: 20, height: 20, color: false });
-  assert.match(exactFrame, /╰─ › abcdefghijklm▏╯/);
+  assert.match(exactFrame, /^› abcdefghijklm▏/m);
 
   let multiline = createInitialStarlingTuiState("/work/starling");
   multiline = reduceStarlingTui(multiline, { type: "composer.set", value: "a\n" });

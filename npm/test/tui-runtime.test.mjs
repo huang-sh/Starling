@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-test("direct SDK TUI preserves the normal screen in a real pseudo-terminal", (context) => {
+test("direct SDK TUI uses alternate screen and preserves the normal screen on exit", (context) => {
   if (process.platform !== "linux") {
     context.skip("util-linux script smoke test is Linux-specific");
     return;
@@ -25,8 +25,9 @@ test("direct SDK TUI preserves the normal screen in a real pseudo-terminal", (co
   });
 
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-  assert.doesNotMatch(result.stdout, /\u001b\[\?1049[hl]/);
-  assert.doesNotMatch(result.stdout, /\u001b\[2J|\u001b\[H|\u001b\[\d+;\d+H/);
+  assert.match(result.stdout, /\u001b\[\?1049h/);
+  assert.match(result.stdout, /\u001b\[\?1049l/);
+  assert.doesNotMatch(result.stdout, /\u001b\[H|\u001b\[\d+;\d+H/);
   assert.match(result.stdout, /\u001b\[\?2004h/);
   assert.match(result.stdout, /\u001b\[\?2004l/);
   assert.match(result.stdout, /STARLING_TUI_PTY_OK/);

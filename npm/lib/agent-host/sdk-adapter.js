@@ -1,12 +1,15 @@
+import { randomUUID } from "node:crypto";
+import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { errorMessage, isJsonObject, } from "./types.js";
+import { registerZhipuCodingPlanProvider, } from "./zhipu-provider.js";
 const PI_SDK_PACKAGE = "@earendil-works/pi-coding-agent";
 /** Load Pi's public SDK export. This never resolves or executes Pi's CLI/TUI. */
 export async function loadPiSdk() {
     return import(PI_SDK_PACKAGE);
 }
-export function createPiSdkAdapter(loadSdk = loadPiSdk, environment = process.env) {
+export function createPiSdkAdapter(loadSdk = loadPiSdk, environment = process.env, fetchImpl = (input, init) => fetch(input, init)) {
     return {
         async open(options, bindings) {
             const sdk = requirePiSdk(await loadSdk());
@@ -33,6 +36,7 @@ export function createPiSdkAdapter(loadSdk = loadPiSdk, environment = process.en
                 authPath: path.join(agentDir, "auth.json"),
                 modelsPath: path.join(agentDir, "models.json"),
             });
+            await registerZhipuCodingPlanProvider(modelRuntime, environment, fetchImpl);
             const inlineExtensions = options.starlingManaged
                 ? [{
                         name: "starling-managed",
@@ -62,7 +66,7 @@ export function createPiSdkAdapter(loadSdk = loadPiSdk, environment = process.en
                 thinkingLevel: validateThinkingLevel(options.thinking),
             });
             let unsubscribe = () => { };
-            const adaptedSession = new PiSdkSessionAdapter(session, modelRuntime, () => unsubscribe(), options.surface === "tui" ? "interactive" : "rpc");
+            const adaptedSession = new PiSdkSessionAdapter(session, sessionManager, modelRuntime, settingsManager, path.join(agentDir, "settings.json"), bindings.uiContext, () => unsubscribe(), options.surface === "tui" ? "interactive" : "rpc");
             try {
                 if (options.name)
                     session.setSessionName?.(options.name);
@@ -109,14 +113,24 @@ export function createPiSdkAdapter(loadSdk = loadPiSdk, environment = process.en
 }
 class PiSdkSessionAdapter {
     session;
+    sessionManager;
     modelRuntime;
+    settingsManager;
+    settingsPath;
+    authUi;
     unsubscribe;
     promptSource;
     activeCompaction;
+    activeTreeNavigation;
+    activeAuthentication;
     shutdownPromise;
-    constructor(session, modelRuntime, unsubscribe, promptSource) {
+    constructor(session, sessionManager, modelRuntime, settingsManager, settingsPath, authUi, unsubscribe, promptSource) {
         this.session = session;
+        this.sessionManager = sessionManager;
         this.modelRuntime = modelRuntime;
+        this.settingsManager = settingsManager;
+        this.settingsPath = settingsPath;
+        this.authUi = authUi;
         this.unsubscribe = unsubscribe;
         this.promptSource = promptSource;
     }
@@ -201,6 +215,160 @@ class PiSdkSessionAdapter {
         await this.session.setModel(model);
         return model;
     }
+    async getModelConfig() {
+        await this.settingsManager.flush?.();
+        const settings = await readPiSettings(this.settingsPath, this.settingsManager.storage);
+        const defaultThinkingLevel = this.settingsManager.getDefaultThinkingLevel?.()
+            ?? stringSetting(settings.defaultThinkingLevel);
+        return {
+            defaultProvider: this.settingsManager.getDefaultProvider?.()
+                ?? stringSetting(settings.defaultProvider),
+            defaultModel: this.settingsManager.getDefaultModel?.()
+                ?? stringSetting(settings.defaultModel),
+            ...(defaultThinkingLevel ? { defaultThinkingLevel } : {}),
+            modelRoles: modelRolesFromSettings(settings),
+        };
+    }
+    async configureModel(provider, modelId, role, thinkingLevel) {
+        if (!CONFIGURABLE_MODEL_ROLES.has(role)) {
+            throw new Error(`Unsupported model role: ${role}`);
+        }
+        const models = await this.modelRuntime.getAvailable();
+        const model = models.find((candidate) => modelMatches(candidate, provider, modelId));
+        if (!model)
+            throw new Error(`Model not found: ${provider}/${modelId}`);
+        const thinking = validateConfiguredThinkingLevel(thinkingLevel);
+        if (thinking !== "inherit" && !supportedThinkingLevels(model).includes(thinking)) {
+            throw new Error(`${provider}/${modelId} does not support thinking level: ${thinking}`);
+        }
+        await this.settingsManager.flush?.();
+        if (role === "default") {
+            const setDefault = this.settingsManager.setDefaultModelAndProvider;
+            if (!setDefault)
+                throw new Error("Pi SDK settings do not support a default model");
+            await this.session.setModel(model);
+            setDefault.call(this.settingsManager, provider, modelId);
+            if (thinking !== "inherit") {
+                this.session.setThinkingLevel(thinking);
+                this.settingsManager.setDefaultThinkingLevel?.(thinking);
+            }
+            await this.settingsManager.flush?.();
+        }
+        const baseSelector = `${provider}/${modelId}`;
+        const selector = thinking === "inherit" ? baseSelector : `${baseSelector}:${thinking}`;
+        await writePiModelRole(this.settingsPath, role, selector, this.settingsManager.storage);
+        return { provider, id: modelId, role, thinkingLevel: thinking, selector };
+    }
+    async getAuthProviders(mode) {
+        const getProviders = this.modelRuntime.getProviders;
+        const listCredentials = this.modelRuntime.listCredentials;
+        if (!getProviders || !listCredentials) {
+            throw new Error("Pi SDK runtime does not support provider authentication");
+        }
+        await this.modelRuntime.getAvailable();
+        const providers = getProviders.call(this.modelRuntime);
+        const credentials = await listCredentials.call(this.modelRuntime);
+        const stored = new Map(credentials.map((credential) => [credential.providerId, credential.type]));
+        if (mode === "logout") {
+            return {
+                providers: credentials
+                    .map((credential) => {
+                    const provider = providers.find((candidate) => candidate.id === credential.providerId);
+                    return authProviderRecord(provider ?? { id: credential.providerId, name: credential.providerId }, credential.type, { configured: true, source: "stored credential" }, true, true);
+                })
+                    .sort(compareAuthProviderRecords),
+            };
+        }
+        const options = [];
+        for (const provider of providers) {
+            const status = this.modelRuntime.getProviderAuthStatus?.(provider.id) ?? {};
+            const configuredType = this.modelRuntime.isUsingOAuth?.(provider.id)
+                ? "oauth"
+                : "api_key";
+            if (provider.auth?.oauth) {
+                options.push(authProviderRecord(provider, "oauth", status, stored.get(provider.id) === "oauth", status.configured === true && configuredType === "oauth"));
+            }
+            if (provider.auth?.apiKey) {
+                options.push(authProviderRecord(provider, "api_key", status, stored.get(provider.id) === "api_key", status.configured === true && configuredType === "api_key", typeof provider.auth.apiKey.login === "function"));
+            }
+        }
+        return { providers: options.sort(compareAuthProviderRecords) };
+    }
+    async loginProvider(providerId, authType) {
+        if (this.activeAuthentication)
+            throw new Error("Provider login is already in progress");
+        const login = this.modelRuntime.login;
+        const provider = this.modelRuntime.getProvider?.(providerId)
+            ?? this.modelRuntime.getProviders?.().find((candidate) => candidate.id === providerId);
+        if (!login || !provider)
+            throw new Error(`Unknown authentication provider: ${providerId}`);
+        const method = authType === "oauth" ? provider.auth?.oauth : provider.auth?.apiKey;
+        if (!method)
+            throw new Error(`${provider.name} does not support ${authTypeLabel(authType)} login`);
+        if (authType === "api_key" && typeof provider.auth?.apiKey?.login !== "function") {
+            throw new Error(`${provider.name} authentication is configured outside Pi`);
+        }
+        const controller = new AbortController();
+        this.activeAuthentication = controller;
+        this.authUi.setStatus?.("auth", `Logging in to ${provider.name}…`);
+        try {
+            await login.call(this.modelRuntime, provider.id, authType, createAuthInteraction(this.authUi, provider.name, controller.signal));
+            return { provider: provider.id, name: provider.name, authType };
+        }
+        catch (error) {
+            if (controller.signal.aborted || isAbortError(error))
+                throw new Error("Login cancelled");
+            throw error;
+        }
+        finally {
+            this.authUi.setStatus?.("auth", undefined);
+            if (this.activeAuthentication === controller)
+                this.activeAuthentication = undefined;
+        }
+    }
+    async logoutProvider(providerId) {
+        const logout = this.modelRuntime.logout;
+        const listCredentials = this.modelRuntime.listCredentials;
+        if (!logout || !listCredentials) {
+            throw new Error("Pi SDK runtime does not support provider logout");
+        }
+        const credential = (await listCredentials.call(this.modelRuntime))
+            .find((candidate) => candidate.providerId === providerId);
+        if (!credential)
+            throw new Error(`No stored credentials for provider: ${providerId}`);
+        await logout.call(this.modelRuntime, providerId);
+        const provider = this.modelRuntime.getProvider?.(providerId);
+        return {
+            provider: providerId,
+            name: provider?.name ?? providerId,
+            authType: credential.type,
+        };
+    }
+    abortAuthentication() {
+        this.activeAuthentication?.abort();
+    }
+    getTree() {
+        const getTree = this.sessionManager.getTree;
+        const getLeafId = this.sessionManager.getLeafId;
+        if (!getTree || !getLeafId)
+            throw new Error("Pi SDK session does not support tree navigation");
+        return {
+            tree: getTree.call(this.sessionManager),
+            leafId: getLeafId.call(this.sessionManager),
+        };
+    }
+    async navigateTree(targetId, options = {}) {
+        const navigateTree = this.session.navigateTree;
+        if (!navigateTree)
+            throw new Error("Pi SDK session does not support tree navigation");
+        const activeTreeNavigation = navigateTree.call(this.session, targetId, options);
+        this.activeTreeNavigation = activeTreeNavigation;
+        void activeTreeNavigation.then(() => this.clearActiveTreeNavigation(activeTreeNavigation), () => this.clearActiveTreeNavigation(activeTreeNavigation));
+        return await activeTreeNavigation;
+    }
+    abortTreeNavigation() {
+        this.session.abortBranchSummary?.();
+    }
     setThinkingLevel(level) {
         this.session.setThinkingLevel(level);
     }
@@ -235,6 +403,14 @@ class PiSdkSessionAdapter {
     async shutdownOnce() {
         const errors = [];
         const activeCompaction = this.activeCompaction;
+        const activeTreeNavigation = this.activeTreeNavigation;
+        this.abortAuthentication();
+        try {
+            this.session.abortBranchSummary?.();
+        }
+        catch (error) {
+            errors.push(error);
+        }
         try {
             this.session.abortCompaction();
         }
@@ -264,6 +440,15 @@ class PiSdkSessionAdapter {
                     errors.push(error);
             }
         }
+        if (activeTreeNavigation) {
+            try {
+                await activeTreeNavigation;
+            }
+            catch (error) {
+                if (!isTreeNavigationCancellation(error))
+                    errors.push(error);
+            }
+        }
         try {
             await this.session.extensionRunner?.emit({ type: "session_shutdown", reason: "quit" });
         }
@@ -290,14 +475,135 @@ class PiSdkSessionAdapter {
         if (this.activeCompaction === compaction)
             this.activeCompaction = undefined;
     }
+    clearActiveTreeNavigation(navigation) {
+        if (this.activeTreeNavigation === navigation)
+            this.activeTreeNavigation = undefined;
+    }
 }
 function isCompactionCancellation(error) {
     return error instanceof Error
         && (error.name === "AbortError" || error.message === "Compaction cancelled");
 }
-const STARLING_AUTO_ALLOWED_TOOLS = new Set(["read", "grep", "find", "ls"]);
+function isTreeNavigationCancellation(error) {
+    return error instanceof Error
+        && (error.name === "AbortError" || /branch summarization cancelled/i.test(error.message));
+}
+function authProviderRecord(provider, authType, status, stored, configured, interactive = true) {
+    const method = authType === "oauth" ? provider.auth?.oauth : provider.auth?.apiKey;
+    return {
+        id: provider.id,
+        name: provider.name || provider.id,
+        authType,
+        methodName: method?.name ?? authTypeLabel(authType),
+        configured,
+        stored,
+        interactive,
+        ...(status.label || status.source ? { source: status.label ?? status.source } : {}),
+    };
+}
+function compareAuthProviderRecords(left, right) {
+    return String(left.name).localeCompare(String(right.name))
+        || String(left.id).localeCompare(String(right.id))
+        || String(left.authType).localeCompare(String(right.authType));
+}
+function authTypeLabel(authType) {
+    return authType === "oauth" ? "subscription" : "API key";
+}
+function createAuthInteraction(ui, providerName, signal) {
+    const notices = [];
+    return {
+        signal,
+        async prompt(prompt) {
+            const promptSignal = prompt.signal
+                ? AbortSignal.any([signal, prompt.signal])
+                : signal;
+            if (prompt.type === "select") {
+                if (!ui.select)
+                    throw new Error("Starling authentication UI cannot show a selection prompt");
+                const labels = prompt.options.map((option) => option.description ? `${option.label} — ${option.description}` : option.label);
+                const selected = await ui.select(prompt.message, labels, { signal: promptSignal });
+                const index = selected === undefined ? -1 : labels.indexOf(selected);
+                const value = prompt.options[index]?.id;
+                if (!value)
+                    throw new Error("Login cancelled");
+                return value;
+            }
+            if (!ui.input)
+                throw new Error("Starling authentication UI cannot request input");
+            const value = await ui.input(`Login to ${providerName}`, prompt.placeholder, {
+                signal: promptSignal,
+                message: [...notices, prompt.message].join("\n\n"),
+                secret: prompt.type === "secret",
+            });
+            if (value === undefined)
+                throw new Error("Login cancelled");
+            return value;
+        },
+        notify(event) {
+            const message = authEventMessage(event);
+            // Surface every auth event on the live status line so it stays visible
+            // while the auth picker holds the screen (device codes / auth URLs are
+            // otherwise trapped in the hidden timeline and the login cannot finish).
+            ui.setStatus?.("auth", message);
+            if (event.type === "progress")
+                return;
+            notices.push(message);
+            if (notices.length > 4)
+                notices.shift();
+            ui.notify?.(message, "info");
+        },
+    };
+}
+function authEventMessage(event) {
+    switch (event.type) {
+        case "auth_url":
+            return [event.instructions, "Open this URL to continue:", event.url].filter(Boolean).join("\n");
+        case "device_code":
+            return [
+                `Open ${event.verificationUri}`,
+                `Device code: ${event.userCode}`,
+                event.expiresInSeconds ? `Expires in ${event.expiresInSeconds} seconds` : undefined,
+            ].filter(Boolean).join("\n");
+        case "info":
+            return [
+                event.message,
+                ...(event.links ?? []).map((link) => `${link.label ? `${link.label}: ` : ""}${link.url}`),
+            ].join("\n");
+        case "progress":
+            return event.message;
+    }
+}
+function isAbortError(error) {
+    return error instanceof Error
+        && (error.name === "AbortError" || /cancelled|canceled|aborted/i.test(error.message));
+}
 const STARLING_PERMISSION_TIMEOUT_MS = 30_000;
-const STARLING_TOOL_INPUT_LIMIT = 4_000;
+// Pi-style risk-based permission gate: only intercept genuinely destructive
+// operations, auto-allow everything else. Mirrors pi's official
+// examples/extensions/permission-gate.ts and protected-paths.ts — NOT a
+// blanket "confirm every tool" allowlist.
+// ponytail: whole-command regex scan — catches nested invocations like
+// `bash -c "rm -rf x"`, but false-positives on `echo rm -rf`. Mirrors pi's
+// official permission-gate heuristic; over-prompting is the safe side.
+const STARLING_DANGEROUS_BASH_PATTERNS = [
+    /\brm\b\s+(-[a-z]*r|--recursive)/i, // rm -r / rm -rf / rm --recursive
+    /\brm\b\s+(-[a-z]*f|--force)\b/i, // rm -f / rm -rf
+    /\bsudo\b/i,
+    /\b(chmod|chown)\b[^|\n]*\b777\b/i,
+    /\bgit\b\s+push\b.*--force(?!-)/i, // --force but not --force-with-lease
+    /\bdd\b[^|\n]*\bof=/i,
+    /\bmkfs\b/i,
+    /\b(shutdown|reboot|halt|poweroff)\b/i,
+];
+const STARLING_PROTECTED_WRITE_PATHS = [".env", ".git/", "node_modules/"];
+function isDangerousBash(command) {
+    return typeof command === "string"
+        && STARLING_DANGEROUS_BASH_PATTERNS.some((p) => p.test(command));
+}
+function isProtectedWritePath(target) {
+    return typeof target === "string"
+        && STARLING_PROTECTED_WRITE_PATHS.some((p) => target.includes(p));
+}
 /** Starling guards installed through Pi's official inline extension factory. */
 function createStarlingManagedExtension() {
     return (api) => {
@@ -312,35 +618,33 @@ function createStarlingManagedExtension() {
             const toolName = typeof record.toolName === "string"
                 ? record.toolName.trim().toLowerCase()
                 : "";
-            if (STARLING_AUTO_ALLOWED_TOOLS.has(toolName))
-                return undefined;
-            let approved = false;
-            try {
-                approved = await context.ui?.confirm?.(`Allow Pi tool: ${toolName || "unknown"}?`, printableToolInput(record.input), { timeout: STARLING_PERMISSION_TIMEOUT_MS }) === true;
+            const input = isJsonObject(record.input) ? record.input : {};
+            // bash: confirm only destructive commands (pi permission-gate.ts style)
+            if (toolName === "bash" && isDangerousBash(input.command)) {
+                const command = String(input.command ?? "");
+                let approved = false;
+                try {
+                    approved = await context.ui?.confirm?.(`⚠️ Dangerous command:\n\n  ${command}\n\nAllow?`, command, { timeout: STARLING_PERMISSION_TIMEOUT_MS }) === true;
+                }
+                catch {
+                    approved = false;
+                }
+                if (approved)
+                    return undefined;
+                return {
+                    block: true,
+                    reason: `Starling blocked destructive bash: ${command}`,
+                };
             }
-            catch {
-                approved = false;
+            // write/edit: block protected paths outright (pi protected-paths.ts style)
+            if ((toolName === "write" || toolName === "edit") && isProtectedWritePath(input.path)) {
+                const target = String(input.path ?? "");
+                context.ui?.notify?.(`Blocked write to protected path: ${target}`, "warning");
+                return { block: true, reason: `Path "${target}" is protected by Starling` };
             }
-            if (approved)
-                return undefined;
-            return {
-                block: true,
-                reason: `Starling denied Pi tool '${toolName || "unknown"}' because approval was not granted.`,
-            };
+            return undefined;
         });
     };
-}
-function printableToolInput(value) {
-    let text;
-    try {
-        text = JSON.stringify(value ?? {}, null, 2);
-    }
-    catch {
-        text = "<unserializable tool input>";
-    }
-    if (text.length <= STARLING_TOOL_INPUT_LIMIT)
-        return text;
-    return `${text.slice(0, STARLING_TOOL_INPUT_LIMIT)}\n… <tool input truncated by Starling>`;
 }
 async function resolveRequestedModel(modelRuntime, settingsManager, provider, modelId) {
     if (!provider && !modelId)
@@ -368,6 +672,96 @@ async function resolveRequestedModel(modelRuntime, settingsManager, provider, mo
 }
 function modelMatches(candidate, provider, modelId) {
     return isJsonObject(candidate) && candidate.provider === provider && candidate.id === modelId;
+}
+const CONFIGURABLE_MODEL_ROLES = new Set([
+    "default",
+    "smol",
+    "slow",
+    "vision",
+    "plan",
+    "designer",
+    "commit",
+    "tiny",
+    "task",
+    "advisor",
+]);
+async function readPiSettings(settingsPath, storage) {
+    if (storage) {
+        let contents;
+        storage.withLock("global", (current) => {
+            contents = current;
+            return undefined;
+        });
+        return parsePiSettings(contents);
+    }
+    let contents;
+    try {
+        contents = await fs.readFile(settingsPath, "utf8");
+    }
+    catch (error) {
+        if (isNodeError(error) && error.code === "ENOENT")
+            return {};
+        throw error;
+    }
+    return parsePiSettings(contents);
+}
+function parsePiSettings(contents) {
+    if (!contents)
+        return {};
+    let parsed;
+    try {
+        parsed = JSON.parse(contents);
+    }
+    catch (error) {
+        throw new Error(`Pi settings are not valid JSON: ${errorMessage(error)}`);
+    }
+    if (!isJsonObject(parsed))
+        throw new Error("Pi settings must contain a JSON object");
+    return parsed;
+}
+function modelRolesFromSettings(settings) {
+    if (!isJsonObject(settings.modelRoles))
+        return {};
+    const roles = {};
+    for (const [role, selector] of Object.entries(settings.modelRoles)) {
+        if (typeof selector === "string" && selector.trim())
+            roles[role] = selector.trim();
+    }
+    return roles;
+}
+async function writePiModelRole(settingsPath, role, selector, storage) {
+    if (storage) {
+        storage.withLock("global", (current) => {
+            const settings = parsePiSettings(current);
+            const roles = modelRolesFromSettings(settings);
+            roles[role] = selector;
+            return JSON.stringify({ ...settings, modelRoles: roles }, null, 2);
+        });
+        return;
+    }
+    const settings = await readPiSettings(settingsPath);
+    const roles = modelRolesFromSettings(settings);
+    roles[role] = selector;
+    const next = { ...settings, modelRoles: roles };
+    const directory = path.dirname(settingsPath);
+    const temporary = path.join(directory, `.settings.${process.pid}.${randomUUID()}.tmp`);
+    await fs.mkdir(directory, { recursive: true });
+    try {
+        await fs.writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+        await fs.rename(temporary, settingsPath);
+    }
+    finally {
+        await fs.unlink(temporary).catch((error) => {
+            if (!isNodeError(error) || error.code !== "ENOENT")
+                throw error;
+        });
+    }
+}
+function stringSetting(value) {
+    return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+function isNodeError(error) {
+    return error instanceof Error && "code" in error;
 }
 function requirePiSdk(value) {
     if (!isJsonObject(value))
@@ -419,6 +813,27 @@ const VALID_THINKING_LEVELS = new Set([
     "xhigh",
     "max",
 ]);
+const VALID_CONFIGURED_THINKING_LEVELS = new Set(["inherit", ...VALID_THINKING_LEVELS]);
+function validateConfiguredThinkingLevel(level) {
+    if (VALID_CONFIGURED_THINKING_LEVELS.has(level))
+        return level;
+    throw new Error(`Invalid configured thinking level "${level}". Valid values: ${[...VALID_CONFIGURED_THINKING_LEVELS].join(", ")}`);
+}
+function supportedThinkingLevels(model) {
+    if (!isJsonObject(model) || typeof model.reasoning !== "boolean") {
+        return [...VALID_THINKING_LEVELS];
+    }
+    if (!model.reasoning)
+        return ["off"];
+    const map = isJsonObject(model.thinkingLevelMap) ? model.thinkingLevelMap : {};
+    return [...VALID_THINKING_LEVELS].filter((level) => {
+        if (map[level] === null)
+            return false;
+        if (level === "xhigh" || level === "max")
+            return map[level] !== undefined;
+        return true;
+    });
+}
 function validateThinkingLevel(level) {
     if (level === undefined || VALID_THINKING_LEVELS.has(level))
         return level;

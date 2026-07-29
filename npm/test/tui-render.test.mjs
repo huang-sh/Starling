@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  availableModelsFromResponse,
   createInitialStarlingTuiState,
   reduceStarlingTui,
   renderStarlingFrame,
@@ -11,6 +12,7 @@ import {
   normalizeChatRecord,
   normalizeChatSnapshot,
 } from "../lib/tui/events.js";
+import { treePickerFromResponse } from "../lib/tui/tree-picker.js";
 
 function dispatchRecord(state, record) {
   for (const event of normalizeChatRecord(record)) {
@@ -139,11 +141,42 @@ test("single-line composer ends the flow as a two-row OMP editor", () => {
   assert.match(composer[0], /openai\/gpt-5\.3/);
   assert.match(composer[0], /high/);
   assert.match(composer[0], /╮$/);
-  assert.match(composer[1], /^╰─/);
+  assert.match(composer[1], /^› /);
   assert.match(composer[1], /›/);
   assert.match(composer[1], /▏/);
-  assert.match(composer[1], /╯$/);
+  assert.doesNotMatch(composer[1], /[╰╯─]/);
   assertNoDashboardChrome(lines.join("\n"));
+});
+
+test("composer input keeps the terminal default style after the cyan prompt", () => {
+  let state = sessionState();
+  state = reduceStarlingTui(state, {
+    type: "composer.set",
+    value: "typed text",
+  });
+  const frame = renderStarlingFrame(state, {
+    width: 80,
+    height: 24,
+    color: true,
+  });
+
+  assert.match(
+    frame,
+    /\u001b\[1;36m› \u001b\[0mtyped text\u001b\[1;36m▏/,
+    "only the composer prompt and cursor should be cyan; typed text must not receive a color",
+  );
+
+  state = reduceStarlingTui(state, { type: "composer.move", delta: -1 });
+  const movedCursorFrame = renderStarlingFrame(state, {
+    width: 80,
+    height: 24,
+    color: true,
+  });
+  assert.match(
+    movedCursorFrame,
+    /\u001b\[0mtyped tex\u001b\[1;36m▏\u001b\[0mt\u001b\[1;36m /,
+    "text on both sides of the cyan cursor must keep the terminal default style",
+  );
 });
 
 test("conversation content and tool state each render once without lifecycle noise", () => {
@@ -184,7 +217,7 @@ test("wide terminal keeps the compact single flow instead of adding a dashboard 
   }
 });
 
-test("multiline composer adds middle rows and keeps the final line in the bottom border", () => {
+test("multiline composer adds middle rows and keeps an unframed final prompt", () => {
   let state = sessionState();
   state = reduceStarlingTui(state, {
     type: "composer.set",
@@ -200,7 +233,8 @@ test("multiline composer adds middle rows and keeps the final line in the bottom
   assert.equal(composer.length, 3);
   assert.match(composer[0], /^╭─.*openai\/gpt-5\.3.*╮$/);
   assert.match(composer[1], /^│.*first line.*│$/);
-  assert.match(composer[2], /^╰─.*second line.*▏.*╯$/);
+  assert.match(composer[2], /^› .*second line.*▏$/);
+  assert.doesNotMatch(composer[2], /[╰╯─]/);
   assert.match(composer.join("\n"), /›/);
   assertNoDashboardChrome(lines.join("\n"));
   assertFits(lines, 64);
@@ -220,11 +254,64 @@ test("interactive requests render as a compact fail-closed action box", () => {
 
   assert.match(frame, /╭─ PERMISSION REQUIRED/);
   assert.ok(lines.some((line) => line.startsWith("│ npm test") && line.endsWith("│")));
-  assert.ok(lines.some((line) => line.includes("[No]") && line.endsWith("│")));
+  assert.ok(lines.some((line) => line.includes("› No") && line.endsWith("│")));
   assert.match(frame, /Esc deny/);
   assert.ok(lines.length < 32, "an inline request must not expand to the full terminal height");
   assertNoDashboardChrome(frame);
   assertFits(lines, 72);
+});
+
+test("authentication inputs are masked and provider choices render vertically", () => {
+  let state = sessionState();
+  state = dispatchRecord(state, {
+    type: "extension_ui_request",
+    id: "api-key",
+    method: "input",
+    title: "Anthropic API key",
+    message: "Paste your API key",
+    secret: true,
+  });
+  state = reduceStarlingTui(state, { type: "ui.append", value: "sk-sensitive-value" });
+  let frame = renderStarlingFrame(state, { width: 72, height: 24, color: false });
+
+  assert.doesNotMatch(frame, /sk-sensitive-value/);
+  assert.match(frame, /••••/);
+
+  state = reduceStarlingTui(state, { type: "ui.close" });
+  state = dispatchRecord(state, {
+    type: "extension_ui_request",
+    id: "provider",
+    method: "select",
+    title: "Select provider",
+    options: ["Anthropic", "OpenAI Codex", "GitHub Copilot"],
+  });
+  state = reduceStarlingTui(state, { type: "ui.select", delta: 1 });
+  frame = renderStarlingFrame(state, { width: 72, height: 24, color: false });
+  assert.match(frame, /^│ › OpenAI Codex/m);
+  assert.match(frame, /^│   Anthropic/m);
+});
+
+test("a long OAuth URL in a login dialog stays clickable across wrapped rows", () => {
+  let state = sessionState();
+  const url = "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid+profile+email&code_challenge=AcSZqUY8pOeRpx8HJPOkyF_WOof4xm";
+  state = dispatchRecord(state, {
+    type: "extension_ui_request",
+    id: "auth-url",
+    method: "input",
+    title: "Login to OpenAI Codex",
+    message: `A browser window should open. Complete login to finish.\nOpen this URL to continue:\n${url}\n\nPaste the authorization code here:`,
+  });
+  const frame = renderStarlingFrame(state, { width: 72, height: 18, color: true, tick: 1 });
+  const urlRows = frame.split("\n").filter((l) => /auth\.openai|response_type|redirect_uri|code_challenge/.test(l));
+  assert.ok(urlRows.length > 1, "the URL wraps across multiple rows");
+  // Every wrapped row is an OSC 8 hyperlink to the FULL url and underlined.
+  for (const row of urlRows) {
+    assert.ok(row.includes(`\u001b]8;;${url}\u001b\\`), "wrapped URL row links to the full URL");
+    assert.ok(row.includes("\u001b[4;36m"), "wrapped URL row is underlined + cyan");
+  }
+  // Prose on the same dialog is not turned into a link.
+  const prose = frame.split("\n").find((l) => l.includes("browser window"));
+  assert.ok(prose && !prose.includes("\u001b]8;;"), "prose row is not a hyperlink");
 });
 
 test("slash commands render inline above the editor with bounded selection", () => {
@@ -244,11 +331,141 @@ test("slash commands render inline above the editor with bounded selection", () 
 
   assert.match(frame, /\/extension-1/);
   assert.match(frame, /\[extension\]/);
-  assert.match(frame, /↑\/↓ select · Tab\/Enter complete · Esc close/);
-  assert.equal(frame.match(/^\s*[› ] \/[^\s]+/gm)?.length, 8, "menu shows at most eight rows");
-  assert.equal(lines.at(-1).startsWith("╰─"), true, "composer remains the final row");
+  assert.match(frame, /↑\/↓ select · Tab complete · Enter run · Esc close/);
+  assert.equal(frame.match(/^\s*[› ] \/[a-z][^\s]*/gm)?.length, 8, "menu shows at most eight rows");
+  assert.equal(lines.at(-1).startsWith("›"), true, "composer remains the final row");
   assert.ok(lines.length <= 18);
   assertFits(lines, 80);
+});
+
+test("model picker mirrors OMP search, provider tabs, and current-model selection", () => {
+  let state = sessionState();
+  const models = availableModelsFromResponse({
+    models: [
+      { provider: "openai", id: "gpt-5.5", name: "GPT 5.5", reasoning: true, contextWindow: 200_000 },
+      { provider: "zai", id: "glm-5.2", name: "GLM-5.2", reasoning: true, contextWindow: 128_000 },
+      { provider: "zhipu-coding-plan", id: "glm-5.1", name: "GLM-5.1", reasoning: true, contextWindow: 200_000 },
+      { provider: "anthropic", id: "claude-opus-5", name: "Claude Opus 5", contextWindow: 200_000 },
+    ],
+  });
+  state = reduceStarlingTui(state, {
+    type: "model.open",
+    models,
+    current: "zai/glm-5.2",
+    roles: {
+      default: "zai/glm-5.2",
+      slow: "openai/gpt-5.5:high",
+    },
+  });
+
+  let frame = renderStarlingFrame(state, { width: 86, height: 24, color: false });
+  assert.match(frame, /Models:\s+\[ALL\].*ANTHROPIC.*OPENAI.*ZAI/);
+  assert.match(frame, /ZHIPU CODING PLAN/, "hyphenated provider IDs render as readable OMP-style tabs");
+  assert.doesNotMatch(frame, /Pi SDK agent workspace/, "the modal picker replaces the workspace chrome");
+  assert.match(frame, /^› zai\/glm-5\.2\s+CURRENT/m, "current model is initially selected and promoted");
+  assert.match(frame, /zai\/glm-5\.2\s+CURRENT\s+DEFAULT/);
+  assert.match(frame, /Model Name: GLM-5\.2/);
+  assert.match(frame, /↑\/↓ select · Tab provider · Enter use · type to search · Esc close/);
+
+  state = reduceStarlingTui(state, { type: "model.provider", delta: 1 });
+  frame = renderStarlingFrame(state, { width: 86, height: 24, color: false });
+  assert.match(frame, /Models:\s+ALL.*\[ANTHROPIC\]/);
+  assert.match(frame, /claude-opus-5/);
+  assert.doesNotMatch(frame, /gpt-5\.5/);
+
+  state = reduceStarlingTui(state, { type: "model.provider", delta: -1 });
+  state = reduceStarlingTui(state, { type: "model.query.append", value: "g55" });
+  frame = renderStarlingFrame(state, { width: 86, height: 24, color: false });
+  assert.match(frame, /^› openai\/gpt-5\.5\s+SLOW/m, "fuzzy search matches model IDs and shows role tags");
+  assert.doesNotMatch(frame, /claude-opus-5/);
+  assertFits(renderedLines(frame), 86);
+
+  const selected = state.modelPicker.models.find((model) => model.id === "gpt-5.5");
+  assert.ok(selected);
+  state = reduceStarlingTui(state, { type: "model.action.open", model: selected });
+  frame = renderStarlingFrame(state, { width: 86, height: 24, color: false });
+  assert.match(frame, /Action for: gpt-5\.5/);
+  assert.match(frame, /^› Set as DEFAULT \(Default\)\s*$/m);
+  assert.match(frame, /Set as SMOL \(Fast\)/);
+  assert.match(frame, /Set as SLOW \(Thinking\)\s+CURRENT/);
+  assert.match(frame, /Set as ADVISOR \(Advisor\)/);
+  assert.match(frame, /Enter: continue  Esc: cancel/);
+
+  state = reduceStarlingTui(state, { type: "model.action.select", delta: 1 });
+  frame = renderStarlingFrame(state, { width: 86, height: 24, color: false });
+  assert.match(frame, /^› Set as SMOL \(Fast\)\s*$/m);
+  state = reduceStarlingTui(state, { type: "model.thinking.open" });
+  frame = renderStarlingFrame(state, { width: 86, height: 24, color: false });
+  assert.match(frame, /Thinking for: gpt-5\.5 · SMOL/);
+  assert.match(frame, /^› inherit\s+Inherit session default\s*$/m);
+  assert.match(frame, /off\s+No reasoning/);
+  assert.match(frame, /high\s+Deep reasoning/);
+  assert.doesNotMatch(frame, /xhigh|Maximum reasoning/, "Pi only exposes opt-in levels declared by the model");
+  state = reduceStarlingTui(state, { type: "model.thinking.select", delta: 5 });
+  frame = renderStarlingFrame(state, { width: 86, height: 24, color: false });
+  assert.match(frame, /^› high\s+Deep reasoning\s*$/m);
+  state = reduceStarlingTui(state, { type: "model.thinking.close" });
+  assert.equal(state.modelPicker.stage, "actions");
+  state = reduceStarlingTui(state, { type: "model.action.close" });
+  assert.equal(state.modelPicker.stage, "models");
+});
+
+test("tree picker shows Pi branches and the three-step summary choice", () => {
+  let state = sessionState();
+  const tree = treePickerFromResponse({
+    leafId: "leaf",
+    tree: [{
+      entry: {
+        id: "root",
+        parentId: null,
+        type: "message",
+        message: { role: "user", content: "initial task" },
+      },
+      children: [
+        {
+          entry: {
+            id: "leaf",
+            parentId: "root",
+            type: "message",
+            message: { role: "assistant", content: "current result" },
+          },
+          children: [],
+        },
+        {
+          entry: {
+            id: "branch",
+            parentId: "root",
+            type: "message",
+            message: { role: "user", content: "alternate path" },
+          },
+          label: "experiment",
+          children: [],
+        },
+      ],
+    }],
+  });
+  state = reduceStarlingTui(state, { type: "tree.open", ...tree });
+
+  let frame = renderStarlingFrame(state, { width: 88, height: 24, color: false });
+  assert.match(frame, /^SESSION TREE/m);
+  assert.match(frame, /current result.*CURRENT/);
+  assert.match(frame, /alternate path.*\[experiment\]/);
+  assert.match(frame, /↑\/↓ select · Enter navigate · type to search · Esc close/);
+  assert.doesNotMatch(frame, /Pi SDK agent workspace/);
+  assertFits(renderedLines(frame), 88);
+
+  state = reduceStarlingTui(state, { type: "tree.summary.open", targetId: "branch" });
+  frame = renderStarlingFrame(state, { width: 88, height: 24, color: false });
+  assert.match(frame, /Summarize branch\?/);
+  assert.match(frame, /^› No summary/m);
+  assert.match(frame, /Summarize with custom prompt/);
+  state = reduceStarlingTui(state, { type: "tree.summary.select", delta: 2 });
+  state = reduceStarlingTui(state, { type: "tree.custom.open" });
+  state = reduceStarlingTui(state, { type: "tree.custom.append", value: "Keep key decisions" });
+  frame = renderStarlingFrame(state, { width: 88, height: 24, color: false });
+  assert.match(frame, /Custom summarization instructions/);
+  assert.match(frame, /Keep key decisions/);
+  assert.match(frame, /Alt\+Enter newline/);
 });
 
 test("renderer sanitizes terminal controls and preserves Unicode cell width", () => {
@@ -283,6 +500,53 @@ test("renderer never exceeds a tiny physical viewport", () => {
 
   assert.ok(lines.length <= 4);
   assertFits(lines, 8);
+});
+
+test("auth picker working view shows the live device code / auth URL", () => {
+  let state = sessionState();
+  const provider = {
+    id: "openai-codex",
+    name: "OpenAI Codex",
+    authType: "oauth",
+    methodName: "OpenAI (ChatGPT Plus/Pro)",
+    configured: false,
+    stored: false,
+    interactive: true,
+  };
+  state = reduceStarlingTui(state, { type: "auth.open", mode: "login", providers: [provider] });
+  state = reduceStarlingTui(state, { type: "auth.working" });
+
+  // Without an auth status line, only the spinner + cancel hint render.
+  let frame = renderStarlingFrame(state, { width: 72, height: 12, color: false });
+  assert.match(frame, /Logging in to OpenAI Codex/);
+  assert.doesNotMatch(frame, /Device code/);
+
+  // The Pi SDK surfaces the device code via setStatus("auth", ...).
+  state = dispatchRecord(state, {
+    type: "extension_ui_request",
+    id: "auth-status-1",
+    method: "setStatus",
+    statusKey: "auth",
+    statusText: "Open https://auth.openai.com/codex/device\nDevice code: XGRZ-0487U\nExpires in 900 seconds",
+  });
+  frame = renderStarlingFrame(state, { width: 72, height: 12, color: false });
+  assert.match(frame, /Logging in to OpenAI Codex/);
+  assert.match(frame, /auth\.openai\.com\/codex\/device/);
+  assert.match(frame, /Device code: XGRZ-0487U/);
+  assert.match(frame, /Expires in 900 seconds/);
+  assert.match(frame, /Esc cancel/);
+
+  // With color enabled, the URL is underlined and wrapped as an OSC 8 hyperlink.
+  const colorFrame = renderStarlingFrame(state, { width: 72, height: 12, color: true, tick: 1 });
+  const urlLine = colorFrame.split("\n").find((l) => l.includes("auth.openai.com"));
+  assert.ok(urlLine, "URL line is rendered");
+  assert.ok(urlLine.includes("\u001b[4;36m"), "URL token is underlined + cyan");
+  assert.ok(
+    urlLine.includes("\u001b]8;;https://auth.openai.com/codex/device\u001b\\"),
+    "URL token is an OSC 8 hyperlink",
+  );
+  const codeLine = colorFrame.split("\n").find((l) => l.includes("XGRZ-0487U"));
+  assert.ok(codeLine && !codeLine.includes("\u001b[4;36m"), "device code line is not styled as a link");
 });
 
 test("cell width follows grapheme clusters for joined and modified emoji", () => {

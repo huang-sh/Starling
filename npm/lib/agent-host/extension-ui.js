@@ -58,7 +58,14 @@ export function createExtensionUiBridge(output) {
             lastConfirmationExplicit = response?.cancelled !== true
                 && typeof response?.confirmed === "boolean";
         }),
-        input: (title, placeholder, dialogOptions) => request({ method: "input", title, placeholder, timeout: dialogOptions?.timeout }, dialogOptions, undefined, (response) => response.cancelled ? undefined : response.value, isCancelledOrString),
+        input: (title, placeholder, dialogOptions) => request({
+            method: "input",
+            title,
+            placeholder,
+            message: dialogOptions?.message,
+            secret: dialogOptions?.secret === true,
+            timeout: dialogOptions?.timeout,
+        }, dialogOptions, undefined, (response) => response.cancelled ? undefined : response.value, isCancelledOrString),
         editor: (title, prefill) => request({ method: "editor", title, prefill }, undefined, undefined, (response) => response.cancelled ? undefined : response.value, isCancelledOrString),
         notify: (message, notifyType) => emit({ method: "notify", message, notifyType }),
         setStatus: (statusKey, statusText) => emit({ method: "setStatus", statusKey, statusText }),

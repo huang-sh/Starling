@@ -12,7 +12,12 @@ export interface SlashCommandItem {
 
 export type SlashCommandPlan =
   | { kind: "error"; message: string }
-  | { kind: "local"; command: SlashCommandItem; action: "help" | "models" | "thinking" | "name" | "quit" }
+  | {
+    kind: "local";
+    command: SlashCommandItem;
+    action: "help" | "models" | "tree" | "login" | "logout" | "thinking" | "name" | "quit";
+    argument?: string;
+  }
   | {
     kind: "request";
     command: SlashCommandItem;
@@ -35,6 +40,26 @@ export const STARLING_SLASH_COMMANDS: readonly SlashCommandItem[] = [
     description: "List models or switch the active model",
     source: "starling",
     argumentHint: "[provider/model]",
+    allowArgs: true,
+  },
+  {
+    name: "tree",
+    description: "Navigate the current Pi session tree",
+    source: "starling",
+    allowArgs: false,
+  },
+  {
+    name: "login",
+    description: "Configure provider authentication",
+    source: "starling",
+    argumentHint: "[provider]",
+    allowArgs: true,
+  },
+  {
+    name: "logout",
+    description: "Remove stored provider authentication",
+    source: "starling",
+    argumentHint: "[provider]",
     allowArgs: true,
   },
   {
@@ -163,7 +188,7 @@ export function planSlashCommand(
     if (busy) request.streamingBehavior = "followUp";
     return { kind: "dynamic", command, request };
   }
-  if (busy && (command.name === "compact" || command.name === "reload")) {
+  if (busy && ["compact", "tree", "login", "logout", "reload"].includes(command.name)) {
     return {
       kind: "error",
       message: `/${command.name} is unavailable while Pi is working; interrupt or wait for the turn to finish`,
@@ -191,6 +216,22 @@ export function planSlashCommand(
         refreshMetadata: true,
       };
     }
+    case "tree":
+      return { kind: "local", command, action: "tree" };
+    case "login":
+      return {
+        kind: "local",
+        command,
+        action: "login",
+        ...(invocation.args ? { argument: invocation.args } : {}),
+      };
+    case "logout":
+      return {
+        kind: "local",
+        command,
+        action: "logout",
+        ...(invocation.args ? { argument: invocation.args } : {}),
+      };
     case "thinking":
       if (!invocation.args) return { kind: "local", command, action: "thinking" };
       if (!THINKING_LEVELS.includes(invocation.args as typeof THINKING_LEVELS[number])) {
@@ -259,7 +300,7 @@ export function formatSlashHelp(commands: readonly SlashCommandItem[]): string {
     "Available slash commands",
     ...rows,
     "",
-    "Keyboard: ↑/↓ select · Tab/Enter complete · Esc close · Alt+Enter newline",
+    "Keyboard: ↑/↓ select · Tab complete · Enter run · Esc close · Alt+Enter newline",
   ].join("\n");
 }
 
@@ -306,6 +347,13 @@ function parseSlashInvocation(text: string): { name: string; args: string } | nu
   const match = /^\/([^/\s]+)(?:\s+([\s\S]*))?$/.exec(text.trim());
   if (!match) return null;
   return { name: match[1], args: (match[2] ?? "").trim() };
+}
+
+/** Whether text is shaped like a slash command (`/name` + optional args).
+ *  A leading `/` alone does not qualify: `/data20T/dev/foo` is a file path,
+ *  not a command, so it must be sent as an ordinary prompt. */
+export function isSlashInvocation(text: string): boolean {
+  return parseSlashInvocation(text) !== null;
 }
 
 function normalizeDynamicCommand(value: unknown): SlashCommandItem | null {
