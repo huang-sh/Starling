@@ -17,18 +17,34 @@ import {
   type ChatInteractionRequest,
 } from "./events.js";
 import {
+  authenticateProvider,
+  authProvidersFromResponse,
+  handleAuthPickerKey,
+  type AuthPickerMode,
+} from "./auth-picker.js";
+import {
   completeSlashCommand,
   filterSlashCommands,
-  formatAvailableModels,
   formatSessionStats,
   formatSlashHelp,
   formatThinkingLevels,
+  isSlashInvocation,
   planSlashCommand,
   type SlashCommandPlan,
 } from "./commands.js";
 import { StarlingInputDecoder, parseStarlingKeys, type StarlingKey } from "./input.js";
-import { renderStarlingFrame, visibleWidth } from "./render.js";
+import {
+  availableModelsFromResponse,
+  handleModelPickerKey,
+  modelRolesFromResponse,
+} from "./model-picker.js";
+import {
+  handleTreePickerKey,
+  treePickerFromResponse,
+} from "./tree-picker.js";
+import { renderStarlingFrame, renderStarlingParts, visibleWidth } from "./render.js";
 import { shouldUseSynchronizedOutput, StarlingScreen } from "./screen.js";
+import type { PickerHost } from "./picker-host.js";
 import {
   createExtensionUiPrompt,
   createInitialStarlingTuiState,
@@ -47,14 +63,20 @@ export {
   parseStarlingKeys,
   reduceStarlingTui,
   renderStarlingFrame,
+  renderStarlingParts,
   shouldUseSynchronizedOutput,
   StarlingInputDecoder,
   StarlingScreen,
   visibleWidth,
 };
+export {
+  availableModelsFromResponse,
+  selectedModelPickerModel,
+  visibleModelPickerModels,
+} from "./model-picker.js";
 export type { StarlingKey } from "./input.js";
 export type { SlashCommandItem, SlashCommandPlan, SlashCommandSource } from "./commands.js";
-export type { StarlingTuiViewport } from "./render.js";
+export type { StarlingFrameMode, StarlingFrameParts, StarlingTuiViewport } from "./render.js";
 export type {
   ActivityEntry,
   ExtensionUiPrompt,
@@ -87,7 +109,6 @@ interface QueuedUiRequest {
 }
 
 const ENTER_SCREEN = "\u001b[?25l\u001b[?2004h";
-const LEAVE_SCREEN = "\u001b[?2026l\u001b[?2004l\u001b[?7h\u001b[0m\u001b[?25h\r\n";
 const LONE_ESCAPE_TIMEOUT_MS = 75;
 const TERMINAL_FLUSH_TIMEOUT_MS = 250;
 
@@ -154,7 +175,18 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
   }
 
   function ensureAnimation(): void {
-    if (animationTimer || closing || (!state.busy && !state.compacting && !state.uiPrompt)) return;
+    if (
+      animationTimer
+      || closing
+      || (
+        !state.busy
+        && !state.compacting
+        && !state.uiPrompt
+        && !state.authPicker?.working
+        && !state.treePicker?.working
+        && !state.modelPicker?.switching
+      )
+    ) return;
     animationTimer = setTimeout(() => {
       animationTimer = undefined;
       scheduleRender(true);
@@ -165,14 +197,14 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
     renderTimer = undefined;
     if (!terminalEntered || closing) return;
     tick += 1;
-    const frame = renderStarlingFrame(state, {
+    const parts = renderStarlingParts(state, {
       width: stdout.columns || 80,
       height: stdout.rows || 24,
       color: true,
       tick,
     });
     try {
-      screen.paint(frame, force);
+      screen.paint(parts, { height: stdout.rows || 24, force });
     } catch (error) {
       recordTerminalFailure(error);
       requestExit();
@@ -195,6 +227,9 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
     state = reduceStarlingTui(state, action);
     if (!state.busy && !state.compacting) abortArmed = false;
     scheduleRender();
+  }
+  function pickerHost(): PickerHost {
+    return { state, session, closing, dispatch, sendSessionRequest, refreshSessionMetadata };
   }
 
   function sendUiResponse(
@@ -277,6 +312,7 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
         options: request.options,
         selected: 0,
         value: request.initialValue,
+        secret: request.secret,
       },
     };
     if (typeof timeout === "number" && timeout > 0) {
@@ -406,7 +442,8 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
     if (!session || !state.ready || closing) return;
     const text = state.composer.trim();
     if (!text) return;
-    if (text.startsWith("/")) {
+    dispatch({ type: "history.push", text });
+    if (isSlashInvocation(text)) {
       void executeSlashCommand(text);
       return;
     }
@@ -484,13 +521,37 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
           dispatch({ type: "command.completed", message: formatSlashHelp(state.slashCommands) });
           return;
         case "models": {
-          const models = await session.request({ type: "get_available_models" });
+          const response = await session.request({ type: "get_available_models" });
+          const config = await session.request({ type: "get_model_config" });
+          const models = availableModelsFromResponse(response);
+          if (models.length === 0) {
+            dispatch({ type: "command.failed", message: "No configured models found" });
+            return;
+          }
           dispatch({
-            type: "command.completed",
-            message: formatAvailableModels(models, state.model),
+            type: "model.open",
+            models,
+            current: state.model,
+            roles: modelRolesFromResponse(config),
           });
+          dispatch({ type: "command.completed" });
           return;
         }
+        case "tree": {
+          const response = await session.request({ type: "get_tree" });
+          const tree = treePickerFromResponse(response);
+          if (tree.entries.length === 0) {
+            dispatch({ type: "command.completed", message: "No entries in session" });
+            return;
+          }
+          dispatch({ type: "tree.open", ...tree });
+          dispatch({ type: "command.completed" });
+          return;
+        }
+        case "login":
+        case "logout":
+          await openAuthPicker(plan.action, plan.argument);
+          return;
         case "thinking":
           dispatch({
             type: "command.completed",
@@ -511,6 +572,49 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
       }
     } catch (error) {
       dispatch({ type: "command.failed", message: asError(error).message });
+    }
+  }
+
+  async function openAuthPicker(
+    mode: AuthPickerMode,
+    providerRef?: string,
+  ): Promise<void> {
+    if (!session || closing) return;
+    const response = await session.request({ type: "get_auth_providers", mode });
+    const available = authProvidersFromResponse(response);
+    if (available.length === 0) {
+      dispatch({
+        type: "command.completed",
+        message: mode === "logout"
+          ? "No stored credentials to remove. Environment variables and models.json are unchanged."
+          : "No Pi authentication providers are available.",
+      });
+      return;
+    }
+
+    let providers = available;
+    if (providerRef) {
+      const query = providerRef.trim().toLocaleLowerCase();
+      const exact = available.filter((provider) =>
+        provider.id.toLocaleLowerCase() === query
+        || provider.name.toLocaleLowerCase() === query
+      );
+      providers = exact.length > 0
+        ? exact
+        : available.filter((provider) =>
+          provider.id.toLocaleLowerCase().includes(query)
+          || provider.name.toLocaleLowerCase().includes(query)
+        );
+      if (providers.length === 0) {
+        dispatch({ type: "command.failed", message: `Unknown authentication provider: ${providerRef}` });
+        return;
+      }
+    }
+
+    dispatch({ type: "auth.open", mode, providers });
+    dispatch({ type: "command.completed" });
+    if (providerRef && providers.length === 1) {
+      await authenticateProvider(pickerHost(), providers[0]!);
     }
   }
 
@@ -617,6 +721,18 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
       handleModalKey(key);
       return;
     }
+    if (state.authPicker) {
+      handleAuthPickerKey(pickerHost(), key);
+      return;
+    }
+    if (state.treePicker) {
+      handleTreePickerKey(pickerHost(), key);
+      return;
+    }
+    if (state.modelPicker) {
+      handleModelPickerKey(pickerHost(), key);
+      return;
+    }
     if (state.slashMenuOpen) {
       if (key.type === "escape") {
         dispatch({ type: "slash.dismiss" });
@@ -630,8 +746,21 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
         dispatch({ type: "slash.select", delta: 1 });
         return;
       }
-      if (key.type === "tab" || key.type === "enter") {
-        if (!completeSelectedSlashCommand() && key.type === "enter") submitComposer();
+      if (key.type === "tab") {
+        completeSelectedSlashCommand();
+        return;
+      }
+      if (key.type === "enter") {
+        const matches = filterSlashCommands(state.composer, state.slashCommands);
+        const selected = matches[state.slashSelected];
+        const exact = selected
+          && state.composer.toLocaleLowerCase() === `/${selected.name}`.toLocaleLowerCase();
+        if (exact) {
+          dispatch({ type: "slash.dismiss" });
+          submitComposer();
+        } else if (!completeSelectedSlashCommand()) {
+          submitComposer();
+        }
         return;
       }
       if (key.type === "backspace") {
@@ -680,8 +809,19 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
       dispatch({ type: "composer.delete" });
       return;
     }
-    if ((key.type === "up" || key.type === "down") && state.composer) {
-      dispatch({ type: "composer.line", delta: key.type === "up" ? -1 : 1 });
+    if (key.type === "up" || key.type === "down") {
+      // readline-style: move the cursor within a multiline draft, but recall
+      // history (Up = older, Down = newer) at the first/last line.
+      const atTop = key.type === "up"
+        && !state.composer.slice(0, state.composerCursor).includes("\n");
+      const atBottom = key.type === "down"
+        && !state.composer.slice(state.composerCursor).includes("\n");
+      const atEdge = key.type === "up" ? atTop : atBottom;
+      if (state.composer && !atEdge) {
+        dispatch({ type: "composer.line", delta: key.type === "up" ? -1 : 1 });
+      } else {
+        dispatch({ type: key.type === "up" ? "history.prev" : "history.next" });
+      }
       return;
     }
     if (key.type === "enter") {
@@ -707,8 +847,6 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
     const page = Math.max(3, Math.floor((stdout.rows || 24) / 2));
     if (key.type === "page-up") dispatch({ type: "scroll", delta: page });
     if (key.type === "page-down") dispatch({ type: "scroll", delta: -page });
-    if (key.type === "up" && !state.composer) dispatch({ type: "scroll", delta: 1 });
-    if (key.type === "down" && !state.composer) dispatch({ type: "scroll", delta: -1 });
   }
 
   function deliverInput(chunk: string | Buffer): void {
@@ -801,8 +939,13 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
       recordTerminalFailure(error);
       // Best effort only.
     }
-    terminalFlushPromise = queueTerminalLeave(stdout, recordTerminalFailure);
-    screen.reset();
+    terminalFlushPromise = queueTerminalLeave(screen, recordTerminalFailure);
+    try {
+      screen.reset();
+    } catch (error) {
+      recordTerminalFailure(error);
+      // Best effort only: a dead remote TTY can reject the final paint.
+    }
   }
 
   try {
@@ -948,7 +1091,7 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
 }
 
 function queueTerminalLeave(
-  stdout: NodeJS.WriteStream,
+  _screen: StarlingScreen,
   onError: (error: unknown) => void,
 ): Promise<void> {
   return new Promise((resolvePromise) => {
@@ -962,10 +1105,7 @@ function queueTerminalLeave(
     };
     timer = setTimeout(settle, TERMINAL_FLUSH_TIMEOUT_MS);
     try {
-      stdout.write(LEAVE_SCREEN, (error) => {
-        if (error) onError(error);
-        settle();
-      });
+      settle();
     } catch (error) {
       onError(error);
       settle();

@@ -3,12 +3,16 @@ import { resolve } from "node:path";
 import { createChatSession } from "../chat/session.js";
 import { createManagedRun, } from "../run-lifecycle.js";
 import { normalizeChatRecord, normalizeChatSnapshot, } from "./events.js";
-import { completeSlashCommand, filterSlashCommands, formatAvailableModels, formatSessionStats, formatSlashHelp, formatThinkingLevels, planSlashCommand, } from "./commands.js";
+import { authenticateProvider, authProvidersFromResponse, handleAuthPickerKey, } from "./auth-picker.js";
+import { completeSlashCommand, filterSlashCommands, formatSessionStats, formatSlashHelp, formatThinkingLevels, isSlashInvocation, planSlashCommand, } from "./commands.js";
 import { StarlingInputDecoder, parseStarlingKeys } from "./input.js";
-import { renderStarlingFrame, visibleWidth } from "./render.js";
+import { availableModelsFromResponse, handleModelPickerKey, modelRolesFromResponse, } from "./model-picker.js";
+import { handleTreePickerKey, treePickerFromResponse, } from "./tree-picker.js";
+import { renderStarlingFrame, renderStarlingParts, visibleWidth } from "./render.js";
 import { shouldUseSynchronizedOutput, StarlingScreen } from "./screen.js";
 import { createExtensionUiPrompt, createInitialStarlingTuiState, isRecord, reduceStarlingTui, } from "./state.js";
-export { completeSlashCommand, createExtensionUiPrompt, createInitialStarlingTuiState, filterSlashCommands, planSlashCommand, parseStarlingKeys, reduceStarlingTui, renderStarlingFrame, shouldUseSynchronizedOutput, StarlingInputDecoder, StarlingScreen, visibleWidth, };
+export { completeSlashCommand, createExtensionUiPrompt, createInitialStarlingTuiState, filterSlashCommands, planSlashCommand, parseStarlingKeys, reduceStarlingTui, renderStarlingFrame, renderStarlingParts, shouldUseSynchronizedOutput, StarlingInputDecoder, StarlingScreen, visibleWidth, };
+export { availableModelsFromResponse, selectedModelPickerModel, visibleModelPickerModels, } from "./model-picker.js";
 export class StarlingTuiError extends Error {
     code;
     constructor(code, message) {
@@ -18,7 +22,6 @@ export class StarlingTuiError extends Error {
     }
 }
 const ENTER_SCREEN = "\u001b[?25l\u001b[?2004h";
-const LEAVE_SCREEN = "\u001b[?2026l\u001b[?2004l\u001b[?7h\u001b[0m\u001b[?25h\r\n";
 const LONE_ESCAPE_TIMEOUT_MS = 75;
 const TERMINAL_FLUSH_TIMEOUT_MS = 250;
 /**
@@ -74,7 +77,14 @@ export async function runStarlingTui(options) {
         resolveCompletion(code);
     }
     function ensureAnimation() {
-        if (animationTimer || closing || (!state.busy && !state.compacting && !state.uiPrompt))
+        if (animationTimer
+            || closing
+            || (!state.busy
+                && !state.compacting
+                && !state.uiPrompt
+                && !state.authPicker?.working
+                && !state.treePicker?.working
+                && !state.modelPicker?.switching))
             return;
         animationTimer = setTimeout(() => {
             animationTimer = undefined;
@@ -86,14 +96,14 @@ export async function runStarlingTui(options) {
         if (!terminalEntered || closing)
             return;
         tick += 1;
-        const frame = renderStarlingFrame(state, {
+        const parts = renderStarlingParts(state, {
             width: stdout.columns || 80,
             height: stdout.rows || 24,
             color: true,
             tick,
         });
         try {
-            screen.paint(frame, force);
+            screen.paint(parts, { height: stdout.rows || 24, force });
         }
         catch (error) {
             recordTerminalFailure(error);
@@ -119,6 +129,9 @@ export async function runStarlingTui(options) {
         if (!state.busy && !state.compacting)
             abortArmed = false;
         scheduleRender();
+    }
+    function pickerHost() {
+        return { state, session, closing, dispatch, sendSessionRequest, refreshSessionMetadata };
     }
     function sendUiResponse(request, response) {
         if (request.timer)
@@ -200,6 +213,7 @@ export async function runStarlingTui(options) {
                 options: request.options,
                 selected: 0,
                 value: request.initialValue,
+                secret: request.secret,
             },
         };
         if (typeof timeout === "number" && timeout > 0) {
@@ -323,7 +337,8 @@ export async function runStarlingTui(options) {
         const text = state.composer.trim();
         if (!text)
             return;
-        if (text.startsWith("/")) {
+        dispatch({ type: "history.push", text });
+        if (isSlashInvocation(text)) {
             void executeSlashCommand(text);
             return;
         }
@@ -401,13 +416,37 @@ export async function runStarlingTui(options) {
                     dispatch({ type: "command.completed", message: formatSlashHelp(state.slashCommands) });
                     return;
                 case "models": {
-                    const models = await session.request({ type: "get_available_models" });
+                    const response = await session.request({ type: "get_available_models" });
+                    const config = await session.request({ type: "get_model_config" });
+                    const models = availableModelsFromResponse(response);
+                    if (models.length === 0) {
+                        dispatch({ type: "command.failed", message: "No configured models found" });
+                        return;
+                    }
                     dispatch({
-                        type: "command.completed",
-                        message: formatAvailableModels(models, state.model),
+                        type: "model.open",
+                        models,
+                        current: state.model,
+                        roles: modelRolesFromResponse(config),
                     });
+                    dispatch({ type: "command.completed" });
                     return;
                 }
+                case "tree": {
+                    const response = await session.request({ type: "get_tree" });
+                    const tree = treePickerFromResponse(response);
+                    if (tree.entries.length === 0) {
+                        dispatch({ type: "command.completed", message: "No entries in session" });
+                        return;
+                    }
+                    dispatch({ type: "tree.open", ...tree });
+                    dispatch({ type: "command.completed" });
+                    return;
+                }
+                case "login":
+                case "logout":
+                    await openAuthPicker(plan.action, plan.argument);
+                    return;
                 case "thinking":
                     dispatch({
                         type: "command.completed",
@@ -429,6 +468,40 @@ export async function runStarlingTui(options) {
         }
         catch (error) {
             dispatch({ type: "command.failed", message: asError(error).message });
+        }
+    }
+    async function openAuthPicker(mode, providerRef) {
+        if (!session || closing)
+            return;
+        const response = await session.request({ type: "get_auth_providers", mode });
+        const available = authProvidersFromResponse(response);
+        if (available.length === 0) {
+            dispatch({
+                type: "command.completed",
+                message: mode === "logout"
+                    ? "No stored credentials to remove. Environment variables and models.json are unchanged."
+                    : "No Pi authentication providers are available.",
+            });
+            return;
+        }
+        let providers = available;
+        if (providerRef) {
+            const query = providerRef.trim().toLocaleLowerCase();
+            const exact = available.filter((provider) => provider.id.toLocaleLowerCase() === query
+                || provider.name.toLocaleLowerCase() === query);
+            providers = exact.length > 0
+                ? exact
+                : available.filter((provider) => provider.id.toLocaleLowerCase().includes(query)
+                    || provider.name.toLocaleLowerCase().includes(query));
+            if (providers.length === 0) {
+                dispatch({ type: "command.failed", message: `Unknown authentication provider: ${providerRef}` });
+                return;
+            }
+        }
+        dispatch({ type: "auth.open", mode, providers });
+        dispatch({ type: "command.completed" });
+        if (providerRef && providers.length === 1) {
+            await authenticateProvider(pickerHost(), providers[0]);
         }
     }
     function completeSelectedSlashCommand() {
@@ -537,6 +610,18 @@ export async function runStarlingTui(options) {
             handleModalKey(key);
             return;
         }
+        if (state.authPicker) {
+            handleAuthPickerKey(pickerHost(), key);
+            return;
+        }
+        if (state.treePicker) {
+            handleTreePickerKey(pickerHost(), key);
+            return;
+        }
+        if (state.modelPicker) {
+            handleModelPickerKey(pickerHost(), key);
+            return;
+        }
         if (state.slashMenuOpen) {
             if (key.type === "escape") {
                 dispatch({ type: "slash.dismiss" });
@@ -550,9 +635,22 @@ export async function runStarlingTui(options) {
                 dispatch({ type: "slash.select", delta: 1 });
                 return;
             }
-            if (key.type === "tab" || key.type === "enter") {
-                if (!completeSelectedSlashCommand() && key.type === "enter")
+            if (key.type === "tab") {
+                completeSelectedSlashCommand();
+                return;
+            }
+            if (key.type === "enter") {
+                const matches = filterSlashCommands(state.composer, state.slashCommands);
+                const selected = matches[state.slashSelected];
+                const exact = selected
+                    && state.composer.toLocaleLowerCase() === `/${selected.name}`.toLocaleLowerCase();
+                if (exact) {
+                    dispatch({ type: "slash.dismiss" });
                     submitComposer();
+                }
+                else if (!completeSelectedSlashCommand()) {
+                    submitComposer();
+                }
                 return;
             }
             if (key.type === "backspace") {
@@ -603,8 +701,20 @@ export async function runStarlingTui(options) {
             dispatch({ type: "composer.delete" });
             return;
         }
-        if ((key.type === "up" || key.type === "down") && state.composer) {
-            dispatch({ type: "composer.line", delta: key.type === "up" ? -1 : 1 });
+        if (key.type === "up" || key.type === "down") {
+            // readline-style: move the cursor within a multiline draft, but recall
+            // history (Up = older, Down = newer) at the first/last line.
+            const atTop = key.type === "up"
+                && !state.composer.slice(0, state.composerCursor).includes("\n");
+            const atBottom = key.type === "down"
+                && !state.composer.slice(state.composerCursor).includes("\n");
+            const atEdge = key.type === "up" ? atTop : atBottom;
+            if (state.composer && !atEdge) {
+                dispatch({ type: "composer.line", delta: key.type === "up" ? -1 : 1 });
+            }
+            else {
+                dispatch({ type: key.type === "up" ? "history.prev" : "history.next" });
+            }
             return;
         }
         if (key.type === "enter") {
@@ -632,10 +742,6 @@ export async function runStarlingTui(options) {
             dispatch({ type: "scroll", delta: page });
         if (key.type === "page-down")
             dispatch({ type: "scroll", delta: -page });
-        if (key.type === "up" && !state.composer)
-            dispatch({ type: "scroll", delta: 1 });
-        if (key.type === "down" && !state.composer)
-            dispatch({ type: "scroll", delta: -1 });
     }
     function deliverInput(chunk) {
         if (escapeTimer) {
@@ -733,8 +839,14 @@ export async function runStarlingTui(options) {
             recordTerminalFailure(error);
             // Best effort only.
         }
-        terminalFlushPromise = queueTerminalLeave(stdout, recordTerminalFailure);
-        screen.reset();
+        terminalFlushPromise = queueTerminalLeave(screen, recordTerminalFailure);
+        try {
+            screen.reset();
+        }
+        catch (error) {
+            recordTerminalFailure(error);
+            // Best effort only: a dead remote TTY can reject the final paint.
+        }
     }
     try {
         enterTerminal();
@@ -884,7 +996,7 @@ export async function runStarlingTui(options) {
             throw cleanupError;
     }
 }
-function queueTerminalLeave(stdout, onError) {
+function queueTerminalLeave(_screen, onError) {
     return new Promise((resolvePromise) => {
         let settled = false;
         let timer;
@@ -898,11 +1010,7 @@ function queueTerminalLeave(stdout, onError) {
         };
         timer = setTimeout(settle, TERMINAL_FLUSH_TIMEOUT_MS);
         try {
-            stdout.write(LEAVE_SCREEN, (error) => {
-                if (error)
-                    onError(error);
-                settle();
-            });
+            settle();
         }
         catch (error) {
             onError(error);

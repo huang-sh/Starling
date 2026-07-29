@@ -1,5 +1,26 @@
 import os from "node:os";
+import {
+  selectedAuthProvider,
+  visibleAuthProviders,
+  type AuthPickerState,
+} from "./auth-picker.js";
 import { filterSlashCommands, type SlashCommandItem } from "./commands.js";
+import {
+  MODEL_CONFIG_ACTIONS,
+  modelPickerProviders,
+  modelRoleMatches,
+  modelRoleTags,
+  selectedModelPickerModel,
+  thinkingOptionsForModel,
+  visibleModelPickerModels,
+  type ModelPickerState,
+} from "./model-picker.js";
+import {
+  TREE_SUMMARY_ACTIONS,
+  selectedTreeEntry,
+  visibleTreeEntries,
+  type TreePickerState,
+} from "./tree-picker.js";
 import type { ActivityEntry, StarlingTuiState, TimelineEntry } from "./state.js";
 
 export interface StarlingTuiViewport {
@@ -14,6 +35,8 @@ export const STARLING_TUI_WIDE_MIN_COLUMNS = 100;
 
 export interface RenderLine {
   text: string;
+  /** Ranges that keep the terminal's default style instead of inheriting the row tone. */
+  unstyled?: ReadonlyArray<readonly [start: number, end: number]>;
   tone?:
     | "brand"
     | "muted"
@@ -27,6 +50,8 @@ export interface RenderLine {
     | "active"
     | "success"
     | "error";
+  /** Optional URL: when set, the matching token is underlined and rendered as an OSC 8 hyperlink. */
+  link?: string;
 }
 
 /**
@@ -47,13 +72,15 @@ export function renderStarlingFrame(
     return renderCompactFrame(state, width, height, tick, viewport.color === true);
   }
 
-  const footer = renderFooter(state, width, tick);
+  const footer = renderFooter(state, width, height, tick);
   const transcript = state.timeline.length === 0
     ? renderEmptyWorkspace(state, width)
     : renderTranscriptLines(state, width);
-  const bodySource = state.timeline.length === 0 && state.activity.length > 0
-    ? [...transcript, { text: "" }, ...renderActivityLines(state.activity, width)]
-    : transcript;
+  const bodySource = state.modelPicker || state.treePicker || (state.authPicker && !state.authPicker.working)
+    ? []
+    : state.timeline.length === 0 && state.activity.length > 0
+      ? [...transcript, { text: "" }, ...renderActivityLines(state.activity, width)]
+      : transcript;
   const separator: RenderLine[] = bodySource.length > 0 && footer.length > 0 ? [{ text: "" }] : [];
   const bodyHeight = Math.max(0, height - footer.length - separator.length);
   const body = takeViewport(bodySource, bodyHeight, state.scrollOffset);
@@ -62,8 +89,146 @@ export function renderStarlingFrame(
     : [...body, ...separator, ...footer].slice(-height);
 
   return lines
-    .map((line) => colorize(fitTerminalLine(line.text, width), line.tone, viewport.color === true))
+    .map((line) => colorize(
+      fitTerminalLine(line.text, width),
+      line.tone,
+      viewport.color === true,
+      line.unstyled,
+      line.link,
+    ))
     .join("\n");
+}
+
+export type StarlingFrameMode = "normal" | "overlay" | "compact";
+
+/**
+ * Styled, print-ready frame split into two regions for inline rendering:
+ *
+ * - `committed`: stable transcript lines that the painter pushes into the
+ *   terminal's main scrollback (mouse-wheel scrollback reaches them).
+ * - `live`: the bottom dynamic region (streaming tail, activity, editor,
+ *   footer, or a full-screen picker overlay) that is repainted in place.
+ *
+ * `overlay` and `compact` modes carry everything in `live` and freeze commits
+ * so a modal picker or a tiny terminal does not disturb scrollback history.
+ */
+export interface StarlingFrameParts {
+  mode: StarlingFrameMode;
+  committed: string[];
+  live: string[];
+}
+
+function styleLines(lines: readonly RenderLine[], width: number, color: boolean): string[] {
+  return lines.map((line) => colorize(
+    fitTerminalLine(line.text, width),
+    line.tone,
+    color,
+    line.unstyled,
+    line.link,
+  ));
+}
+
+type TranscriptRecord =
+  | { id: number; kind: "timeline"; value: TimelineEntry }
+  | { id: number; kind: "activity"; value: ActivityEntry };
+
+function buildTranscriptRecords(state: StarlingTuiState): TranscriptRecord[] {
+  return [
+    ...state.timeline.map((value) => ({ id: value.id, kind: "timeline" as const, value })),
+    ...state.activity.map((value) => ({ id: value.id, kind: "activity" as const, value })),
+  ].sort((left, right) => left.id - right.id);
+}
+
+function renderRecordRange(
+  records: readonly TranscriptRecord[],
+  start: number,
+  end: number,
+  width: number,
+): RenderLine[] {
+  const lines: RenderLine[] = [];
+  for (let i = start; i < end; i += 1) {
+    const record = records[i]!;
+    if (lines.length > 0) lines.push({ text: "" });
+    if (record.kind === "activity") {
+      lines.push(...renderActivityLines([record.value], width));
+    } else {
+      lines.push(...renderTimelineEntry(record.value, width));
+    }
+  }
+  return lines;
+}
+
+/**
+ * Split the transcript into committed history and a still-changing tail.
+ * Only a trailing run of live records (a streaming assistant message plus any
+ * runtime activity) is kept dynamic; everything before it is stable history.
+ */
+function renderTranscriptSplit(
+  state: StarlingTuiState,
+  width: number,
+): { committed: RenderLine[]; liveTail: RenderLine[] } {
+  const contentWidth = Math.max(10, width);
+  if (state.timeline.length === 0) {
+    const panel = renderEmptyWorkspace(state, contentWidth);
+    const liveTail = state.activity.length > 0
+      ? [...panel, { text: "" }, ...renderActivityLines(state.activity, contentWidth)]
+      : panel;
+    return { committed: [], liveTail };
+  }
+  const records = buildTranscriptRecords(state);
+  let split = records.length;
+  while (split > 0) {
+    const tail = records[split - 1]!;
+    if (tail.kind === "timeline" ? tail.value.pending !== true : false) break;
+    split -= 1;
+  }
+  return {
+    committed: renderRecordRange(records, 0, split, contentWidth),
+    liveTail: renderRecordRange(records, split, records.length, contentWidth),
+  };
+}
+
+/**
+ * Render a frame split for the inline terminal painter (see {@link StarlingScreen}).
+ * Unlike {@link renderStarlingFrame}, this does not collapse the transcript into
+ * a fixed viewport; committed history is reported separately so it can be flushed
+ * to the terminal's main scrollback and reached with the mouse wheel.
+ */
+export function renderStarlingParts(
+  state: StarlingTuiState,
+  viewport: StarlingTuiViewport,
+): StarlingFrameParts {
+  const width = Math.max(1, Math.floor(viewport.width));
+  const height = Math.max(1, Math.floor(viewport.height));
+  const tick = Math.max(0, Math.floor(viewport.tick ?? 0));
+  const color = viewport.color === true;
+
+  if (width < 20 || height < 10) {
+    const compact = renderCompactFrame(state, width, height, tick, color);
+    return { mode: "compact", committed: [], live: compact.split("\n") };
+  }
+
+  const footer = renderFooter(state, width, height, tick);
+  const overlay = Boolean(
+    state.uiPrompt
+      || state.modelPicker
+      || state.treePicker
+      || (state.authPicker && !state.authPicker.working),
+  );
+  if (overlay) {
+    return { mode: "overlay", committed: [], live: styleLines(footer, width, color) };
+  }
+
+  const { committed, liveTail } = renderTranscriptSplit(state, width);
+  const live: RenderLine[] = [];
+  if (liveTail.length > 0) live.push(...liveTail);
+  if (liveTail.length > 0 && footer.length > 0) live.push({ text: "" });
+  if (footer.length > 0) live.push(...footer);
+  return {
+    mode: "normal",
+    committed: styleLines(committed, width, color),
+    live: styleLines(live, width, color),
+  };
 }
 
 export function renderTimelineLines(state: StarlingTuiState, width: number): RenderLine[] {
@@ -215,6 +380,54 @@ function renderCompactFrame(
   tick: number,
   color: boolean,
 ): string {
+  if (state.uiPrompt) {
+    return renderInteraction(state, width, height, tick)
+      .slice(-height)
+      .map((line) => colorize(
+        fitTerminalLine(line.text, width),
+        line.tone,
+        color,
+        line.unstyled,
+        line.link,
+      ))
+      .join("\n");
+  }
+  if (state.authPicker) {
+    return renderAuthPicker(state.authPicker, width, height, tick, state.statusItems.auth)
+      .slice(-height)
+      .map((line) => colorize(
+        fitTerminalLine(line.text, width),
+        line.tone,
+        color,
+        line.unstyled,
+        line.link,
+      ))
+      .join("\n");
+  }
+  if (state.treePicker) {
+    return renderTreePicker(state.treePicker, width, height, tick)
+      .slice(-height)
+      .map((line) => colorize(
+        fitTerminalLine(line.text, width),
+        line.tone,
+        color,
+        line.unstyled,
+        line.link,
+      ))
+      .join("\n");
+  }
+  if (state.modelPicker) {
+    return renderModelPicker(state.modelPicker, width, height)
+      .slice(-height)
+      .map((line) => colorize(
+        fitTerminalLine(line.text, width),
+        line.tone,
+        color,
+        line.unstyled,
+        line.link,
+      ))
+      .join("\n");
+  }
   const lines: RenderLine[] = [];
   if (height >= 3 && state.timeline.length === 0) {
     lines.push({ text: "✦ STARLING", tone: "brand" });
@@ -239,13 +452,20 @@ function renderCompactFrame(
     state.composerCursor,
     Math.max(1, width - 2),
     1,
-  ).at(-1)?.text ?? "▏";
+  ).at(-1) ?? { text: "▏", hasCursor: true, cursorIndex: 0 };
   lines.push({
-    text: `› ${compactInput}`,
+    text: `› ${compactInput.text}`,
     tone: state.composer ? "user" : "brand",
+    unstyled: state.composer ? editorTextRanges(compactInput, 2) : undefined,
   });
   return lines.slice(-height)
-    .map((line) => colorize(fitTerminalLine(line.text, width), line.tone, color))
+    .map((line) => colorize(
+      fitTerminalLine(line.text, width),
+      line.tone,
+      color,
+      line.unstyled,
+      line.link,
+    ))
     .join("\n");
 }
 
@@ -297,8 +517,16 @@ function renderEmptyWorkspace(state: StarlingTuiState, width: number): RenderLin
   ];
 }
 
-function renderFooter(state: StarlingTuiState, width: number, tick: number): RenderLine[] {
-  if (state.uiPrompt) return renderInteraction(state, width, tick);
+function renderFooter(
+  state: StarlingTuiState,
+  width: number,
+  height: number,
+  tick: number,
+): RenderLine[] {
+  if (state.uiPrompt) return renderInteraction(state, width, height, tick);
+  if (state.authPicker) return renderAuthPicker(state.authPicker, width, height, tick, state.statusItems.auth);
+  if (state.treePicker) return renderTreePicker(state.treePicker, width, height, tick);
+  if (state.modelPicker) return renderModelPicker(state.modelPicker, width, height);
 
   const rows: RenderLine[] = [];
   if (state.compacting) {
@@ -323,14 +551,400 @@ function renderFooter(state: StarlingTuiState, width: number, tick: number): Ren
   const visibleInput = wrapEditorLines(state.composer, state.composerCursor, editorWidth, 5);
   rows.push({ text: boxRule("╭─ ", `${meta} `, "╮", width), tone: "brand" });
   for (const line of visibleInput.slice(0, -1)) {
-    rows.push({ text: boxContent(`· ${line.text}`, width), tone: "user" });
+    rows.push({
+      text: boxContent(`· ${line.text}`, width),
+      tone: "user",
+      unstyled: state.composer ? editorTextRanges(line, 4) : undefined,
+    });
   }
+  const bottomLine = visibleInput.at(-1) ?? { text: "▏", hasCursor: true, cursorIndex: 0 };
+  const bottom = editorBottomLine(bottomLine, width);
   rows.push({
-    text: editorBottomLine(visibleInput.at(-1)?.text ?? "▏", width),
+    text: bottom.text,
     tone: state.phase === "error" ? "error" : "brand",
+    unstyled: state.composer ? bottom.unstyled : undefined,
   });
   rows.push(...renderExtensionWidgets(state, "belowEditor", width));
   return rows;
+}
+
+function renderAuthPicker(
+  picker: AuthPickerState,
+  width: number,
+  height: number,
+  tick: number,
+  authStatusText?: string,
+): RenderLine[] {
+  const selected = selectedAuthProvider(picker);
+  if (picker.working) {
+    const verb = picker.mode === "login" ? "Logging in to" : "Removing credentials for";
+    const rows: RenderLine[] = [
+      {
+        text: `  ${spinner(tick)} ${verb} ${selected?.name ?? "provider"}…`,
+        tone: "active",
+      },
+    ];
+    // Show the live auth status (device code, auth URL, progress) so the user
+    // can act on it — without this the device-code flow is unusable.
+    for (const line of (authStatusText ?? "").split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const url = detectUrl(trimmed);
+      rows.push({
+        text: `  ${trimmed}`,
+        tone: "assistant",
+        ...(url ? { link: url } : {}),
+      });
+    }
+    rows.push({ text: "  Esc cancel", tone: "muted" });
+    return rows;
+  }
+
+  const rows: RenderLine[] = [
+    {
+      text: picker.mode === "login"
+        ? "LOGIN · Select provider authentication"
+        : "LOGOUT · Select stored credential",
+      tone: "brand",
+    },
+    {
+      text: `› ${picker.query}▏`,
+      tone: picker.query ? "user" : "brand",
+      unstyled: picker.query ? [[2, 2 + picker.query.length]] : undefined,
+    },
+    { text: "" },
+  ];
+  const providers = visibleAuthProviders(picker);
+  const reserved = rows.length + (picker.error ? 5 : 4);
+  const listLimit = Math.max(1, Math.min(12, height - reserved));
+  const activeIndex = Math.min(picker.selected, Math.max(0, providers.length - 1));
+  const start = Math.max(0, Math.min(
+    activeIndex - Math.floor(listLimit / 2),
+    providers.length - listLimit,
+  ));
+
+  if (providers.length === 0) {
+    rows.push({
+      text: picker.query ? "  No matching providers" : "  No providers available",
+      tone: "muted",
+    });
+  } else {
+    providers.slice(start, start + listLimit).forEach((provider, index) => {
+      const absoluteIndex = start + index;
+      const marker = absoluteIndex === activeIndex ? "›" : " ";
+      const method = provider.authType === "oauth" ? "subscription" : "API key";
+      const status = provider.stored
+        ? "  STORED"
+        : provider.configured ? "  CONFIGURED" : "";
+      const external = provider.interactive ? "" : "  external setup";
+      rows.push({
+        text: `${marker} ${provider.name}  [${method}]${status}${external}`,
+        tone: absoluteIndex === activeIndex
+          ? "active"
+          : provider.configured ? "success" : "muted",
+      });
+    });
+  }
+
+  rows.push({ text: "" });
+  if (picker.error) rows.push({ text: `× ${picker.error}`, tone: "error" });
+  rows.push({
+    text: selected
+      ? `${selected.name} · ${selected.methodName}${selected.source ? ` · ${selected.source}` : ""}`
+      : "No provider selected",
+    tone: selected ? "assistant" : "muted",
+  });
+  rows.push({
+    text: "↑/↓ select · Enter continue · type to search · Esc close",
+    tone: "muted",
+  });
+  return rows;
+}
+
+function renderTreePicker(
+  picker: TreePickerState,
+  width: number,
+  height: number,
+  tick: number,
+): RenderLine[] {
+  const selected = selectedTreeEntry(picker);
+  if (picker.working) {
+    return [
+      {
+        text: `  ${spinner(tick)} ${picker.summarySelected === 0 ? "Navigating session tree" : "Summarizing branch"}…`,
+        tone: "active",
+      },
+      { text: "  Esc cancel", tone: "muted" },
+    ];
+  }
+
+  if (picker.stage === "summary") {
+    const target = picker.entries.find((entry) => entry.id === picker.targetId);
+    const rows: RenderLine[] = [
+      { text: "SESSION TREE · Summarize branch?", tone: "brand" },
+      { text: target ? `Target: ${target.text}` : "Target entry", tone: "assistant" },
+      { text: "" },
+    ];
+    TREE_SUMMARY_ACTIONS.forEach((action, index) => {
+      rows.push({
+        text: `${index === picker.summarySelected ? "›" : " "} ${action.label}`,
+        tone: index === picker.summarySelected ? "active" : "muted",
+      });
+    });
+    if (picker.error) {
+      rows.push({ text: "" });
+      rows.push({ text: `× ${picker.error}`, tone: "error" });
+    }
+    rows.push({ text: "" });
+    rows.push({ text: "↑/↓ select · Enter continue · Esc back", tone: "muted" });
+    return rows;
+  }
+
+  if (picker.stage === "custom") {
+    const editorWidth = Math.max(1, width - 4);
+    const input = wrapEditorLines(
+      picker.customPrompt,
+      picker.customPrompt.length,
+      editorWidth,
+      Math.max(2, Math.min(8, height - 7)),
+    );
+    const rows: RenderLine[] = [
+      { text: "SESSION TREE · Custom summarization instructions", tone: "brand" },
+      { text: "" },
+    ];
+    for (const line of input) {
+      rows.push({
+        text: `› ${line.text}`,
+        tone: picker.customPrompt ? "user" : "brand",
+        unstyled: picker.customPrompt ? editorTextRanges(line, 2) : undefined,
+      });
+    }
+    if (picker.error) rows.push({ text: `× ${picker.error}`, tone: "error" });
+    rows.push({ text: "Enter save · Alt+Enter newline · Esc back", tone: "muted" });
+    return rows;
+  }
+
+  const rows: RenderLine[] = [
+    { text: "SESSION TREE", tone: "brand" },
+    {
+      text: `› ${picker.query}▏`,
+      tone: picker.query ? "user" : "brand",
+      unstyled: picker.query ? [[2, 2 + picker.query.length]] : undefined,
+    },
+    { text: "" },
+  ];
+  const entries = visibleTreeEntries(picker);
+  const reserved = rows.length + (picker.error ? 4 : 3);
+  const listLimit = Math.max(1, Math.min(16, height - reserved));
+  const activeIndex = Math.min(picker.selected, Math.max(0, entries.length - 1));
+  const start = Math.max(0, Math.min(
+    activeIndex - Math.floor(listLimit / 2),
+    entries.length - listLimit,
+  ));
+
+  if (entries.length === 0) {
+    rows.push({ text: picker.query ? "  No matching entries" : "  No session entries", tone: "muted" });
+  } else {
+    entries.slice(start, start + listLimit).forEach((entry, index) => {
+      const absoluteIndex = start + index;
+      const marker = absoluteIndex === activeIndex ? "›" : " ";
+      const path = entry.onActivePath ? "●" : "○";
+      const label = entry.label ? `  [${entry.label}]` : "";
+      const current = entry.current ? "  CURRENT" : "";
+      rows.push({
+        text: `${marker} ${path} ${entry.prefix}${entry.text}${label}${current}`,
+        tone: absoluteIndex === activeIndex
+          ? "active"
+          : entry.current ? "success" : entry.onActivePath ? "assistant" : "muted",
+      });
+    });
+  }
+  rows.push({ text: "" });
+  if (picker.error) rows.push({ text: `× ${picker.error}`, tone: "error" });
+  rows.push({
+    text: selected
+      ? `${selected.type} · ${selected.id.slice(0, 12)}${selected.current ? " · current leaf" : ""}`
+      : `${entries.length} entries`,
+    tone: selected ? "assistant" : "muted",
+  });
+  rows.push({ text: "↑/↓ select · Enter navigate · type to search · Esc close", tone: "muted" });
+  return rows;
+}
+
+function renderModelPicker(
+  picker: ModelPickerState,
+  width: number,
+  height: number,
+): RenderLine[] {
+  const actions = picker.stage === "actions" && picker.actionModel
+    ? renderModelActions(picker, width)
+    : picker.stage === "thinking" && picker.actionModel
+      ? renderModelThinking(picker, width)
+      : [];
+  const rows: RenderLine[] = [];
+  rows.push(...renderModelProviderTabs(picker, width));
+
+  rows.push({
+    text: `› ${picker.query}▏`,
+    tone: picker.query ? "user" : "brand",
+    unstyled: picker.query ? [[2, 2 + picker.query.length]] : undefined,
+  });
+  rows.push({ text: "" });
+
+  const models = visibleModelPickerModels(picker);
+  const reservedRows = rows.length
+    + (picker.stage === "models" && picker.error ? 4 : 3)
+    + actions.length;
+  const listLimit = Math.max(1, Math.min(12, height - reservedRows));
+  const selected = Math.min(picker.selected, Math.max(0, models.length - 1));
+  const start = Math.max(0, Math.min(
+    selected - Math.floor(listLimit / 2),
+    models.length - listLimit,
+  ));
+  const visible = models.slice(start, start + listLimit);
+
+  if (visible.length === 0) {
+    rows.push({
+      text: picker.query ? "  No matching models" : "  No available models",
+      tone: "muted",
+    });
+  } else {
+    for (const [index, model] of visible.entries()) {
+      const absoluteIndex = start + index;
+      const marker = absoluteIndex === selected ? "›" : " ";
+      const current = model.selector === picker.current ? "  CURRENT" : "";
+      const roles = modelRoleTags(picker, model.selector);
+      const roleTags = roles.length > 0 ? `  ${roles.join(" ")}` : "";
+      const reasoning = model.reasoning ? "  reasoning" : "";
+      const context = model.contextWindow ? `  ${formatTokenCount(model.contextWindow)} ctx` : "";
+      rows.push({
+        text: `${marker} ${model.selector}${current}${roleTags}${reasoning}${context}`,
+        tone: absoluteIndex === selected
+          ? "active"
+          : model.selector === picker.current ? "success" : "muted",
+      });
+    }
+  }
+
+  const active = selectedModelPickerModel({ ...picker, selected });
+  rows.push({ text: "" });
+  if (picker.stage === "models" && picker.error) {
+    rows.push({ text: `× ${picker.error}`, tone: "error" });
+  }
+  rows.push({
+    text: active
+      ? `Model Name: ${active.name}${picker.switching ? "  · switching…" : ""}`
+      : `Model Name: ${picker.query ? "No match" : "Unavailable"}`,
+    tone: picker.switching ? "active" : "assistant",
+  });
+  if (actions.length > 0) rows.push(...actions);
+  else {
+    rows.push({
+      text: "↑/↓ select · Tab provider · Enter use · type to search · Esc close",
+      tone: "muted",
+    });
+  }
+  return rows;
+}
+
+function renderModelActions(picker: ModelPickerState, width: number): RenderLine[] {
+  const model = picker.actionModel!;
+  const rows: RenderLine[] = [
+    { text: "" },
+    { text: "─".repeat(Math.min(18, width)), tone: "muted" },
+    { text: `Action for: ${model.id}`, tone: "assistant" },
+    { text: "" },
+  ];
+  MODEL_CONFIG_ACTIONS.forEach((action, index) => {
+    const marker = index === picker.actionSelected ? "›" : " ";
+    const current = modelRoleMatches(picker.roles[action.role], model.selector) ? "  CURRENT" : "";
+    rows.push({
+      text: `${marker} Set as ${action.tag} (${action.name})${current}`,
+      tone: index === picker.actionSelected ? "active" : current ? "success" : "muted",
+    });
+  });
+  if (picker.error) {
+    rows.push({ text: "" });
+    rows.push({ text: `× ${picker.error}`, tone: "error" });
+  }
+  rows.push({ text: "" });
+  rows.push({
+    text: picker.switching ? "Saving model configuration…" : "Enter: continue  Esc: cancel",
+    tone: picker.switching ? "active" : "muted",
+  });
+  return rows;
+}
+
+function renderModelThinking(picker: ModelPickerState, width: number): RenderLine[] {
+  const model = picker.actionModel!;
+  const action = MODEL_CONFIG_ACTIONS[picker.actionSelected];
+  const options = thinkingOptionsForModel(model);
+  const rows: RenderLine[] = [
+    { text: "" },
+    { text: "─".repeat(Math.min(18, width)), tone: "muted" },
+    { text: `Thinking for: ${model.id} · ${action?.tag ?? "MODEL"}`, tone: "assistant" },
+    { text: "" },
+  ];
+  options.forEach((option, index) => {
+    const marker = index === picker.thinkingSelected ? "›" : " ";
+    rows.push({
+      text: `${marker} ${option.label.padEnd(8)} ${option.description}`,
+      tone: index === picker.thinkingSelected ? "active" : "muted",
+    });
+  });
+  if (picker.error) {
+    rows.push({ text: "" });
+    rows.push({ text: `× ${picker.error}`, tone: "error" });
+  }
+  rows.push({ text: "" });
+  rows.push({
+    text: picker.switching ? "Saving model configuration…" : "Enter: save  Esc: back",
+    tone: picker.switching ? "active" : "muted",
+  });
+  return rows;
+}
+
+function renderModelProviderTabs(picker: ModelPickerState, width: number): RenderLine[] {
+  const chunks = [
+    { text: "Models:", active: true },
+    ...modelPickerProviders(picker).map((provider) => {
+      const label = provider ? provider.replaceAll("-", " ").toLocaleUpperCase() : "ALL";
+      const active = provider === picker.provider;
+      return { text: active ? `[${label}]` : label, active };
+    }),
+    { text: "(tab to cycle)", active: false },
+  ];
+  const rows: RenderLine[] = [];
+  let text = "";
+  let unstyled: Array<readonly [number, number]> = [];
+
+  const flush = () => {
+    if (!text) return;
+    rows.push({ text, tone: "brand", ...(unstyled.length > 0 ? { unstyled } : {}) });
+    text = "";
+    unstyled = [];
+  };
+  for (const [index, chunk] of chunks.entries()) {
+    const separator = index === 0 || !text ? "" : "   ";
+    if (text && visibleWidth(text + separator + chunk.text) > width) flush();
+    if (!text && index > 0) text = "  ";
+    else text += separator;
+    const start = text.length;
+    text += chunk.text;
+    if (!chunk.active) unstyled.push([start, text.length]);
+  }
+  flush();
+  return rows;
+}
+
+function formatTokenCount(value: number): string {
+  if (value >= 1_000_000) return `${trimDecimal(value / 1_000_000)}m`;
+  if (value >= 1_000) return `${trimDecimal(value / 1_000)}k`;
+  return String(value);
+}
+
+function trimDecimal(value: number): string {
+  return value.toFixed(value >= 10 ? 0 : 1).replace(/\.0$/, "");
 }
 
 function renderExtensionStatus(state: StarlingTuiState, width: number): RenderLine[] {
@@ -403,7 +1017,7 @@ function renderSlashMenu(state: StarlingTuiState, width: number): RenderLine[] {
       tone: "muted",
     });
   }
-  rows.push({ text: "  ↑/↓ select · Tab/Enter complete · Esc close", tone: "muted" });
+  rows.push({ text: "  ↑/↓ select · Tab complete · Enter run · Esc close", tone: "muted" });
   return rows;
 }
 
@@ -411,22 +1025,51 @@ function slashDisplayName(command: SlashCommandItem): string {
   return `/${command.name}${command.argumentHint ? ` ${command.argumentHint}` : ""}`;
 }
 
-function renderInteraction(state: StarlingTuiState, width: number, tick: number): RenderLine[] {
+function renderInteraction(
+  state: StarlingTuiState,
+  width: number,
+  height: number,
+  tick: number,
+): RenderLine[] {
   const prompt = state.uiPrompt!;
   const title = prompt.method === "confirm" ? "PERMISSION REQUIRED" : prompt.title;
   const rows: RenderLine[] = [{ text: boxRule("╭─ ", title, " ╮", width), tone: "active" }];
-  for (const line of wrapTerminalText(prompt.message || prompt.title, Math.max(4, width - 4)).slice(0, 2)) {
-    rows.push({ text: boxContent(line, width), tone: "assistant" });
+  const messageLimit = Math.max(2, Math.min(10, height - 7));
+  let emitted = 0;
+  for (const logical of (prompt.message || prompt.title).split("\n")) {
+    if (emitted >= messageLimit) break;
+    // A URL logical line (e.g. the OAuth auth_url) gets wrapped to fit, but
+    // every wrapped segment is tagged with the full URL so each piece is a
+    // clickable OSC 8 hyperlink instead of a dead, split-across-rows string.
+    const url = detectUrl(logical);
+    for (const line of wrapTerminalText(logical, Math.max(4, width - 4))) {
+      if (emitted >= messageLimit) break;
+      rows.push({
+        text: boxContent(line, width),
+        tone: "assistant",
+        ...(url ? { link: url } : {}),
+      });
+      emitted += 1;
+    }
   }
   if (prompt.method === "confirm" || prompt.method === "select") {
-    const choices = prompt.options.length > 0
-      ? prompt.options.map((option, index) => index === prompt.selected ? `[${option}]` : ` ${option} `).join("  ")
-      : "No options supplied";
-    rows.push({ text: boxContent(choices, width), tone: "user" });
+    if (prompt.options.length === 0) {
+      rows.push({ text: boxContent("No options supplied", width), tone: "muted" });
+    } else {
+      for (const [index, option] of prompt.options.entries()) {
+        rows.push({
+          text: boxContent(`${index === prompt.selected ? "›" : " "} ${option}`, width),
+          tone: index === prompt.selected ? "active" : "muted",
+        });
+      }
+    }
   } else {
+    const editor = prompt.secret
+      ? maskEditorValue(prompt.value, prompt.cursor)
+      : { value: prompt.value, cursor: prompt.cursor ?? prompt.value.length };
     const inputLines = wrapEditorLines(
-      prompt.value,
-      prompt.cursor ?? prompt.value.length,
+      editor.value,
+      editor.cursor,
       Math.max(1, width - 6),
       5,
     );
@@ -435,6 +1078,7 @@ function renderInteraction(state: StarlingTuiState, width: number, tick: number)
       rows.push({
         text: boxContent(`${marker} ${line.text}`, width),
         tone: prompt.value ? "user" : "muted",
+        unstyled: prompt.value ? editorTextRanges(line, 4) : undefined,
       });
     });
   }
@@ -450,6 +1094,14 @@ function renderInteraction(state: StarlingTuiState, width: number, tick: number)
     tone: "muted",
   });
   return rows;
+}
+
+function maskEditorValue(value: string, cursor: number | undefined): { value: string; cursor: number } {
+  const at = editorCursorBoundary(value, cursor ?? value.length);
+  return {
+    value: "•".repeat(graphemes(value).length),
+    cursor: graphemes(value.slice(0, at)).length,
+  };
 }
 
 function renderTimelineEntry(entry: TimelineEntry, width: number): RenderLine[] {
@@ -536,21 +1188,23 @@ function editorMeta(state: StarlingTuiState, width: number): string {
   ].filter(Boolean).join(" · ");
 }
 
-function editorBottomLine(value: string, width: number): string {
-  const left = "╰─ › ";
-  const right = "╯";
-  const textWidth = Math.max(0, width - visibleWidth(left) - visibleWidth(right));
-  const text = takeTerminalColumns(sanitizeTerminalText(value, false), textWidth);
-  const fill = Math.max(
-    0,
-    width - visibleWidth(left) - visibleWidth(text) - visibleWidth(right),
-  );
-  return `${left}${text}${"─".repeat(fill)}${right}`;
+function editorBottomLine(
+  line: EditorVisualLine,
+  width: number,
+): Pick<RenderLine, "text" | "unstyled"> {
+  const left = "› ";
+  const textWidth = Math.max(0, width - visibleWidth(left));
+  const text = takeTerminalColumns(sanitizeTerminalText(line.text, false), textWidth);
+  return {
+    text: `${left}${text}`,
+    unstyled: editorTextRanges({ ...line, text }, left.length),
+  };
 }
 
 interface EditorVisualLine {
   text: string;
   hasCursor: boolean;
+  cursorIndex?: number;
 }
 
 /** Wrap an editor value while keeping the fake cursor inside the visible window. */
@@ -572,15 +1226,36 @@ function wrapEditorLines(
     width,
   );
   const cursorLine = Math.max(0, wrapped.findIndex((line) => line.includes(marker)));
-  const lines = wrapped.map((line) => ({
-    text: line.replace(marker, "▏"),
-    hasCursor: line.includes(marker),
-  }));
+  const lines = wrapped.map((line) => {
+    const cursorIndex = line.indexOf(marker);
+    return {
+      text: line.replace(marker, "▏"),
+      hasCursor: cursorIndex >= 0,
+      ...(cursorIndex >= 0 ? { cursorIndex } : {}),
+    };
+  });
   const limit = Math.max(1, maxLines);
   if (lines.length <= limit) return lines;
   const maximumStart = lines.length - limit;
   const start = Math.min(maximumStart, Math.max(0, cursorLine - limit + 1));
   return lines.slice(start, start + limit);
+}
+
+function editorTextRanges(
+  line: EditorVisualLine,
+  offset: number,
+): Array<readonly [number, number]> {
+  if (!line.text) return [];
+  if (line.cursorIndex === undefined) {
+    return [[offset, offset + line.text.length]];
+  }
+  const ranges: Array<readonly [number, number]> = [];
+  if (line.cursorIndex > 0) ranges.push([offset, offset + line.cursorIndex]);
+  const afterCursor = line.cursorIndex + 1;
+  if (afterCursor < line.text.length) {
+    ranges.push([offset + afterCursor, offset + line.text.length]);
+  }
+  return ranges;
 }
 
 function editorCursorBoundary(value: string, cursor: number): number {
@@ -720,9 +1395,51 @@ function stripAnsi(value: string): string {
   return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
-function colorize(value: string, tone: RenderLine["tone"], enabled: boolean): string {
+function colorize(
+  value: string,
+  tone: RenderLine["tone"],
+  enabled: boolean,
+  unstyled?: ReadonlyArray<readonly [start: number, end: number]>,
+  link?: string,
+): string {
   if (!enabled || !tone) return value;
-  const code = tone === "brand"
+  const code = toneCode(tone);
+  if (link) {
+    const at = value.indexOf(link);
+    if (at >= 0) {
+      const open = `\u001b[${code}m`;
+      const before = value.slice(0, at);
+      const token = value.slice(at, at + link.length);
+      const after = value.slice(at + link.length);
+      // Underline + cyan, wrapped as an OSC 8 hyperlink so the URL is both
+      // visually distinct and Ctrl/Cmd-clickable in modern terminals.
+      const linkSegment = `\u001b[4;36m\u001b]8;;${link}\u001b\\${token}\u001b]8;;\u001b\\\u001b[0m`;
+      return `${open}${before}\u001b[0m${linkSegment}${open}${after}\u001b[0m`;
+    }
+    // The URL was wrapped or truncated across/within this line, so the full
+    // target no longer appears verbatim — make the whole line a clickable
+    // hyperlink to the full URL (OSC 8 decouples target from visible text).
+    return `\u001b[4;36m\u001b]8;;${link}\u001b\\${value}\u001b]8;;\u001b\\\u001b[0m`;
+  }
+  if (unstyled && unstyled.length > 0) {
+    let output = `\u001b[${code}m`;
+    let position = 0;
+    for (const range of unstyled) {
+      const start = Math.min(value.length, Math.max(position, range[0]));
+      const end = Math.min(value.length, Math.max(start, range[1]));
+      output += value.slice(position, start);
+      if (start < end) {
+        output += `\u001b[0m${value.slice(start, end)}\u001b[${code}m`;
+      }
+      position = end;
+    }
+    return `${output}${value.slice(position)}\u001b[0m`;
+  }
+  return `\u001b[${code}m${value}\u001b[0m`;
+}
+
+function toneCode(tone: NonNullable<RenderLine["tone"]>): string {
+  return tone === "brand"
     ? "1;36"
     : tone === "muted"
       ? "2;37"
@@ -742,8 +1459,13 @@ function colorize(value: string, tone: RenderLine["tone"], enabled: boolean): st
           ? "1;33"
           : tone === "success"
             ? "1;32"
-            : tone === "error"
-              ? "1;31"
-              : "0;37";
-  return `\u001b[${code}m${value}\u001b[0m`;
+              : tone === "error"
+                ? "1;31"
+                : "0;37";
+}
+
+/** Extract the first http(s) URL from a line, trimming trailing punctuation. */
+function detectUrl(text: string): string | undefined {
+  const match = text.match(/https?:\/\/[^\s]+/);
+  return match ? match[0].replace(/[.,;:!?)\]}]+$/, "") : undefined;
 }
