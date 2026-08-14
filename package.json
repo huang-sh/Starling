@@ -17,7 +17,7 @@
   },
   "license": "MIT",
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.82.0",
+    "@earendil-works/pi-coding-agent": ">=0.82.0",
     "@types/node": "^20.14.0",
     "typescript": "^5.5.0"
   }

@@ -20,7 +20,7 @@
     "skills/"
   ],
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.82.0"
+    "@earendil-works/pi-coding-agent": ">=0.82.0"
   },
   "optionalDependencies": {
     "starling-darwin-arm64": "0.2.1",

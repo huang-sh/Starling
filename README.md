@@ -75,7 +75,7 @@ If npm lifecycle scripts were disabled with `--ignore-scripts`, install the skil
 npm explore -g starling-ai -- npm run install:skill
 ```
 
-The npm distribution requires Node.js 22.19.0 or newer and installs `@earendil-works/pi-coding-agent` 0.82.0 as a fixed dependency. Bare `starling` launches Pi's own TUI through the managed launcher (`starling run pi`); it does not start the native chat supervisor or a JSONL subprocess. Session-management commands do not initialize the SDK. The bundled Pi package is branded "starling" during postinstall via `piConfig.name`; its `PI_CODING_AGENT_DIR`/`PI_CODING_AGENT_SESSION_DIR` overrides are mirrored to the corresponding `STARLING_*` names so both surfaces agree. Package installs initiated by Pi's resource loader inherit `ignore-scripts` for npm and pnpm, so dependency lifecycle scripts are not executed.
+The npm distribution requires Node.js 22.19.0 or newer and installs `@earendil-works/pi-coding-agent` (range `>=0.82.0`), so fresh installs pick up the current Pi release instead of a pinned one. Bare `starling` launches Pi's own TUI through the managed launcher (`starling run pi`); it does not start the native chat supervisor or a JSONL subprocess. Session-management commands do not initialize the SDK. The bundled Pi package is branded "starling" during postinstall via `piConfig.name`; its `PI_CODING_AGENT_DIR`/`PI_CODING_AGENT_SESSION_DIR` overrides are mirrored to the corresponding `STARLING_*` names so both surfaces agree. Package installs initiated by Pi's resource loader inherit `ignore-scripts` for npm and pnpm, so dependency lifecycle scripts are not executed.
 
 ## Quick Start
 

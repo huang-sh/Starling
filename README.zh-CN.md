@@ -75,7 +75,7 @@ npm 安装时还会把 Starling skill 安装到：
 npm explore -g starling-ai -- npm run install:skill
 ```
 
-npm 版 Starling 需要 Node.js 22.19.0 或更新版本，并固定依赖 `@earendil-works/pi-coding-agent` 0.82.0。裸 `starling` 通过托管 launcher（`starling run pi`）启动 Pi 自带的 TUI，不会启动 native chat supervisor 或 JSONL 子进程；普通 session 管理命令不会初始化 SDK。postinstall 阶段会通过 `piConfig.name` 把内置 Pi 包品牌改为 "starling"；其 `PI_CODING_AGENT_DIR`/`PI_CODING_AGENT_SESSION_DIR` 覆盖变量会被镜像到对应的 `STARLING_*` 名称，保证两侧一致。Pi resource loader 发起的 npm/pnpm 包安装会继承 `ignore-scripts`，不会执行依赖的生命周期脚本。
+npm 版 Starling 需要 Node.js 22.19.0 或更新版本，并以 `>=0.82.0` 的版本范围安装 `@earendil-works/pi-coding-agent`，新安装会自动取得当前的 Pi 版本而不是固定旧版。裸 `starling` 通过托管 launcher（`starling run pi`）启动 Pi 自带的 TUI，不会启动 native chat supervisor 或 JSONL 子进程；普通 session 管理命令不会初始化 SDK。postinstall 阶段会通过 `piConfig.name` 把内置 Pi 包品牌改为 "starling"；其 `PI_CODING_AGENT_DIR`/`PI_CODING_AGENT_SESSION_DIR` 覆盖变量会被镜像到对应的 `STARLING_*` 名称，保证两侧一致。Pi resource loader 发起的 npm/pnpm 包安装会继承 `ignore-scripts`，不会执行依赖的生命周期脚本。
 
 ## 快速开始
 
