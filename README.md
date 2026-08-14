@@ -101,6 +101,16 @@ Show session details, including catalog metadata and token usage:
 starling session show <session-id>
 ```
 
+Inspect a Pi session as a turn-aware trajectory ledger (turns → steps → records with timing, token usage, and tool outcomes):
+
+```bash
+starling trajectory                 # most recent Pi session, terminal ledger
+starling trajectory <session-id>    # specific session
+starling trajectory --json --full   # trajectory-v1 JSON with bounded input/output text
+starling trajectory --max-records 1000
+```
+
+The JSON output follows the trajectory-v1 shape (schemaVersion 1) used by codex-trajectory, itself inspired by DeepSeek Harness's event ledger: `session`, `stats`, `turns`, `records`, and `warnings`. A new turn starts at each user message; a new step starts when assistant output resumes after tool results. `toolResult` entries complete their pending tool records with duration and error status; `model_change`, `thinking_level_change`, `compaction`, and `branch_summary` entries appear as `system`/`compaction` records. By default summaries are bounded to 100 chars; `--full` includes bounded (4 KiB) input/output text. Records are truncated oldest-first past `--max-records` (50–1000, default 500). Only Pi sessions are supported.
 Resume a session:
 
 ```bash

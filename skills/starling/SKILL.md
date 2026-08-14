@@ -72,6 +72,13 @@ starling session show <session-id>
 starling resume <session-id>
 ```
 
+Inspect a Pi session's execution trajectory (turns, steps, tool timing, token usage):
+
+```bash
+starling trajectory                 # most recent Pi session
+starling trajectory <session-id> --json --full
+```
+
 ### Current Session
 
 When the user asks to operate on the current running session, first check the agent-specific environment.

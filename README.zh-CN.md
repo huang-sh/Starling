@@ -101,6 +101,17 @@ starling session ls
 starling session show <session-id>
 ```
 
+把 Pi 会话投影成 turn 粒度的 trajectory 台账（turn → step → record，含耗时、token 用量与工具结果）：
+
+```bash
+starling trajectory                 # 最近的 Pi 会话，终端台账
+starling trajectory <session-id>    # 指定会话
+starling trajectory --json --full   # trajectory-v1 JSON，含限幅的输入/输出文本
+starling trajectory --max-records 1000
+```
+
+JSON 输出采用 codex-trajectory 使用的 trajectory-v1 结构（schemaVersion 1，其设计源自 DeepSeek Harness 的事件台账）：`session`、`stats`、`turns`、`records`、`warnings`。每条 user 消息开启一个新 turn；工具结果之后恢复的 assistant 输出开启一个新 step。`toolResult` 会补全对应 tool record 的耗时与错误状态；`model_change`、`thinking_level_change`、`compaction`、`branch_summary` 记为 `system`/`compaction` record。默认 summary 限幅 100 字符，`--full` 时包含限幅（4 KiB）的输入/输出文本；超过 `--max-records`（50–1000，默认 500）时从最旧开始截断。仅支持 Pi 会话。
+
 恢复一个会话：
 
 ```bash

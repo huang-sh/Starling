@@ -13,6 +13,7 @@ pub mod project;
 pub mod resume;
 pub mod run;
 pub mod session;
+pub mod trajectory;
 
 use crate::cli::*;
 
@@ -37,6 +38,12 @@ pub fn dispatch(command: Command) -> Result<()> {
         Command::Diagnose(c) => diagnose::handle(c),
         Command::Top(c) => monitor::handle(c),
         Command::Resume { session_id } => resume::run(&session_id),
+        Command::Trajectory {
+            session_id,
+            max_records,
+            full,
+            json,
+        } => trajectory::handle(session_id, max_records, full, json),
     }
 }
 

@@ -96,6 +96,25 @@ pub enum Command {
         /// Session ID, or an absolute Pi transcript path, to resume
         session_id: String,
     },
+
+    /// Project a Pi session transcript into a turn-aware trajectory ledger
+    #[command(alias = "traj")]
+    Trajectory {
+        /// Session ID (defaults to the most recent Pi session)
+        session_id: Option<String>,
+
+        /// Max records returned (50-1000, oldest truncated first)
+        #[arg(long, default_value = "500")]
+        max_records: usize,
+
+        /// Include bounded input/output text instead of summaries only
+        #[arg(long)]
+        full: bool,
+
+        /// Output the trajectory-v1 JSON ledger
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
