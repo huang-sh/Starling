@@ -22,8 +22,17 @@ test("merges Starling builtins with Pi commands in dispatch order", () => {
     { name: "unknown", source: "other" },
   ]);
 
-  assert.deepEqual(commands.slice(0, 11).map(({ name, source }) => ({ name, source })), [
+  assert.deepEqual(commands.slice(0, 24).map(({ name, source }) => ({ name, source })), [
     { name: "help", source: "starling" },
+    { name: "settings", source: "starling" },
+    { name: "new", source: "starling" },
+    { name: "resume", source: "starling" },
+    { name: "fork", source: "starling" },
+    { name: "clone", source: "starling" },
+    { name: "import", source: "starling" },
+    { name: "export", source: "starling" },
+    { name: "copy", source: "starling" },
+    { name: "scoped-models", source: "starling" },
     { name: "model", source: "starling" },
     { name: "tree", source: "starling" },
     { name: "login", source: "starling" },
@@ -32,10 +41,14 @@ test("merges Starling builtins with Pi commands in dispatch order", () => {
     { name: "compact", source: "starling" },
     { name: "name", source: "starling" },
     { name: "session", source: "starling" },
+    { name: "share", source: "starling" },
+    { name: "changelog", source: "starling" },
+    { name: "hotkeys", source: "starling" },
+    { name: "trust", source: "starling" },
     { name: "reload", source: "starling" },
     { name: "quit", source: "starling" },
   ]);
-  assert.deepEqual(commands.slice(11).map(({ name, source }) => ({ name, source })), [
+  assert.deepEqual(commands.slice(24).map(({ name, source }) => ({ name, source })), [
     { name: "deploy:1", source: "extension" },
     { name: "review", source: "prompt" },
     { name: "skill:check", source: "skill" },
@@ -49,7 +62,8 @@ test("filters only the slash-name token and prioritizes name prefixes", () => {
   ]);
 
   const filtered = filterSlashCommands("/IN", commands).map(({ name }) => name);
-  assert.deepEqual(filtered.slice(0, 2), ["inspect", "login"]);
+  assert.equal(filtered[0], "inspect");
+  assert.ok(filtered.includes("login"));
   assert.ok(filtered.includes("review"), "description matches remain available after name matches");
   assert.deepEqual(
     filterSlashCommands("/review ", commands),
@@ -101,6 +115,88 @@ test("plans builtins and dynamic Pi commands without treating slash typos as pro
     kind: "local",
     command: commands.find(({ name }) => name === "tree"),
     action: "tree",
+  });
+  assert.deepEqual(planSlashCommand("/new", commands, false), {
+    kind: "request",
+    command: commands.find(({ name }) => name === "new"),
+    request: { type: "new_session" },
+    successMessage: "New session started",
+    refreshTranscript: true,
+    refreshCommands: true,
+  });
+  assert.deepEqual(planSlashCommand("/resume /sessions/old.jsonl", commands, false), {
+    kind: "request",
+    command: commands.find(({ name }) => name === "resume"),
+    request: { type: "resume_session", sessionPath: "/sessions/old.jsonl" },
+    successMessage: "Session resumed",
+    refreshTranscript: true,
+    refreshCommands: true,
+  });
+  assert.deepEqual(planSlashCommand("/fork", commands, false), {
+    kind: "request",
+    command: commands.find(({ name }) => name === "fork"),
+    request: { type: "fork_session" },
+    successMessage: "Forked to new session",
+    refreshTranscript: true,
+    refreshCommands: true,
+  });
+  assert.deepEqual(planSlashCommand("/clone", commands, false), {
+    kind: "request",
+    command: commands.find(({ name }) => name === "clone"),
+    request: { type: "clone_session" },
+    successMessage: "Cloned to new session",
+    refreshTranscript: true,
+    refreshCommands: true,
+  });
+  assert.deepEqual(planSlashCommand("/import /tmp/session.jsonl", commands, false), {
+    kind: "request",
+    command: commands.find(({ name }) => name === "import"),
+    request: { type: "import_session", inputPath: "/tmp/session.jsonl" },
+    successMessage: "Session imported",
+    refreshTranscript: true,
+    refreshCommands: true,
+  });
+  assert.deepEqual(planSlashCommand("/export '/tmp/session review.html'", commands, false), {
+    kind: "request",
+    command: commands.find(({ name }) => name === "export"),
+    request: { type: "export_session", outputPath: "/tmp/session review.html" },
+    successMessage: "Session exported",
+  });
+  assert.deepEqual(planSlashCommand("/copy", commands, false), {
+    kind: "request",
+    command: commands.find(({ name }) => name === "copy"),
+    request: { type: "copy_last_message" },
+    successMessage: "Copied last agent message to clipboard",
+  });
+  assert.deepEqual(planSlashCommand("/settings", commands, false), {
+    kind: "request",
+    command: commands.find(({ name }) => name === "settings"),
+    request: { type: "configure_settings" },
+  });
+  assert.deepEqual(planSlashCommand("/scoped-models", commands, false), {
+    kind: "request",
+    command: commands.find(({ name }) => name === "scoped-models"),
+    request: { type: "configure_scoped_models" },
+  });
+  assert.deepEqual(planSlashCommand("/share", commands, false), {
+    kind: "request",
+    command: commands.find(({ name }) => name === "share"),
+    request: { type: "share_session" },
+  });
+  assert.deepEqual(planSlashCommand("/changelog", commands, false), {
+    kind: "request",
+    command: commands.find(({ name }) => name === "changelog"),
+    request: { type: "get_changelog" },
+  });
+  assert.deepEqual(planSlashCommand("/hotkeys", commands, false), {
+    kind: "local",
+    command: commands.find(({ name }) => name === "hotkeys"),
+    action: "hotkeys",
+  });
+  assert.deepEqual(planSlashCommand("/trust", commands, false), {
+    kind: "request",
+    command: commands.find(({ name }) => name === "trust"),
+    request: { type: "configure_project_trust" },
   });
   assert.match(planSlashCommand("/missing", commands, false).message, /Unknown command/);
   assert.match(planSlashCommand("/model invalid", commands, false).message, /Usage/);

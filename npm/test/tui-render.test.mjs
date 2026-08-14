@@ -6,6 +6,7 @@ import {
   createInitialStarlingTuiState,
   reduceStarlingTui,
   renderStarlingFrame,
+  renderStarlingParts,
   visibleWidth,
 } from "../lib/tui/index.js";
 import {
@@ -125,6 +126,15 @@ test("empty workspace keeps the same compact flow in short and tall terminals", 
   assert.ok(longestBlankRun(short) <= 1, "sections may have one spacer, not a dashboard-sized void");
   assertFits(short, 80);
   assertNoDashboardChrome(short.join("\n"));
+});
+
+test("workspace intro remains at the start of terminal history after the first message", () => {
+  const state = sessionState([{ role: "user", content: "First prompt" }]);
+  const parts = renderStarlingParts(state, { width: 100, height: 24, color: false });
+  const history = parts.committed.join("\n");
+
+  assert.match(history, /Pi SDK agent workspace/);
+  assert.ok(history.indexOf("Pi SDK agent workspace") < history.indexOf("First prompt"));
 });
 
 test("single-line composer ends the flow as a two-row OMP editor", () => {
@@ -252,7 +262,7 @@ test("interactive requests render as a compact fail-closed action box", () => {
   const frame = renderStarlingFrame(state, { width: 72, height: 32, color: false, tick: 2 });
   const lines = renderedLines(frame);
 
-  assert.match(frame, /╭─ PERMISSION REQUIRED/);
+  assert.match(frame, /╭─ Allow shell\?/);
   assert.ok(lines.some((line) => line.startsWith("│ npm test") && line.endsWith("│")));
   assert.ok(lines.some((line) => line.includes("› No") && line.endsWith("│")));
   assert.match(frame, /Esc deny/);
@@ -314,6 +324,24 @@ test("a long OAuth URL in a login dialog stays clickable across wrapped rows", (
   assert.ok(prose && !prose.includes("\u001b]8;;"), "prose row is not a hyperlink");
 });
 
+test("authentication URLs cannot inject terminal control sequences through OSC links", () => {
+  let state = sessionState();
+  const injectedOsc = "\u001b]52;c;SGVsbG8=\u0007";
+  const url = `https://auth.example.test/callback\u001b\\${injectedOsc}`;
+  state = dispatchRecord(state, {
+    type: "extension_ui_request",
+    id: "auth-url-injection",
+    method: "input",
+    title: "Login",
+    message: `Open this URL to continue:\n${url}`,
+  });
+
+  const frame = renderStarlingFrame(state, { width: 72, height: 18, color: true, tick: 1 });
+  assert.match(frame, /auth\.example\.test/);
+  assert.ok(!frame.includes(injectedOsc), "the injected OSC sequence is not emitted");
+  assert.ok(!frame.includes("\u001b]8;;https://auth.example.test"), "an unsafe URL is not linked");
+});
+
 test("slash commands render inline above the editor with bounded selection", () => {
   let state = sessionState();
   state = reduceStarlingTui(state, {
@@ -325,7 +353,10 @@ test("slash commands render inline above the editor with bounded selection", () 
     })),
   });
   state = reduceStarlingTui(state, { type: "composer.set", value: "/" });
-  state = reduceStarlingTui(state, { type: "slash.select", delta: 9 });
+  state = reduceStarlingTui(state, {
+    type: "slash.select",
+    delta: state.slashCommands.findIndex(({ name }) => name === "extension-1"),
+  });
   const frame = renderStarlingFrame(state, { width: 80, height: 18, color: false });
   const lines = renderedLines(frame);
 
@@ -352,10 +383,6 @@ test("model picker mirrors OMP search, provider tabs, and current-model selectio
     type: "model.open",
     models,
     current: "zai/glm-5.2",
-    roles: {
-      default: "zai/glm-5.2",
-      slow: "openai/gpt-5.5:high",
-    },
   });
 
   let frame = renderStarlingFrame(state, { width: 86, height: 24, color: false });
@@ -363,7 +390,7 @@ test("model picker mirrors OMP search, provider tabs, and current-model selectio
   assert.match(frame, /ZHIPU CODING PLAN/, "hyphenated provider IDs render as readable OMP-style tabs");
   assert.doesNotMatch(frame, /Pi SDK agent workspace/, "the modal picker replaces the workspace chrome");
   assert.match(frame, /^› zai\/glm-5\.2\s+CURRENT/m, "current model is initially selected and promoted");
-  assert.match(frame, /zai\/glm-5\.2\s+CURRENT\s+DEFAULT/);
+  assert.match(frame, /zai\/glm-5\.2\s+CURRENT/);
   assert.match(frame, /Model Name: GLM-5\.2/);
   assert.match(frame, /↑\/↓ select · Tab provider · Enter use · type to search · Esc close/);
 
@@ -376,27 +403,15 @@ test("model picker mirrors OMP search, provider tabs, and current-model selectio
   state = reduceStarlingTui(state, { type: "model.provider", delta: -1 });
   state = reduceStarlingTui(state, { type: "model.query.append", value: "g55" });
   frame = renderStarlingFrame(state, { width: 86, height: 24, color: false });
-  assert.match(frame, /^› openai\/gpt-5\.5\s+SLOW/m, "fuzzy search matches model IDs and shows role tags");
+  assert.match(frame, /^› openai\/gpt-5\.5/m, "fuzzy search matches model IDs");
   assert.doesNotMatch(frame, /claude-opus-5/);
   assertFits(renderedLines(frame), 86);
 
   const selected = state.modelPicker.models.find((model) => model.id === "gpt-5.5");
   assert.ok(selected);
-  state = reduceStarlingTui(state, { type: "model.action.open", model: selected });
+  state = reduceStarlingTui(state, { type: "model.thinking.open", model: selected });
   frame = renderStarlingFrame(state, { width: 86, height: 24, color: false });
-  assert.match(frame, /Action for: gpt-5\.5/);
-  assert.match(frame, /^› Set as DEFAULT \(Default\)\s*$/m);
-  assert.match(frame, /Set as SMOL \(Fast\)/);
-  assert.match(frame, /Set as SLOW \(Thinking\)\s+CURRENT/);
-  assert.match(frame, /Set as ADVISOR \(Advisor\)/);
-  assert.match(frame, /Enter: continue  Esc: cancel/);
-
-  state = reduceStarlingTui(state, { type: "model.action.select", delta: 1 });
-  frame = renderStarlingFrame(state, { width: 86, height: 24, color: false });
-  assert.match(frame, /^› Set as SMOL \(Fast\)\s*$/m);
-  state = reduceStarlingTui(state, { type: "model.thinking.open" });
-  frame = renderStarlingFrame(state, { width: 86, height: 24, color: false });
-  assert.match(frame, /Thinking for: gpt-5\.5 · SMOL/);
+  assert.match(frame, /Thinking for: gpt-5\.5/);
   assert.match(frame, /^› inherit\s+Inherit session default\s*$/m);
   assert.match(frame, /off\s+No reasoning/);
   assert.match(frame, /high\s+Deep reasoning/);
@@ -405,8 +420,6 @@ test("model picker mirrors OMP search, provider tabs, and current-model selectio
   frame = renderStarlingFrame(state, { width: 86, height: 24, color: false });
   assert.match(frame, /^› high\s+Deep reasoning\s*$/m);
   state = reduceStarlingTui(state, { type: "model.thinking.close" });
-  assert.equal(state.modelPicker.stage, "actions");
-  state = reduceStarlingTui(state, { type: "model.action.close" });
   assert.equal(state.modelPicker.stage, "models");
 });
 

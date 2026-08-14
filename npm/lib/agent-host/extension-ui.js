@@ -4,8 +4,10 @@ import { isJsonObject, } from "./types.js";
 export function createExtensionUiBridge(output) {
     const pending = new Map();
     let editorText = "";
+    let toolsExpanded = false;
     let lastConfirmationExplicit = false;
     let closed = false;
+    const terminalInputHandlers = new Set();
     const request = (payload, options, fallback, parse, validate, onSettled) => {
         if (closed || options?.signal?.aborted) {
             onSettled?.(undefined);
@@ -89,11 +91,14 @@ export function createExtensionUiBridge(output) {
             emit({ method: "set_editor_text", text: editorText });
         },
         getEditorText: () => editorText,
-        onTerminalInput: () => () => { },
-        setWorkingMessage: () => { },
-        setWorkingVisible: () => { },
-        setWorkingIndicator: () => { },
-        setHiddenThinkingLabel: () => { },
+        onTerminalInput: (handler) => {
+            terminalInputHandlers.add(handler);
+            return () => terminalInputHandlers.delete(handler);
+        },
+        setWorkingMessage: (message) => emit({ method: "setWorkingMessage", message }),
+        setWorkingVisible: (visible) => emit({ method: "setWorkingVisible", visible }),
+        setWorkingIndicator: (options) => emit({ method: "setWorkingIndicator", options }),
+        setHiddenThinkingLabel: (label) => emit({ method: "setHiddenThinkingLabel", label }),
         setFooter: () => { },
         setHeader: () => { },
         custom: async () => undefined,
@@ -104,11 +109,25 @@ export function createExtensionUiBridge(output) {
         getAllThemes: () => [],
         getTheme: () => undefined,
         setTheme: () => ({ success: false, error: "Theme switching is not supported by the Starling host" }),
-        getToolsExpanded: () => false,
-        setToolsExpanded: () => { },
+        getToolsExpanded: () => toolsExpanded,
+        setToolsExpanded: (expanded) => {
+            toolsExpanded = expanded;
+            emit({ method: "setToolsExpanded", expanded });
+        },
     };
     return {
         context,
+        handleTerminalInput(data) {
+            let current = data;
+            for (const handler of terminalInputHandlers) {
+                const result = handler(current);
+                if (result?.consume)
+                    return { consumed: true, data: "" };
+                if (result?.data !== undefined)
+                    current = result.data;
+            }
+            return { consumed: current.length === 0, data: current };
+        },
         handleResponse(value) {
             if (!isJsonObject(value) || value.type !== "extension_ui_response" || typeof value.id !== "string") {
                 return false;
@@ -123,6 +142,7 @@ export function createExtensionUiBridge(output) {
         },
         cancelAll() {
             closed = true;
+            terminalInputHandlers.clear();
             for (const interaction of [...pending.values()])
                 interaction.cancel();
             pending.clear();

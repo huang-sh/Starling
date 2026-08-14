@@ -10,6 +10,9 @@ export type ChatRole = "user" | "assistant" | "system";
 export type ChatToolState = "running" | "done" | "error";
 export type ChatActivityTone = "neutral" | "active" | "success" | "error";
 
+export const MAX_TOOL_TEXT_BYTES = 16 * 1024;
+const TOOL_TRUNCATION_MARKER = "\n… <tool output truncated by Starling>";
+
 export interface ChatTranscriptItem {
   kind: ChatRole | "tool" | "error";
   text: string;
@@ -29,6 +32,7 @@ export interface ChatSessionSnapshot {
   queueDepth: number;
   streaming: boolean;
   compacting?: boolean;
+  hideThinkingBlock?: boolean;
   transcript: ChatTranscriptItem[];
 }
 
@@ -67,6 +71,11 @@ export type ChatEvent =
     placement: "aboveEditor" | "belowEditor";
   }
   | { type: "terminal.title.changed"; title: string }
+  | { type: "working.message.changed"; message?: string }
+  | { type: "working.visibility.changed"; visible: boolean }
+  | { type: "working.indicator.changed"; frames?: string[] }
+  | { type: "thinking.label.changed"; label?: string }
+  | { type: "tools.expanded.changed"; expanded: boolean }
   | { type: "turn.started" }
   | { type: "turn.generating" }
   | { type: "turn.finalizing" }
@@ -119,7 +128,10 @@ export type ChatEvent =
   }
   | { type: "interaction.requested"; request: ChatInteractionRequest }
   | { type: "interaction.dismissed"; id: string }
-  | { type: "composer.replaced"; value: string };
+  | { type: "composer.replaced"; value: string }
+  | { type: "bash.started"; id: string; command: string; excluded: boolean }
+  | { type: "bash.updated"; id: string; output: string }
+  | { type: "bash.completed"; id: string; output: string; failed: boolean };
 
 /** Normalize an SDK state/message pair returned by get_state/get_messages. */
 export function normalizeChatSnapshot(
@@ -139,6 +151,9 @@ export function normalizeChatSnapshot(
     queueDepth: nonNegativeInteger(state.pendingMessageCount),
     streaming: state.isStreaming === true,
     compacting: state.isCompacting === true,
+    ...(typeof state.hideThinkingBlock === "boolean"
+      ? { hideThinkingBlock: state.hideThinkingBlock }
+      : {}),
     transcript: normalizeHistory(rawMessages),
   };
 }
@@ -151,6 +166,38 @@ export function normalizeChatRecord(raw: unknown): ChatEvent[] {
   if (!isRecord(raw)) return [];
 
   switch (raw.type) {
+    case "starling_bash_started": {
+      const id = textField(raw.id);
+      const command = textField(raw.command);
+      return id && command
+        ? [{ type: "bash.started", id, command, excluded: raw.excludeFromContext === true }]
+        : [];
+    }
+    case "starling_bash_updated": {
+      const id = textField(raw.id);
+      return id ? [{ type: "bash.updated", id, output: printable(raw.output) }] : [];
+    }
+    case "starling_bash_completed": {
+      const id = textField(raw.id);
+      const result = isRecord(raw.result) ? raw.result : {};
+      const exitCode = typeof result.exitCode === "number" ? result.exitCode : undefined;
+      return id
+        ? [{
+          type: "bash.completed",
+          id,
+          output: printable(result.output),
+          failed: raw.failed === true || result.cancelled === true || (exitCode !== undefined && exitCode !== 0),
+        }]
+        : [];
+    }
+    case "starling_session_replaced":
+      return [{
+        type: "session.snapshot",
+        snapshot: normalizeChatSnapshot(
+          raw.state,
+          Array.isArray(raw.messages) ? raw.messages : [],
+        ),
+      }];
     case "starling_started":
       return [{
         type: "runtime.started",
@@ -277,7 +324,7 @@ export function normalizeChatRecord(raw: unknown): ChatEvent[] {
       }];
     }
     case "bash_execution_update": {
-      const detail = textField(raw.delta);
+      const detail = truncateToolText(textField(raw.delta));
       return detail
         ? [{ type: "activity.recorded", label: "shell", detail, tone: "active" }]
         : [];
@@ -326,13 +373,22 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function printable(value: unknown): string {
-  if (typeof value === "string") return value;
+  if (typeof value === "string") return truncateToolText(value);
   if (value === undefined || value === null) return "";
   try {
-    return JSON.stringify(value, null, 2);
+    return truncateToolText(JSON.stringify(value, null, 2) ?? String(value));
   } catch {
-    return String(value);
+    return truncateToolText(String(value));
   }
+}
+
+function truncateToolText(value: string): string {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length <= MAX_TOOL_TEXT_BYTES) return value;
+  const markerBytes = Buffer.byteLength(TOOL_TRUNCATION_MARKER, "utf8");
+  let end = MAX_TOOL_TEXT_BYTES - markerBytes;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+  return `${bytes.subarray(0, end).toString("utf8")}${TOOL_TRUNCATION_MARKER}`;
 }
 
 function normalizeExtensionUiRecord(raw: Record<string, unknown>): ChatEvent[] {
@@ -367,6 +423,27 @@ function normalizeExtensionUiRecord(raw: Record<string, unknown>): ChatEvent[] {
   }
   if (method === "set_editor_text") {
     return [{ type: "composer.replaced", value: textField(raw.text) }];
+  }
+  if (method === "setWorkingMessage") {
+    return [{ type: "working.message.changed", message: optionalText(raw.message) }];
+  }
+  if (method === "setWorkingVisible" && typeof raw.visible === "boolean") {
+    return [{ type: "working.visibility.changed", visible: raw.visible }];
+  }
+  if (method === "setWorkingIndicator") {
+    const options = isRecord(raw.options) ? raw.options : undefined;
+    const frames = options?.frames === undefined
+      ? undefined
+      : Array.isArray(options.frames) && options.frames.every((frame) => typeof frame === "string")
+        ? options.frames.slice(0, 32).map((frame) => frame.slice(0, 32))
+        : null;
+    return frames === null ? [] : [{ type: "working.indicator.changed", frames }];
+  }
+  if (method === "setHiddenThinkingLabel") {
+    return [{ type: "thinking.label.changed", label: optionalText(raw.label) }];
+  }
+  if (method === "setToolsExpanded" && typeof raw.expanded === "boolean") {
+    return [{ type: "tools.expanded.changed", expanded: raw.expanded }];
   }
   const request = normalizeExtensionUiRequest(raw);
   return request ? [{ type: "interaction.requested", request }] : [];
@@ -434,7 +511,7 @@ function normalizeHistory(messages: readonly unknown[]): ChatTranscriptItem[] {
       const callId = textField(raw.toolCallId);
       const item: ChatTranscriptItem = {
         kind: "tool",
-        text: content.text || printable(raw.content),
+        text: printable(content.text || raw.content),
         toolCallId: callId,
         toolName: textField(raw.toolName) || "tool result",
         toolState: raw.isError === true ? "error" : "done",

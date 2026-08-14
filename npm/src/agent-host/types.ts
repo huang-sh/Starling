@@ -56,7 +56,7 @@ export interface AgentSdkSession {
   abort(): Promise<void>;
   setModel(provider: string, modelId: string): Promise<unknown>;
   getModelConfig(): Promise<JsonObject>;
-  configureModel(provider: string, modelId: string, role: string, thinkingLevel: string): Promise<unknown>;
+  configureModel(provider: string, modelId: string, thinkingLevel: string): Promise<unknown>;
   getAuthProviders(mode: "login" | "logout"): Promise<JsonObject>;
   loginProvider(provider: string, authType: "oauth" | "api_key"): Promise<unknown>;
   logoutProvider(provider: string): Promise<unknown>;
@@ -70,6 +70,24 @@ export interface AgentSdkSession {
   abortCompaction(): void;
   setSessionName(name: string): void;
   reload(): Promise<void>;
+  newSession(): Promise<JsonObject>;
+  resumeSession(sessionPath?: string): Promise<JsonObject>;
+  forkSession(entryId?: string): Promise<JsonObject>;
+  cloneSession(): Promise<JsonObject>;
+  importSession(inputPath: string): Promise<JsonObject>;
+  executeBash(command: string, excludeFromContext: boolean): Promise<JsonObject>;
+  abortBash(): void;
+  exportSession(outputPath?: string): Promise<JsonObject>;
+  copyLastAssistantMessage(): Promise<JsonObject>;
+  configureSettings(): Promise<JsonObject>;
+  configureScopedModels(): Promise<JsonObject>;
+  shareSession(): Promise<JsonObject>;
+  getChangelog(): Promise<JsonObject>;
+  configureProjectTrust(): Promise<JsonObject>;
+  cycleModel(direction: "forward" | "backward"): Promise<JsonObject>;
+  cycleThinkingLevel(): Promise<JsonObject>;
+  clearQueue(): JsonObject;
+  setThinkingVisible(visible: boolean): Promise<JsonObject>;
   shutdown(): Promise<void>;
 }
 
@@ -99,11 +117,16 @@ export function parseAgentHostArgs(
 ): AgentHostLaunchOptions {
   const values = new Map<string, string[]>();
   let noExtensions = false;
+  let starlingManaged = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const raw = argv[index];
     if (raw === "--no-extensions") {
       noExtensions = true;
+      continue;
+    }
+    if (raw === "--starling-managed") {
+      starlingManaged = true;
       continue;
     }
 
@@ -154,6 +177,7 @@ export function parseAgentHostArgs(
       path.resolve(cwd, extension)
     ),
     noExtensions,
+    ...(starlingManaged ? { starlingManaged: true } : {}),
   };
 }
 

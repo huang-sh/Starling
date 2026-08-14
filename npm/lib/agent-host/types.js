@@ -14,10 +14,15 @@ const VALUE_OPTIONS = new Set([
 export function parseAgentHostArgs(argv, processCwd = process.cwd()) {
     const values = new Map();
     let noExtensions = false;
+    let starlingManaged = false;
     for (let index = 0; index < argv.length; index += 1) {
         const raw = argv[index];
         if (raw === "--no-extensions") {
             noExtensions = true;
+            continue;
+        }
+        if (raw === "--starling-managed") {
+            starlingManaged = true;
             continue;
         }
         const equals = raw.indexOf("=");
@@ -60,6 +65,7 @@ export function parseAgentHostArgs(argv, processCwd = process.cwd()) {
         thinking: clean(last("--thinking")),
         extensions: (values.get("--extension") ?? []).map((extension) => path.resolve(cwd, extension)),
         noExtensions,
+        ...(starlingManaged ? { starlingManaged: true } : {}),
     };
 }
 function clean(value) {

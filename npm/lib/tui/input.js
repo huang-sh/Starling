@@ -4,6 +4,7 @@ const BRACKETED_PASTE_END = `${ESC}[201~`;
 const MAX_BRACKETED_PASTE_LENGTH = 1024 * 1024;
 const ALT_MODIFIER = 2;
 const CTRL_MODIFIER = 4;
+const SHIFT_MODIFIER = 1;
 const LOCK_MODIFIERS = 64 | 128;
 const TERMINAL_SEQUENCES = [
     [`${ESC}[[5~`, { type: "page-up" }],
@@ -27,6 +28,7 @@ const TERMINAL_SEQUENCES = [
     [`${ESC}OB`, { type: "down" }],
     [`${ESC}OC`, { type: "right" }],
     [`${ESC}OD`, { type: "left" }],
+    [`${ESC}[Z`, { type: "shift-tab" }],
     [`${ESC}\r`, { type: "alt-enter" }],
     [`${ESC}\n`, { type: "alt-enter" }],
 ];
@@ -153,6 +155,21 @@ function keyFromCodePoint(codePoint, modifiers) {
             return { type: "ctrl-s" };
         if (lower === 0x75)
             return { type: "ctrl-u" };
+        if (lower === 0x70) {
+            return (modifiers & SHIFT_MODIFIER) !== 0
+                ? { type: "shift-ctrl-p" }
+                : { type: "ctrl-p" };
+        }
+        if (lower === 0x6c)
+            return { type: "ctrl-l" };
+        if (lower === 0x6f)
+            return { type: "ctrl-o" };
+        if (lower === 0x74)
+            return { type: "ctrl-t" };
+        if (lower === 0x78)
+            return { type: "ctrl-x" };
+        if (lower === 0x7a)
+            return { type: "ctrl-z" };
     }
     switch (codePoint) {
         case 0x03:
@@ -161,8 +178,20 @@ function keyFromCodePoint(codePoint, modifiers) {
             return { type: "ctrl-d" };
         case 0x13:
             return { type: "ctrl-s" };
+        case 0x0c:
+            return { type: "ctrl-l" };
+        case 0x0f:
+            return { type: "ctrl-o" };
+        case 0x10:
+            return { type: "ctrl-p" };
+        case 0x14:
+            return { type: "ctrl-t" };
         case 0x15:
             return { type: "ctrl-u" };
+        case 0x18:
+            return { type: "ctrl-x" };
+        case 0x1a:
+            return { type: "ctrl-z" };
         case 0x08:
         case 0x7f:
             return { type: "backspace" };
@@ -170,7 +199,9 @@ function keyFromCodePoint(codePoint, modifiers) {
             return { type: "tab" };
         case 0x0a:
         case 0x0d:
-            return (modifiers & ALT_MODIFIER) !== 0 ? { type: "alt-enter" } : { type: "enter" };
+            if ((modifiers & ALT_MODIFIER) !== 0)
+                return { type: "alt-enter" };
+            return (modifiers & SHIFT_MODIFIER) !== 0 ? { type: "shift-enter" } : { type: "enter" };
         case 0x1b:
             return { type: "escape" };
         default:
@@ -243,6 +274,10 @@ function parseCsiKey(sequence) {
     if (navigation) {
         if (navigation[2] === "3")
             return undefined;
+        const modifiers = Number.parseInt(navigation[1] ?? "1", 10) - 1;
+        if (navigation[3] === "A" && (modifiers & ALT_MODIFIER) !== 0) {
+            return { type: "alt-up" };
+        }
         return navigationKey(navigation[3] ?? "");
     }
     const functional = sequence.match(/^\u001b\[(\d+)(?:;(\d+))?(?::([123]))?~$/);

@@ -5,6 +5,7 @@ export interface StarlingScreenOptions {
 }
 
 export interface StarlingScreenViewport {
+  width?: number;
   height: number;
   force?: boolean;
 }
@@ -28,6 +29,7 @@ export class StarlingScreen {
   private hardwareCursorRow = 0;
   private cursorRow = 0;
   private maxLinesRendered = 0;
+  private previousWidth = 0;
   private previousHeight = 0;
   private lastMode: "none" | "normal" | "overlay" = "none";
   private readonly write: (value: string) => void;
@@ -42,11 +44,13 @@ export class StarlingScreen {
   }
 
   paint(parts: StarlingFrameParts, viewport: StarlingScreenViewport): boolean {
+    const width = Math.max(1, Math.floor(viewport.width ?? 80));
     const height = Math.max(1, Math.floor(viewport.height));
-    if (parts.mode === "overlay" || parts.mode === "compact") {
-      return this.paintOverlay(parts.live, height);
-    }
-    return this.doRender(parts, height, viewport.force === true);
+    const painted = parts.mode === "overlay" || parts.mode === "compact"
+      ? this.paintOverlay(parts.live, height)
+      : this.doRender(parts, width, height, viewport.force === true);
+    this.previousWidth = width;
+    return painted;
   }
 
   /**
@@ -68,6 +72,7 @@ export class StarlingScreen {
     this.hardwareCursorRow = 0;
     this.cursorRow = 0;
     this.maxLinesRendered = 0;
+    this.previousWidth = 0;
     this.previousHeight = 0;
     this.lastMode = "none";
   }
@@ -90,12 +95,13 @@ export class StarlingScreen {
    * Differential inline paint (pi's doRender, minus kitty-image / termux /
    * debug paths). Returns false when nothing changed and nothing was written.
    */
-  private doRender(parts: StarlingFrameParts, height: number, force: boolean): boolean {
+  private doRender(parts: StarlingFrameParts, width: number, height: number, force: boolean): boolean {
     const newLines = [...parts.committed, ...parts.live];
+    const widthChanged = this.previousWidth !== 0 && this.previousWidth !== width;
     const heightChanged = this.previousHeight !== 0 && this.previousHeight !== height;
 
     // Overlay handoff or resize: clear and repaint the whole frame.
-    if (this.lastMode === "overlay" || heightChanged) {
+    if (this.lastMode === "overlay" || widthChanged || heightChanged) {
       this.fullRender(true, newLines, height);
       return true;
     }

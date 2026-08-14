@@ -6,6 +6,63 @@ export const STARLING_SLASH_COMMANDS = [
         allowArgs: false,
     },
     {
+        name: "settings",
+        description: "Open Pi settings",
+        source: "starling",
+        allowArgs: false,
+    },
+    {
+        name: "new",
+        description: "Start a new Pi session in this workspace",
+        source: "starling",
+        allowArgs: false,
+    },
+    {
+        name: "resume",
+        description: "Resume a saved Pi session",
+        source: "starling",
+        argumentHint: "[session.jsonl]",
+        allowArgs: true,
+    },
+    {
+        name: "fork",
+        description: "Fork from an earlier user message",
+        source: "starling",
+        allowArgs: false,
+    },
+    {
+        name: "clone",
+        description: "Clone the current session branch",
+        source: "starling",
+        allowArgs: false,
+    },
+    {
+        name: "import",
+        description: "Import and resume a Pi JSONL session",
+        source: "starling",
+        argumentHint: "<session.jsonl>",
+        allowArgs: true,
+    },
+    {
+        name: "export",
+        description: "Export this session to HTML or JSONL",
+        source: "starling",
+        argumentHint: "[output.html|output.jsonl]",
+        allowArgs: true,
+    },
+    {
+        name: "copy",
+        description: "Copy the last agent message",
+        source: "starling",
+        allowArgs: false,
+    },
+    {
+        name: "scoped-models",
+        description: "Choose models used by model cycling",
+        source: "starling",
+        allowArgs: false,
+    },
+    {
         name: "model",
         description: "List models or switch the active model",
         source: "starling",
@@ -56,6 +113,30 @@ export const STARLING_SLASH_COMMANDS = [
     {
         name: "session",
         description: "Show current session statistics",
+        source: "starling",
+        allowArgs: false,
+    },
+    {
+        name: "share",
+        description: "Share this session as a secret GitHub gist",
+        source: "starling",
+        allowArgs: false,
+    },
+    {
+        name: "changelog",
+        description: "Show the bundled Pi changelog",
+        source: "starling",
+        allowArgs: false,
+    },
+    {
+        name: "hotkeys",
+        description: "Show Starling keyboard shortcuts",
+        source: "starling",
+        allowArgs: false,
+    },
+    {
+        name: "trust",
+        description: "Save the project trust decision for future sessions",
         source: "starling",
         allowArgs: false,
     },
@@ -147,7 +228,7 @@ export function planSlashCommand(text, catalog, busy) {
             request.streamingBehavior = "followUp";
         return { kind: "dynamic", command, request };
     }
-    if (busy && ["compact", "tree", "login", "logout", "reload"].includes(command.name)) {
+    if (busy && ["settings", "new", "resume", "fork", "clone", "import", "scoped-models", "share", "compact", "tree", "trust", "login", "logout", "reload"].includes(command.name)) {
         return {
             kind: "error",
             message: `/${command.name} is unavailable while Pi is working; interrupt or wait for the turn to finish`,
@@ -156,6 +237,82 @@ export function planSlashCommand(text, catalog, busy) {
     switch (command.name) {
         case "help":
             return { kind: "local", command, action: "help" };
+        case "settings":
+            return { kind: "request", command, request: { type: "configure_settings" } };
+        case "new":
+            return {
+                kind: "request",
+                command,
+                request: { type: "new_session" },
+                successMessage: "New session started",
+                refreshTranscript: true,
+                refreshCommands: true,
+            };
+        case "resume":
+            return {
+                kind: "request",
+                command,
+                request: {
+                    type: "resume_session",
+                    ...(invocation.args ? { sessionPath: invocation.args } : {}),
+                },
+                successMessage: "Session resumed",
+                refreshTranscript: true,
+                refreshCommands: true,
+            };
+        case "fork":
+            return {
+                kind: "request",
+                command,
+                request: { type: "fork_session" },
+                successMessage: "Forked to new session",
+                refreshTranscript: true,
+                refreshCommands: true,
+            };
+        case "clone":
+            return {
+                kind: "request",
+                command,
+                request: { type: "clone_session" },
+                successMessage: "Cloned to new session",
+                refreshTranscript: true,
+                refreshCommands: true,
+            };
+        case "import": {
+            const inputPath = pathArgument(invocation.args);
+            if (!inputPath) {
+                return { kind: "error", message: "Usage: /import <path.jsonl>" };
+            }
+            return {
+                kind: "request",
+                command,
+                request: { type: "import_session", inputPath },
+                successMessage: "Session imported",
+                refreshTranscript: true,
+                refreshCommands: true,
+            };
+        }
+        case "export": {
+            const outputPath = pathArgument(invocation.args);
+            return {
+                kind: "request",
+                command,
+                request: {
+                    type: "export_session",
+                    ...(outputPath ? { outputPath } : {}),
+                },
+                successMessage: "Session exported",
+            };
+        }
+        case "copy":
+            return {
+                kind: "request",
+                command,
+                request: { type: "copy_last_message" },
+                successMessage: "Copied last agent message to clipboard",
+            };
+        case "scoped-models":
+            return { kind: "request", command, request: { type: "configure_scoped_models" } };
         case "model": {
             if (!invocation.args)
                 return { kind: "local", command, action: "models" };
@@ -233,6 +390,14 @@ export function planSlashCommand(text, catalog, busy) {
                 command,
                 request: { type: "get_session_stats" },
             };
+        case "share":
+            return { kind: "request", command, request: { type: "share_session" } };
+        case "changelog":
+            return { kind: "request", command, request: { type: "get_changelog" } };
+        case "hotkeys":
+            return { kind: "local", command, action: "hotkeys" };
+        case "trust":
+            return { kind: "request", command, request: { type: "configure_project_trust" } };
         case "reload":
             return {
                 kind: "request",
@@ -266,6 +431,27 @@ export function formatThinkingLevels(current) {
     return [
         `Thinking level: ${current || "default"}`,
         `Choose with /thinking <level>: ${THINKING_LEVELS.join(", ")}`,
+    ].join("\n");
+}
+export function formatHotkeys() {
+    return [
+        "Keyboard shortcuts",
+        "  Enter              send",
+        "  Shift/Alt+Enter    newline",
+        "  Esc                interrupt",
+        "  Ctrl+C             interrupt, then exit",
+        "  Ctrl+D             exit with an empty editor",
+        "  Shift+Tab          cycle thinking level",
+        "  Ctrl+P/Shift+Ctrl+P cycle models",
+        "  Ctrl+L             choose a model",
+        "  Ctrl+O             toggle tool output",
+        "  Ctrl+T             toggle thinking blocks",
+        "  Ctrl+X             copy the last agent message",
+        "  Alt+Up             restore queued messages",
+        "  Ctrl+Z             suspend to background",
+        "  Up/Down            move or recall input history",
+        "  PageUp/Down        scroll transcript",
+        "  Tab                complete slash commands",
     ].join("\n");
 }
 export function formatAvailableModels(value, current) {
@@ -304,6 +490,16 @@ function parseSlashInvocation(text) {
     if (!match)
         return null;
     return { name: match[1], args: (match[2] ?? "").trim() };
+}
+function pathArgument(args) {
+    if (!args)
+        return undefined;
+    const quote = args[0];
+    if (quote === "\"" || quote === "'") {
+        const end = args.indexOf(quote, 1);
+        return end < 0 ? undefined : args.slice(1, end);
+    }
+    return args.split(/\s/, 1)[0] || undefined;
 }
 /** Whether text is shaped like a slash command (`/name` + optional args).
  *  A leading `/` alone does not qualify: `/data20T/dev/foo` is a file path,

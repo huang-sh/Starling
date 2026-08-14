@@ -1,94 +1,59 @@
-import { randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import {
+import type {
+  AgentSession,
+  AgentSessionRuntime,
+  AgentSessionServices,
+  CreateAgentSessionRuntimeFactory,
+  ExtensionContext,
+  ExtensionFactory,
+  ExtensionUIContext,
+  InlineExtension,
+  ModelRuntime,
+  ProjectTrustStore,
+  ResourceLoader,
+  SessionInfo,
+  SessionManager,
+  SettingsManager,
+} from "@earendil-works/pi-coding-agent";
+import type {
   AgentHostLaunchOptions,
   AgentSdkAdapter,
   AgentSdkCommand,
   AgentSdkSession,
   ExtensionUiBindings,
   JsonObject,
+} from "./types.js";
+import {
   errorMessage,
   isJsonObject,
 } from "./types.js";
-import {
-  ProviderFetch,
-  ZhipuModelRuntime,
-  registerZhipuCodingPlanProvider,
-} from "./zhipu-provider.js";
+import type { ProviderFetch } from "./zhipu-provider.js";
+import { registerZhipuCodingPlanProvider } from "./zhipu-provider.js";
 
 const PI_SDK_PACKAGE = "@earendil-works/pi-coding-agent";
 
-interface ModelRuntimeLike extends ZhipuModelRuntime {
-  getAvailable(): Promise<unknown[]>;
-  getModel?(provider: string, modelId: string): unknown;
-  getProviders?(): readonly AuthProviderLike[];
-  getProvider?(providerId: string): AuthProviderLike | undefined;
-  getProviderAuthStatus?(providerId: string): AuthStatusLike;
-  isUsingOAuth?(providerId: string): boolean;
-  listCredentials?(): Promise<readonly CredentialInfoLike[]>;
-  login?(
-    providerId: string,
-    authType: AuthProviderType,
-    interaction: AuthInteractionLike,
-  ): Promise<unknown>;
-  logout?(providerId: string): Promise<void>;
-}
-
-type AuthProviderType = "oauth" | "api_key";
-
-interface AuthProviderLike {
-  id: string;
-  name: string;
-  auth?: {
-    oauth?: { name?: string };
-    apiKey?: { name?: string; login?: unknown };
-  };
-}
-
-interface AuthStatusLike {
-  configured?: boolean;
-  source?: string;
-  label?: string;
-}
-
-interface CredentialInfoLike {
-  providerId: string;
-  type: AuthProviderType;
-}
-
-type AuthPromptLike = {
-  signal?: AbortSignal;
-  type: "text" | "secret" | "manual_code";
-  message: string;
-  placeholder?: string;
-} | {
-  signal?: AbortSignal;
-  type: "select";
-  message: string;
-  options: readonly { id: string; label: string; description?: string }[];
-};
-
-type AuthEventLike =
-  | { type: "info"; message: string; links?: readonly { url: string; label?: string }[] }
-  | { type: "auth_url"; url: string; instructions?: string }
-  | {
-    type: "device_code";
-    userCode: string;
-    verificationUri: string;
-    intervalSeconds?: number;
-    expiresInSeconds?: number;
-  }
-  | { type: "progress"; message: string };
-
-interface AuthInteractionLike {
-  signal?: AbortSignal;
-  prompt(prompt: AuthPromptLike): Promise<string>;
-  notify(event: AuthEventLike): void;
-}
+type ModelRuntimeLike = ModelRuntime;
+type AuthProviderLike = ReturnType<ModelRuntime["getProviders"]>[number];
+type AuthStatusLike = ReturnType<ModelRuntime["getProviderAuthStatus"]>;
+type CredentialInfoLike = Awaited<ReturnType<ModelRuntime["listCredentials"]>>[number];
+type AuthProviderType = CredentialInfoLike["type"];
+type AuthInteractionLike = Parameters<ModelRuntime["login"]>[2];
+type AuthEventLike = Parameters<AuthInteractionLike["notify"]>[0];
+type PiModel = Awaited<ReturnType<ModelRuntime["getAvailable"]>>[number];
+type PiThinkingLevel = AgentSession["thinkingLevel"];
+type PiTransport = Parameters<SettingsManager["setTransport"]>[0];
+type AuthProviderSummary = Pick<AuthProviderLike, "id" | "name">
+  & Partial<Pick<AuthProviderLike, "auth">>;
 
 interface AuthUiLike {
+  confirm?(
+    title: string,
+    message: string,
+    dialogOptions?: { signal?: AbortSignal; timeout?: number },
+  ): Promise<boolean>;
   select?(
     title: string,
     options: string[],
@@ -107,153 +72,12 @@ interface AuthUiLike {
   setStatus?(key: string, text?: string): void;
 }
 
-interface SettingsManagerLike {
-  /** Pi's file storage is not part of the typed SDK, but is exposed at runtime. */
-  storage?: SettingsStorageLike;
-  getDefaultProvider?(): string | undefined;
-  getDefaultModel?(): string | undefined;
-  getDefaultThinkingLevel?(): string | undefined;
-  getSessionDir?(): string | undefined;
-  setDefaultModelAndProvider?(provider: string, modelId: string): void;
-  setDefaultThinkingLevel?(level: string): void;
-  flush?(): Promise<void>;
-}
-
-interface SettingsStorageLike {
-  withLock(
-    scope: "global" | "project",
-    update: (current: string | undefined) => string | undefined,
-  ): void;
-}
-
-interface ResourceLoaderLike {
-  reload(): Promise<void>;
-  getExtensions?(): {
-    extensions?: Array<{
-      path?: string;
-      resolvedPath?: string;
-      sourceInfo?: { source?: string };
-    }>;
-    errors?: Array<{ path?: string; error?: string }>;
-  };
-}
-
-interface CommandSourceLike {
-  description?: string;
-  sourceInfo: unknown;
-}
-
-interface RegisteredCommandLike extends CommandSourceLike {
-  invocationName: string;
-}
-
-interface PromptTemplateLike extends CommandSourceLike {
-  name: string;
-}
-
-interface SkillLike extends CommandSourceLike {
-  name: string;
-}
-
-interface ManagedExtensionUiLike {
-  confirm?(
-    title: string,
-    message: string,
-    options?: { timeout?: number },
-  ): Promise<boolean>;
-  notify?(message: string, type?: "info" | "warning" | "error"): void;
-}
-
-interface ManagedExtensionContextLike {
-  ui?: ManagedExtensionUiLike;
-}
-
-interface ManagedExtensionApiLike {
-  on(
-    event: string,
-    handler: (event: unknown, context: ManagedExtensionContextLike) => unknown,
-  ): void;
-}
-
-type ManagedExtensionFactory = (api: ManagedExtensionApiLike) => void;
-
-interface InlineExtensionLike {
-  name: string;
-  factory: ManagedExtensionFactory;
-  hidden?: boolean;
-}
-
-interface SessionManagerLike {
-  getCwd(): string;
-  getTree?(): unknown[];
-  getLeafId?(): string | null;
-}
-
-interface ProjectTrustStoreLike {
-  get(cwd: string): boolean | null;
-  set(cwd: string, decision: boolean | null): void;
-}
-
-interface SdkSessionLike {
-  model?: unknown;
-  thinkingLevel?: unknown;
-  isStreaming?: boolean;
-  isCompacting?: boolean;
-  steeringMode?: unknown;
-  followUpMode?: unknown;
-  sessionFile?: string;
-  sessionId?: string;
-  sessionName?: string;
-  autoCompactionEnabled?: boolean;
-  pendingMessageCount?: number;
-  messages?: unknown[];
-  promptTemplates?: readonly PromptTemplateLike[];
-  resourceLoader?: {
-    getSkills?(): { skills?: readonly SkillLike[] };
-  };
-  modelRuntime?: ModelRuntimeLike;
-  extensionRunner?: {
-    emit(event: unknown): Promise<unknown>;
-    getRegisteredCommands?(): readonly RegisteredCommandLike[];
-  };
-  bindExtensions(bindings: JsonObject): Promise<void>;
-  subscribe(listener: (event: unknown) => void): () => void;
-  prompt(message: string, options?: JsonObject): Promise<void>;
-  abort(): Promise<void>;
-  setModel(model: unknown): Promise<void>;
-  setThinkingLevel(level: unknown): void;
-  compact(customInstructions?: string): Promise<unknown>;
-  abortCompaction(): void;
-  setSessionName?(name: string): void;
-  getSessionStats?(): unknown;
-  waitForIdle?(): Promise<void>;
-  navigateTree?(targetId: string, options?: JsonObject): Promise<JsonObject>;
-  abortBranchSummary?(): void;
-  reload?(): Promise<void>;
-  dispose(): void;
-}
-
-interface PiSdkModule {
-  ModelRuntime: {
-    create(options?: JsonObject): Promise<ModelRuntimeLike>;
-  };
-  SessionManager: {
-    create(cwd: string, sessionDir?: string, options?: { id?: string }): SessionManagerLike;
-    open(sessionPath: string, sessionDir?: string, cwdOverride?: string): SessionManagerLike;
-  };
-  SettingsManager: {
-    create(
-      cwd: string,
-      agentDir?: string,
-      options?: { projectTrusted?: boolean },
-    ): SettingsManagerLike;
-  };
-  ProjectTrustStore: new (agentDir: string) => ProjectTrustStoreLike;
-  hasTrustRequiringProjectResources(cwd: string): boolean;
-  DefaultResourceLoader: new (options: JsonObject) => ResourceLoaderLike;
-  createAgentSession(options: JsonObject): Promise<{ session: SdkSessionLike }>;
-  getAgentDir?: () => string;
-}
+type SettingsManagerLike = SettingsManager;
+type ResourceLoaderLike = ResourceLoader;
+type SessionManagerLike = SessionManager;
+type ProjectTrustStoreLike = ProjectTrustStore;
+type SdkSessionLike = AgentSession;
+type PiSdkModule = typeof import("@earendil-works/pi-coding-agent");
 
 export type PiSdkLoader = () => Promise<unknown>;
 
@@ -272,10 +96,12 @@ export function createPiSdkAdapter(
       options: AgentHostLaunchOptions,
       bindings: ExtensionUiBindings,
     ): Promise<AgentSdkSession> {
+      enforceIgnoreScriptsEnv(environment);
       const sdk = requirePiSdk(await loadSdk());
       const agentDir = sdk.getAgentDir?.() ?? path.join(os.homedir(), ".pi", "agent");
       let sessionManager: SessionManagerLike | undefined;
       let effectiveCwd: string;
+      let initialProjectTrusted: boolean | undefined;
 
       if (options.sessionPath) {
         // Deliberately omit cwdOverride: a resumed transcript owns its project cwd.
@@ -285,21 +111,20 @@ export function createPiSdkAdapter(
         effectiveCwd = options.cwd;
       }
 
-      const projectTrusted = await resolveProjectTrusted(
-        sdk,
-        agentDir,
-        effectiveCwd,
-        bindings,
-        environment,
-      );
-      const settingsManager = sdk.SettingsManager.create(
-        effectiveCwd,
-        agentDir,
-        { projectTrusted },
-      );
-
       if (!options.sessionPath) {
-        const sessionDir = configuredSessionDir(environment, settingsManager);
+        initialProjectTrusted = await resolveProjectTrusted(
+          sdk,
+          agentDir,
+          effectiveCwd,
+          bindings,
+          environment,
+        );
+        const startupSettings = sdk.SettingsManager.create(
+          effectiveCwd,
+          agentDir,
+          { projectTrusted: initialProjectTrusted },
+        );
+        const sessionDir = configuredSessionDir(environment, startupSettings);
         sessionManager = sdk.SessionManager.create(
           effectiveCwd,
           sessionDir,
@@ -308,89 +133,89 @@ export function createPiSdkAdapter(
       }
       if (!sessionManager) throw new Error("Pi SDK did not create a session manager");
 
-      const modelRuntime = await sdk.ModelRuntime.create({
-        authPath: path.join(agentDir, "auth.json"),
-        modelsPath: path.join(agentDir, "models.json"),
-      });
-      await registerZhipuCodingPlanProvider(modelRuntime, environment, fetchImpl);
-      const inlineExtensions: InlineExtensionLike[] = options.starlingManaged
+      const inlineExtensions: InlineExtension[] = options.starlingManaged
         ? [{
           name: "starling-managed",
           factory: createStarlingManagedExtension(),
           hidden: true,
         }]
         : [];
-      const resourceLoader = new sdk.DefaultResourceLoader({
-        cwd: effectiveCwd,
-        agentDir,
-        settingsManager,
-        additionalExtensionPaths: options.extensions,
-        extensionFactories: inlineExtensions,
-        noExtensions: options.noExtensions,
-      });
-      await resourceLoader.reload();
-      validateExplicitExtensions(resourceLoader, options.extensions, effectiveCwd);
-      const model = await resolveRequestedModel(
-        modelRuntime,
-        settingsManager,
-        options.provider,
-        options.model,
-      );
-      const { session } = await sdk.createAgentSession({
-        cwd: effectiveCwd,
+      const createRuntime: CreateAgentSessionRuntimeFactory = async (runtimeOptions) => {
+        const projectTrusted = initialProjectTrusted ?? await resolveProjectTrusted(
+          sdk,
+          agentDir,
+          runtimeOptions.cwd,
+          bindings,
+          environment,
+        );
+        initialProjectTrusted = undefined;
+        const settingsManager = sdk.SettingsManager.create(
+          runtimeOptions.cwd,
+          agentDir,
+          { projectTrusted },
+        );
+        const modelRuntime = await sdk.ModelRuntime.create({
+          authPath: path.join(agentDir, "auth.json"),
+          modelsPath: path.join(agentDir, "models.json"),
+        });
+        await registerZhipuCodingPlanProvider(modelRuntime, environment, fetchImpl);
+        const resourceLoader = new sdk.DefaultResourceLoader({
+          cwd: runtimeOptions.cwd,
+          agentDir,
+          settingsManager,
+          additionalExtensionPaths: options.extensions,
+          extensionFactories: inlineExtensions,
+          noExtensions: options.noExtensions,
+        });
+        await resourceLoader.reload();
+        validateExplicitExtensions(resourceLoader, options.extensions, runtimeOptions.cwd);
+        const model = await resolveRequestedModel(
+          modelRuntime,
+          settingsManager,
+          options.provider,
+          options.model,
+        );
+        const created = await sdk.createAgentSession({
+          cwd: runtimeOptions.cwd,
+          agentDir,
+          sessionManager: runtimeOptions.sessionManager,
+          modelRuntime,
+          settingsManager,
+          resourceLoader,
+          model,
+          thinkingLevel: validateThinkingLevel(options.thinking),
+          sessionStartEvent: runtimeOptions.sessionStartEvent,
+        });
+        const services: AgentSessionServices = {
+          cwd: runtimeOptions.cwd,
+          agentDir,
+          modelRuntime,
+          settingsManager,
+          resourceLoader,
+          diagnostics: [],
+        };
+        return { ...created, services, diagnostics: [] };
+      };
+      const runtime = await sdk.createAgentSessionRuntime(createRuntime, {
+        cwd: sessionManager.getCwd(),
         agentDir,
         sessionManager,
-        modelRuntime,
-        settingsManager,
-        resourceLoader,
-        model,
-        thinkingLevel: validateThinkingLevel(options.thinking),
       });
-      let unsubscribe = () => {};
       const adaptedSession = new PiSdkSessionAdapter(
-        session,
-        sessionManager,
-        modelRuntime,
-        settingsManager,
-        path.join(agentDir, "settings.json"),
+        runtime,
+        sdk,
+        bindings,
         bindings.uiContext as AuthUiLike,
-        () => unsubscribe(),
         options.surface === "tui" ? "interactive" : "rpc",
+        options.surface ?? "rpc",
+        environment,
       );
+      runtime.setBeforeSessionInvalidate(() => adaptedSession.detach());
+      runtime.setRebindSession(async () => adaptedSession.bind(true));
 
       try {
-        if (options.name) session.setSessionName?.(options.name);
-
-        await session.bindExtensions({
-          uiContext: bindings.uiContext,
-          mode: options.surface ?? "rpc",
-          commandContextActions: {
-            waitForIdle: () => session.waitForIdle?.() ?? Promise.resolve(),
-            newSession: async () => ({ cancelled: true }),
-            fork: async () => ({ cancelled: true }),
-            navigateTree: async (targetId: string, navigateOptions?: JsonObject) =>
-              session.navigateTree?.(targetId, navigateOptions) ?? { cancelled: true },
-            switchSession: async () => ({ cancelled: true }),
-            reload: async () => {
-              await session.reload?.();
-            },
-          },
-          abortHandler: () => {
-            void session.abort();
-          },
-          shutdownHandler: bindings.requestShutdown,
-          onError: bindings.emitExtensionError,
-        });
-
-        unsubscribe = session.subscribe(bindings.emitEvent);
-        for (const loadError of resourceLoader.getExtensions?.().errors ?? []) {
-          bindings.emitExtensionError({
-            extensionPath: loadError.path ?? "unknown",
-            event: "load",
-            error: loadError.error ?? "Extension failed to load",
-          });
-        }
-
+        if (options.name) runtime.session.setSessionName?.(options.name);
+        await adaptedSession.bind();
         return adaptedSession;
       } catch (error) {
         try {
@@ -408,37 +233,99 @@ export function createPiSdkAdapter(
 }
 
 class PiSdkSessionAdapter implements AgentSdkSession {
-  private readonly session: SdkSessionLike;
-  private readonly sessionManager: SessionManagerLike;
-  private readonly modelRuntime: ModelRuntimeLike;
-  private readonly settingsManager: SettingsManagerLike;
-  private readonly settingsPath: string;
+  private readonly runtime: AgentSessionRuntime;
+  private readonly sdk: PiSdkModule;
+  private readonly bindings: ExtensionUiBindings;
   private readonly authUi: AuthUiLike;
-  private readonly unsubscribe: () => void;
   private readonly promptSource: "interactive" | "rpc";
+  private readonly extensionMode: "rpc" | "tui";
+  private unsubscribe: () => void = () => {};
   private activeCompaction: Promise<unknown> | undefined;
   private activeTreeNavigation: Promise<JsonObject> | undefined;
   private activeAuthentication: AbortController | undefined;
+  private bashSequence = 0;
   private shutdownPromise: Promise<void> | undefined;
 
   constructor(
-    session: SdkSessionLike,
-    sessionManager: SessionManagerLike,
-    modelRuntime: ModelRuntimeLike,
-    settingsManager: SettingsManagerLike,
-    settingsPath: string,
+    runtime: AgentSessionRuntime,
+    sdk: PiSdkModule,
+    bindings: ExtensionUiBindings,
     authUi: AuthUiLike,
-    unsubscribe: () => void,
     promptSource: "interactive" | "rpc",
+    extensionMode: "rpc" | "tui",
+    private readonly environment: NodeJS.ProcessEnv,
   ) {
-    this.session = session;
-    this.sessionManager = sessionManager;
-    this.modelRuntime = modelRuntime;
-    this.settingsManager = settingsManager;
-    this.settingsPath = settingsPath;
+    this.runtime = runtime;
+    this.sdk = sdk;
+    this.bindings = bindings;
     this.authUi = authUi;
-    this.unsubscribe = unsubscribe;
     this.promptSource = promptSource;
+    this.extensionMode = extensionMode;
+  }
+
+  private get session(): SdkSessionLike {
+    return this.runtime.session;
+  }
+
+  private get sessionManager(): SessionManagerLike {
+    return this.session.sessionManager;
+  }
+
+  private get modelRuntime(): ModelRuntimeLike {
+    return this.runtime.services.modelRuntime;
+  }
+
+  private get settingsManager(): SettingsManagerLike {
+    return this.runtime.services.settingsManager;
+  }
+
+  async bind(replaced = false): Promise<void> {
+    const session = this.session;
+    await session.bindExtensions({
+      uiContext: this.bindings.uiContext as unknown as ExtensionUIContext,
+      mode: this.extensionMode,
+      commandContextActions: {
+        waitForIdle: () => session.waitForIdle(),
+        newSession: (options) => this.runtime.newSession(options),
+        fork: async (entryId, options) => {
+          const result = await this.runtime.fork(entryId, options);
+          return { cancelled: result.cancelled };
+        },
+        navigateTree: async (targetId, options) => {
+          const result = await session.navigateTree(targetId, options);
+          return { cancelled: result.cancelled };
+        },
+        switchSession: (sessionPath, options) => this.runtime.switchSession(sessionPath, options),
+        reload: () => session.reload(),
+      },
+      abortHandler: () => {
+        void session.abort();
+      },
+      shutdownHandler: this.bindings.requestShutdown,
+      onError: this.bindings.emitExtensionError,
+    });
+
+    this.detach();
+    this.unsubscribe = session.subscribe(this.bindings.emitEvent);
+    for (const loadError of this.runtime.services.resourceLoader.getExtensions().errors) {
+      this.bindings.emitExtensionError({
+        extensionPath: loadError.path ?? "unknown",
+        event: "load",
+        error: loadError.error ?? "Extension failed to load",
+      });
+    }
+    if (replaced) {
+      this.bindings.emitEvent({
+        type: "starling_session_replaced",
+        state: this.getState(),
+        messages: this.getMessages(),
+      });
+    }
+  }
+
+  detach(): void {
+    this.unsubscribe();
+    this.unsubscribe = () => {};
   }
 
   getState(): JsonObject {
@@ -454,6 +341,7 @@ class PiSdkSessionAdapter implements AgentSdkSession {
       sessionId: this.session.sessionId ?? "",
       sessionName: this.session.sessionName,
       autoCompactionEnabled: this.session.autoCompactionEnabled === true,
+      hideThinkingBlock: this.settingsManager.getHideThinkingBlock(),
       messageCount: messages.length,
       pendingMessageCount: this.session.pendingMessageCount ?? 0,
     };
@@ -536,28 +424,19 @@ class PiSdkSessionAdapter implements AgentSdkSession {
 
   async getModelConfig(): Promise<JsonObject> {
     await this.settingsManager.flush?.();
-    const settings = await readPiSettings(this.settingsPath, this.settingsManager.storage);
-    const defaultThinkingLevel = this.settingsManager.getDefaultThinkingLevel?.()
-      ?? stringSetting(settings.defaultThinkingLevel);
+    const defaultThinkingLevel = this.settingsManager.getDefaultThinkingLevel?.();
     return {
-      defaultProvider: this.settingsManager.getDefaultProvider?.()
-        ?? stringSetting(settings.defaultProvider),
-      defaultModel: this.settingsManager.getDefaultModel?.()
-        ?? stringSetting(settings.defaultModel),
+      defaultProvider: this.settingsManager.getDefaultProvider?.(),
+      defaultModel: this.settingsManager.getDefaultModel?.(),
       ...(defaultThinkingLevel ? { defaultThinkingLevel } : {}),
-      modelRoles: modelRolesFromSettings(settings),
     };
   }
 
   async configureModel(
     provider: string,
     modelId: string,
-    role: string,
     thinkingLevel: string,
   ): Promise<unknown> {
-    if (!CONFIGURABLE_MODEL_ROLES.has(role)) {
-      throw new Error(`Unsupported model role: ${role}`);
-    }
     const models = await this.modelRuntime.getAvailable();
     const model = models.find((candidate) => modelMatches(candidate, provider, modelId));
     if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
@@ -567,26 +446,16 @@ class PiSdkSessionAdapter implements AgentSdkSession {
     }
 
     await this.settingsManager.flush?.();
-    if (role === "default") {
-      const setDefault = this.settingsManager.setDefaultModelAndProvider;
-      if (!setDefault) throw new Error("Pi SDK settings do not support a default model");
-      await this.session.setModel(model);
-      setDefault.call(this.settingsManager, provider, modelId);
-      if (thinking !== "inherit") {
-        this.session.setThinkingLevel(thinking);
-        this.settingsManager.setDefaultThinkingLevel?.(thinking);
-      }
-      await this.settingsManager.flush?.();
+    const setDefault = this.settingsManager.setDefaultModelAndProvider;
+    if (!setDefault) throw new Error("Pi SDK settings do not support a default model");
+    await this.session.setModel(model);
+    setDefault.call(this.settingsManager, provider, modelId);
+    if (thinking !== "inherit") {
+      this.session.setThinkingLevel(thinking);
+      this.settingsManager.setDefaultThinkingLevel?.(thinking);
     }
-    const baseSelector = `${provider}/${modelId}`;
-    const selector = thinking === "inherit" ? baseSelector : `${baseSelector}:${thinking}`;
-    await writePiModelRole(
-      this.settingsPath,
-      role,
-      selector,
-      this.settingsManager.storage,
-    );
-    return { provider, id: modelId, role, thinkingLevel: thinking, selector };
+    await this.settingsManager.flush?.();
+    return { provider, id: modelId, thinkingLevel: thinking };
   }
 
   async getAuthProviders(mode: "login" | "logout"): Promise<JsonObject> {
@@ -608,7 +477,7 @@ class PiSdkSessionAdapter implements AgentSdkSession {
             return authProviderRecord(
               provider ?? { id: credential.providerId, name: credential.providerId },
               credential.type,
-              { configured: true, source: "stored credential" },
+              { configured: true, label: "stored credential" },
               true,
               true,
             );
@@ -727,11 +596,11 @@ class PiSdkSessionAdapter implements AgentSdkSession {
   }
 
   setThinkingLevel(level: string): void {
-    this.session.setThinkingLevel(level);
+    this.session.setThinkingLevel(validateThinkingLevel(level)!);
   }
 
   getAvailableModels(): Promise<unknown[]> {
-    return this.modelRuntime.getAvailable();
+    return this.modelRuntime.getAvailable().then((models) => [...models]);
   }
 
   compact(customInstructions?: string): Promise<unknown> {
@@ -758,6 +627,374 @@ class PiSdkSessionAdapter implements AgentSdkSession {
     const reload = this.session.reload;
     if (!reload) throw new Error("Pi SDK session does not support reload");
     await reload.call(this.session);
+  }
+
+  async newSession(): Promise<JsonObject> {
+    await this.session.waitForIdle();
+    return await this.runtime.newSession();
+  }
+
+  async resumeSession(sessionPath?: string): Promise<JsonObject> {
+    await this.session.waitForIdle();
+    let selectedPath = sessionPath;
+    if (!selectedPath) {
+      const current = this.sessionManager;
+      const sessions = current.usesDefaultSessionDir()
+        ? await this.sdk.SessionManager.listAll()
+        : await this.sdk.SessionManager.listAll(current.getSessionDir());
+      const choices = new Map(sessions.map((info) => [sessionChoice(info), info.path]));
+      if (choices.size === 0) throw new Error("No saved Pi sessions found");
+      const selected = await this.authUi.select?.("Resume session", [...choices.keys()]);
+      if (!selected) return { cancelled: true };
+      selectedPath = choices.get(selected);
+      if (!selectedPath) return { cancelled: true };
+    }
+    return await this.runtime.switchSession(selectedPath);
+  }
+
+  async forkSession(entryId?: string): Promise<JsonObject> {
+    await this.session.waitForIdle();
+    let selectedId = entryId;
+    if (!selectedId) {
+      const choices = new Map(this.session.getUserMessagesForForking().map((message) => [
+        `${oneLine(message.text).slice(0, 100) || "Empty message"} · ${message.entryId.slice(0, 8)}`,
+        message.entryId,
+      ]));
+      if (choices.size === 0) throw new Error("No user messages to fork from");
+      const selected = await this.authUi.select?.("Fork from message", [...choices.keys()]);
+      if (!selected) return { cancelled: true };
+      selectedId = choices.get(selected);
+      if (!selectedId) return { cancelled: true };
+    }
+    return await this.runtime.fork(selectedId);
+  }
+
+  async cloneSession(): Promise<JsonObject> {
+    await this.session.waitForIdle();
+    const leafId = this.sessionManager.getLeafId();
+    if (!leafId) throw new Error("Nothing to clone yet");
+    return await this.runtime.fork(leafId, { position: "at" });
+  }
+
+  async importSession(inputPath: string): Promise<JsonObject> {
+    await this.session.waitForIdle();
+    const confirmed = await this.authUi.confirm?.(
+      "Import session",
+      `Replace the current session with ${inputPath}?`,
+    );
+    if (confirmed !== true) return { cancelled: true };
+    return await this.runtime.importFromJsonl(inputPath);
+  }
+
+  async executeBash(command: string, excludeFromContext: boolean): Promise<JsonObject> {
+    const id = `starling-bash-${++this.bashSequence}`;
+    const eventResult = await this.session.extensionRunner.emitUserBash({
+      type: "user_bash",
+      command,
+      excludeFromContext,
+      cwd: this.sessionManager.getCwd(),
+    });
+    this.bindings.emitEvent({
+      type: "starling_bash_started",
+      id,
+      command,
+      excludeFromContext,
+    });
+    try {
+      if (eventResult?.result) {
+        this.session.recordBashResult(command, eventResult.result, { excludeFromContext });
+        this.bindings.emitEvent({ type: "starling_bash_completed", id, result: eventResult.result });
+        return eventResult.result as unknown as JsonObject;
+      }
+      let output = "";
+      const result = await this.session.executeBash(
+        command,
+        (chunk) => {
+          output += chunk;
+          this.bindings.emitEvent({ type: "starling_bash_updated", id, output });
+        },
+        { excludeFromContext, id, operations: eventResult?.operations },
+      );
+      this.bindings.emitEvent({ type: "starling_bash_completed", id, result });
+      return result as unknown as JsonObject;
+    } catch (error) {
+      this.bindings.emitEvent({
+        type: "starling_bash_completed",
+        id,
+        result: { output: errorMessage(error), cancelled: false },
+        failed: true,
+      });
+      throw error;
+    }
+  }
+
+  abortBash(): void {
+    this.session.abortBash();
+  }
+
+  async exportSession(outputPath?: string): Promise<JsonObject> {
+    if (outputPath?.endsWith(".jsonl")) {
+      return { path: this.session.exportToJsonl(outputPath), format: "jsonl" };
+    }
+    return { path: await this.session.exportToHtml(outputPath), format: "html" };
+  }
+
+  async copyLastAssistantMessage(): Promise<JsonObject> {
+    const text = this.session.getLastAssistantText();
+    if (!text) throw new Error("No agent messages to copy yet");
+    await this.sdk.copyToClipboard(text);
+    return { copied: true };
+  }
+
+  async configureSettings(): Promise<JsonObject> {
+    const settings = this.settingsManager;
+    const choices: SettingChoice[] = [
+      booleanSetting("Auto-compact", () => this.session.autoCompactionEnabled, (value) => {
+        this.session.setAutoCompactionEnabled(value);
+      }),
+      booleanSetting("Auto-retry", () => settings.getRetryEnabled(), (value) => {
+        this.session.setAutoRetryEnabled(value);
+      }),
+      booleanSetting("Show images", () => settings.getShowImages(), (value) => {
+        settings.setShowImages(value);
+      }),
+      choiceSetting("Image width", () => String(settings.getImageWidthCells()), ["60", "80", "120"], (value) => {
+        settings.setImageWidthCells(Number(value));
+      }),
+      booleanSetting("Auto-resize images", () => settings.getImageAutoResize(), (value) => {
+        settings.setImageAutoResize(value);
+      }),
+      booleanSetting("Block images", () => settings.getBlockImages(), (value) => {
+        settings.setBlockImages(value);
+      }),
+      booleanSetting("Skill commands", () => settings.getEnableSkillCommands(), (value) => {
+        settings.setEnableSkillCommands(value);
+      }),
+      choiceSetting("Steering mode", () => this.session.steeringMode, ["one-at-a-time", "all"], (value) => {
+        this.session.setSteeringMode(value as "one-at-a-time" | "all");
+      }),
+      choiceSetting("Follow-up mode", () => this.session.followUpMode, ["one-at-a-time", "all"], (value) => {
+        this.session.setFollowUpMode(value as "one-at-a-time" | "all");
+      }),
+      choiceSetting("Transport", () => settings.getTransport(), ["sse", "websocket", "websocket-cached", "auto"], (value) => {
+        settings.setTransport(value as PiTransport);
+      }),
+      choiceSetting("HTTP idle timeout", () => String(settings.getHttpIdleTimeoutMs()), ["0", "30000", "60000", "300000", "600000"], (value) => {
+        settings.setHttpIdleTimeoutMs(Number(value));
+      }),
+      choiceSetting("Thinking level", () => this.session.thinkingLevel, this.session.getAvailableThinkingLevels(), (value) => {
+        this.session.setThinkingLevel(value as PiThinkingLevel);
+      }),
+      booleanSetting("Hide thinking", () => settings.getHideThinkingBlock(), (value) => {
+        settings.setHideThinkingBlock(value);
+      }),
+      booleanSetting("Cache miss notices", () => settings.getShowCacheMissNotices(), (value) => {
+        settings.setShowCacheMissNotices(value);
+      }),
+      booleanSetting("Collapse changelog", () => settings.getCollapseChangelog(), (value) => {
+        settings.setCollapseChangelog(value);
+      }),
+      booleanSetting("Quiet startup", () => settings.getQuietStartup(), (value) => {
+        settings.setQuietStartup(value);
+      }),
+      booleanSetting("Install telemetry", () => settings.getEnableInstallTelemetry(), (value) => {
+        settings.setEnableInstallTelemetry(value);
+      }),
+      choiceSetting("Default project trust", () => settings.getDefaultProjectTrust(), ["ask", "always", "never"], (value) => {
+        settings.setDefaultProjectTrust(value as "ask" | "always" | "never");
+      }),
+      choiceSetting("Double-escape action", () => settings.getDoubleEscapeAction(), ["tree", "fork", "none"], (value) => {
+        settings.setDoubleEscapeAction(value as "tree" | "fork" | "none");
+      }),
+      choiceSetting("Tree filter mode", () => settings.getTreeFilterMode(), ["default", "no-tools", "user-only", "labeled-only", "all"], (value) => {
+        settings.setTreeFilterMode(value as "default" | "no-tools" | "user-only" | "labeled-only" | "all");
+      }),
+      booleanSetting("Show hardware cursor", () => settings.getShowHardwareCursor(), (value) => {
+        settings.setShowHardwareCursor(value);
+      }),
+      choiceSetting("Editor padding", () => String(settings.getEditorPaddingX()), ["0", "1", "2", "3"], (value) => {
+        settings.setEditorPaddingX(Number(value));
+      }),
+      choiceSetting("Output padding", () => String(settings.getOutputPad()), ["0", "1"], (value) => {
+        settings.setOutputPad(value === "0" ? 0 : 1);
+      }),
+      choiceSetting("Autocomplete max items", () => String(settings.getAutocompleteMaxVisible()), ["3", "5", "7", "10", "15", "20"], (value) => {
+        settings.setAutocompleteMaxVisible(Number(value));
+      }),
+      booleanSetting("Clear on shrink", () => settings.getClearOnShrink(), (value) => {
+        settings.setClearOnShrink(value);
+      }),
+      booleanSetting("Terminal progress", () => settings.getShowTerminalProgress(), (value) => {
+        settings.setShowTerminalProgress(value);
+      }),
+      booleanSetting("Anthropic extra-usage warning", () => settings.getWarnings().anthropicExtraUsage !== false, (value) => {
+        settings.setWarnings({ ...settings.getWarnings(), anthropicExtraUsage: value });
+      }),
+    ];
+    const select = this.authUi.select;
+    if (!select) throw new Error("Starling cannot open the Pi settings menu");
+    let changed = 0;
+    while (true) {
+      const labels = choices.map((choice) => `${choice.label} · ${choice.current()}`);
+      const selected = await select("Pi settings", ["Done", ...labels]);
+      if (!selected || selected === "Done") {
+        await settings.flush();
+        return {
+          cancelled: changed === 0,
+          message: changed === 0 ? "Settings unchanged" : `Updated ${changed} Pi setting${changed === 1 ? "" : "s"}`,
+        };
+      }
+      const choice = choices[labels.indexOf(selected)];
+      if (!choice) continue;
+      const value = await select(choice.label, [...choice.values]);
+      if (value === undefined) continue;
+      choice.apply(value);
+      changed += 1;
+    }
+  }
+
+  async configureScopedModels(): Promise<JsonObject> {
+    await this.modelRuntime.refresh();
+    const models = [...await this.modelRuntime.getAvailable()];
+    if (models.length === 0) throw new Error("No configured models found");
+    const allIds = models.map((model) => `${model.provider}/${model.id}`);
+    let enabled: string[] | null;
+    if (this.session.scopedModels.length > 0) {
+      enabled = this.session.scopedModels.map(({ model }) => `${model.provider}/${model.id}`);
+    } else {
+      const patterns = this.settingsManager.getEnabledModels();
+      enabled = patterns?.length
+        ? (await this.sdk.resolveModelScopeWithDiagnostics(patterns, this.modelRuntime)).scopedModels
+          .map(({ model }) => `${model.provider}/${model.id}`)
+        : null;
+    }
+    const select = this.authUi.select;
+    if (!select) throw new Error("Starling cannot open the scoped-model menu");
+
+    while (true) {
+      const labels = models.map((model) => {
+        const id = `${model.provider}/${model.id}`;
+        return `${enabled === null || enabled.includes(id) ? "✓" : "○"} ${id}`;
+      });
+      const selected = await select("Models used by model cycling", [
+        "Save and close",
+        "Enable all",
+        "Clear all",
+        ...labels,
+      ]);
+      if (!selected) return { cancelled: true, message: "Scoped-model changes remain session-only" };
+      if (selected === "Save and close") {
+        const persisted = enabled === null || enabled.length === allIds.length ? undefined : enabled;
+        this.settingsManager.setEnabledModels(persisted ? [...persisted] : undefined);
+        await this.settingsManager.flush();
+        return { cancelled: false, message: "Model-cycle selection saved to Pi settings" };
+      }
+      if (selected === "Enable all") enabled = null;
+      else if (selected === "Clear all") enabled = [];
+      else {
+        const id = allIds[labels.indexOf(selected)];
+        if (!id) continue;
+        if (enabled === null) enabled = [id];
+        else enabled = enabled.includes(id)
+          ? enabled.filter((candidate) => candidate !== id)
+          : [...enabled, id];
+      }
+      const scoped = enabled && enabled.length > 0 && enabled.length < models.length
+        ? enabled.flatMap((id) => {
+          const model = models.find((candidate) => `${candidate.provider}/${candidate.id}` === id);
+          return model ? [{ model }] : [];
+        })
+        : [];
+      this.session.setScopedModels(scoped);
+    }
+  }
+
+  async shareSession(): Promise<JsonObject> {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "starling-share-"));
+    const outputPath = path.join(directory, "session.html");
+    try {
+      await this.session.exportToHtml(outputPath);
+      const result = await runGh(["gist", "create", "--public=false", outputPath]);
+      if (result.code !== 0) {
+        throw new Error(result.stderr.trim() || "GitHub CLI could not create the gist");
+      }
+      const gistUrl = safeHttpUrl(result.stdout.trim(), "GitHub CLI returned an invalid gist URL");
+      const gistId = gistUrl.pathname.split("/").filter(Boolean).at(-1);
+      if (!gistId || !/^[A-Za-z0-9]+$/.test(gistId)) {
+        throw new Error("GitHub CLI returned an invalid gist ID");
+      }
+      const preview = safeHttpUrl(
+        this.environment.PI_SHARE_VIEWER_URL ?? "https://pi.dev/session/",
+        "PI_SHARE_VIEWER_URL must be an HTTP(S) URL",
+      );
+      preview.hash = gistId;
+      return {
+        gistUrl: gistUrl.toString(),
+        shareUrl: preview.toString(),
+        message: `Share URL: ${preview.toString()}\nGist: ${gistUrl.toString()}`,
+      };
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  async getChangelog(): Promise<JsonObject> {
+    const bytes = await readFile(path.join(this.sdk.getPackageDir(), "CHANGELOG.md"));
+    const limit = 64 * 1024;
+    const truncated = bytes.length > limit;
+    return {
+      message: `${bytes.subarray(0, limit).toString("utf8")}${truncated ? "\n\n… changelog truncated by Starling" : ""}`,
+      truncated,
+    };
+  }
+
+  async configureProjectTrust(): Promise<JsonObject> {
+    const select = this.authUi.select;
+    if (!select) throw new Error("Starling cannot open the project-trust menu");
+    const cwd = this.sessionManager.getCwd();
+    const trustStore = new this.sdk.ProjectTrustStore(this.runtime.services.agentDir);
+    const saved = trustStore.get(cwd);
+    const selected = await select(
+      `Project trust · ${saved === null ? "not saved" : saved ? "trusted" : "untrusted"}`,
+      ["Trust this folder", "Do not trust this folder", "Forget saved decision"],
+    );
+    if (!selected) return { cancelled: true, message: "Project trust unchanged" };
+    const decision = selected === "Trust this folder"
+      ? true
+      : selected === "Do not trust this folder" ? false : null;
+    trustStore.set(cwd, decision);
+    return {
+      cancelled: false,
+      message: decision === null
+        ? "Forgot the saved project trust decision. Restart Starling for this to take effect."
+        : `Saved project as ${decision ? "trusted" : "untrusted"}. Restart Starling for this to take effect.`,
+    };
+  }
+
+  async cycleModel(direction: "forward" | "backward"): Promise<JsonObject> {
+    const result = await this.session.cycleModel(direction);
+    return result
+      ? {
+        model: result.model as unknown as JsonObject,
+        thinkingLevel: result.thinkingLevel,
+        isScoped: result.isScoped,
+      }
+      : { unchanged: true };
+  }
+
+  async cycleThinkingLevel(): Promise<JsonObject> {
+    const thinkingLevel = this.session.cycleThinkingLevel();
+    return thinkingLevel ? { thinkingLevel } : { unchanged: true };
+  }
+
+  clearQueue(): JsonObject {
+    return this.session.clearQueue();
+  }
+
+  async setThinkingVisible(visible: boolean): Promise<JsonObject> {
+    this.settingsManager.setHideThinkingBlock(!visible);
+    await this.settingsManager.flush();
+    return { visible };
   }
 
   shutdown(): Promise<void> {
@@ -807,17 +1044,7 @@ class PiSdkSessionAdapter implements AgentSdkSession {
       }
     }
     try {
-      await this.session.extensionRunner?.emit({ type: "session_shutdown", reason: "quit" });
-    } catch (error) {
-      errors.push(error);
-    }
-    try {
-      this.unsubscribe();
-    } catch (error) {
-      errors.push(error);
-    }
-    try {
-      this.session.dispose();
+      await this.runtime.dispose();
     } catch (error) {
       errors.push(error);
     }
@@ -835,6 +1062,82 @@ class PiSdkSessionAdapter implements AgentSdkSession {
   }
 }
 
+interface SettingChoice {
+  label: string;
+  current(): string;
+  values: readonly string[];
+  apply(value: string): void;
+}
+
+function choiceSetting(
+  label: string,
+  current: () => string,
+  values: readonly string[],
+  apply: (value: string) => void,
+): SettingChoice {
+  return { label, current, values, apply };
+}
+
+function booleanSetting(
+  label: string,
+  current: () => boolean,
+  apply: (value: boolean) => void,
+): SettingChoice {
+  return choiceSetting(label, () => String(current()), ["true", "false"], (value) => {
+    apply(value === "true");
+  });
+}
+
+function runGh(args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("gh", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout: Buffer = Buffer.alloc(0);
+    let stderr: Buffer = Buffer.alloc(0);
+    let settled = false;
+    const finish = (result: { code: number | null; stdout: string; stderr: string }): void => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout = appendBytes(stdout, chunk, 64 * 1024);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr = appendBytes(stderr, chunk, 64 * 1024);
+    });
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(
+        (error as NodeJS.ErrnoException).code === "ENOENT"
+          ? "GitHub CLI (gh) is not installed"
+          : `GitHub CLI failed: ${error.message}`,
+      ));
+    });
+    child.once("close", (code) => finish({
+      code,
+      stdout: stdout.toString("utf8"),
+      stderr: stderr.toString("utf8"),
+    }));
+  });
+}
+
+function appendBytes(current: Buffer, chunk: Buffer, limit: number): Buffer {
+  const remaining = limit - current.length;
+  return remaining <= 0 ? current : Buffer.concat([current, chunk.subarray(0, remaining)]);
+}
+
+function safeHttpUrl(value: string, message: string): URL {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(message);
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error(message);
+  return url;
+}
+
 function isCompactionCancellation(error: unknown): boolean {
   return error instanceof Error
     && (error.name === "AbortError" || error.message === "Compaction cancelled");
@@ -845,8 +1148,17 @@ function isTreeNavigationCancellation(error: unknown): boolean {
     && (error.name === "AbortError" || /branch summarization cancelled/i.test(error.message));
 }
 
+function sessionChoice(info: SessionInfo): string {
+  const title = info.name?.trim() || info.firstMessage.trim() || "Untitled session";
+  return `${title} · ${info.id.slice(0, 8)} · ${info.cwd || "unknown cwd"}`;
+}
+
+function oneLine(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
 function authProviderRecord(
-  provider: AuthProviderLike,
+  provider: AuthProviderSummary,
   authType: AuthProviderType,
   status: AuthStatusLike,
   stored: boolean,
@@ -952,42 +1264,14 @@ function isAbortError(error: unknown): boolean {
 }
 
 const STARLING_PERMISSION_TIMEOUT_MS = 30_000;
-
-// Pi-style risk-based permission gate: only intercept genuinely destructive
-// operations, auto-allow everything else. Mirrors pi's official
-// examples/extensions/permission-gate.ts and protected-paths.ts — NOT a
-// blanket "confirm every tool" allowlist.
-// ponytail: whole-command regex scan — catches nested invocations like
-// `bash -c "rm -rf x"`, but false-positives on `echo rm -rf`. Mirrors pi's
-// official permission-gate heuristic; over-prompting is the safe side.
-const STARLING_DANGEROUS_BASH_PATTERNS = [
-  /\brm\b\s+(-[a-z]*r|--recursive)/i, // rm -r / rm -rf / rm --recursive
-  /\brm\b\s+(-[a-z]*f|--force)\b/i, // rm -f / rm -rf
-  /\bsudo\b/i,
-  /\b(chmod|chown)\b[^|\n]*\b777\b/i,
-  /\bgit\b\s+push\b.*--force(?!-)/i, // --force but not --force-with-lease
-  /\bdd\b[^|\n]*\bof=/i,
-  /\bmkfs\b/i,
-  /\b(shutdown|reboot|halt|poweroff)\b/i,
-];
-
-const STARLING_PROTECTED_WRITE_PATHS = [".env", ".git/", "node_modules/"];
-
-function isDangerousBash(command: unknown): boolean {
-  return typeof command === "string"
-    && STARLING_DANGEROUS_BASH_PATTERNS.some((p) => p.test(command));
-}
-
-function isProtectedWritePath(target: unknown): boolean {
-  return typeof target === "string"
-    && STARLING_PROTECTED_WRITE_PATHS.some((p) => target.includes(p));
-}
+const STARLING_AUTO_ALLOWED_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const STARLING_TOOL_INPUT_LIMIT = 4_000;
 
 /** Starling guards installed through Pi's official inline extension factory. */
-function createStarlingManagedExtension(): ManagedExtensionFactory {
+function createStarlingManagedExtension(): ExtensionFactory {
   return (api) => {
-    const blockSessionChange = (_event: unknown, context: ManagedExtensionContextLike) => {
-      context.ui?.notify?.(
+    const blockSessionChange = (_event: unknown, context: ExtensionContext) => {
+      context.ui.notify(
         "Starling has locked this transcript. Exit the workspace before opening or forking another session.",
         "warning",
       );
@@ -995,43 +1279,38 @@ function createStarlingManagedExtension(): ManagedExtensionFactory {
     };
     api.on("session_before_switch", blockSessionChange);
     api.on("session_before_fork", blockSessionChange);
-    api.on("tool_call", async (event: unknown, context: ManagedExtensionContextLike) => {
-      const record = isJsonObject(event) ? event : {};
-      const toolName = typeof record.toolName === "string"
-        ? record.toolName.trim().toLowerCase()
-        : "";
-      const input = isJsonObject(record.input) ? record.input : {};
+    api.on("tool_call", async (event, context) => {
+      const toolName = event.toolName.trim().toLowerCase();
+      if (STARLING_AUTO_ALLOWED_TOOLS.has(toolName)) return undefined;
 
-      // bash: confirm only destructive commands (pi permission-gate.ts style)
-      if (toolName === "bash" && isDangerousBash(input.command)) {
-        const command = String(input.command ?? "");
-        let approved = false;
-        try {
-          approved = await context.ui?.confirm?.(
-            `⚠️ Dangerous command:\n\n  ${command}\n\nAllow?`,
-            command,
-            { timeout: STARLING_PERMISSION_TIMEOUT_MS },
-          ) === true;
-        } catch {
-          approved = false;
-        }
-        if (approved) return undefined;
-        return {
-          block: true,
-          reason: `Starling blocked destructive bash: ${command}`,
-        };
+      let approved = false;
+      try {
+        approved = await context.ui.confirm(
+          `Allow Pi tool: ${toolName || "unknown"}?`,
+          printableToolInput(event.input),
+          { timeout: STARLING_PERMISSION_TIMEOUT_MS },
+        ) === true;
+      } catch {
+        approved = false;
       }
-
-      // write/edit: block protected paths outright (pi protected-paths.ts style)
-      if ((toolName === "write" || toolName === "edit") && isProtectedWritePath(input.path)) {
-        const target = String(input.path ?? "");
-        context.ui?.notify?.(`Blocked write to protected path: ${target}`, "warning");
-        return { block: true, reason: `Path "${target}" is protected by Starling` };
-      }
-
-      return undefined;
+      if (approved) return undefined;
+      return {
+        block: true,
+        reason: `Starling denied Pi tool '${toolName || "unknown"}' because approval was not granted.`,
+      };
     });
   };
+}
+
+function printableToolInput(value: unknown): string {
+  let text: string;
+  try {
+    text = JSON.stringify(value ?? {}, null, 2);
+  } catch {
+    text = "<unserializable tool input>";
+  }
+  if (text.length <= STARLING_TOOL_INPUT_LIMIT) return text;
+  return `${text.slice(0, STARLING_TOOL_INPUT_LIMIT)}\n… <tool input truncated by Starling>`;
 }
 
 async function resolveRequestedModel(
@@ -1039,7 +1318,7 @@ async function resolveRequestedModel(
   settingsManager: SettingsManagerLike,
   provider: string | undefined,
   modelId: string | undefined,
-): Promise<unknown> {
+): Promise<PiModel | undefined> {
   if (!provider && !modelId) return undefined;
 
   const effectiveProvider = provider ?? settingsManager.getDefaultProvider?.();
@@ -1050,7 +1329,6 @@ async function resolveRequestedModel(
 
   const available = await modelRuntime.getAvailable();
   const match = available.find((candidate) => {
-    if (!isJsonObject(candidate)) return false;
     if (provider && candidate.provider !== provider) return false;
     if (modelId && candidate.id !== modelId) return false;
     return true;
@@ -1061,104 +1339,8 @@ async function resolveRequestedModel(
   throw new Error(`Model not found: ${requested}`);
 }
 
-function modelMatches(candidate: unknown, provider: string, modelId: string): boolean {
-  return isJsonObject(candidate) && candidate.provider === provider && candidate.id === modelId;
-}
-
-const CONFIGURABLE_MODEL_ROLES = new Set([
-  "default",
-  "smol",
-  "slow",
-  "vision",
-  "plan",
-  "designer",
-  "commit",
-  "tiny",
-  "task",
-  "advisor",
-]);
-
-async function readPiSettings(
-  settingsPath: string,
-  storage?: SettingsStorageLike,
-): Promise<JsonObject> {
-  if (storage) {
-    let contents: string | undefined;
-    storage.withLock("global", (current) => {
-      contents = current;
-      return undefined;
-    });
-    return parsePiSettings(contents);
-  }
-  let contents: string;
-  try {
-    contents = await fs.readFile(settingsPath, "utf8");
-  } catch (error) {
-    if (isNodeError(error) && error.code === "ENOENT") return {};
-    throw error;
-  }
-  return parsePiSettings(contents);
-}
-
-function parsePiSettings(contents: string | undefined): JsonObject {
-  if (!contents) return {};
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(contents);
-  } catch (error) {
-    throw new Error(`Pi settings are not valid JSON: ${errorMessage(error)}`);
-  }
-  if (!isJsonObject(parsed)) throw new Error("Pi settings must contain a JSON object");
-  return parsed;
-}
-
-function modelRolesFromSettings(settings: JsonObject): JsonObject {
-  if (!isJsonObject(settings.modelRoles)) return {};
-  const roles: JsonObject = {};
-  for (const [role, selector] of Object.entries(settings.modelRoles)) {
-    if (typeof selector === "string" && selector.trim()) roles[role] = selector.trim();
-  }
-  return roles;
-}
-
-async function writePiModelRole(
-  settingsPath: string,
-  role: string,
-  selector: string,
-  storage?: SettingsStorageLike,
-): Promise<void> {
-  if (storage) {
-    storage.withLock("global", (current) => {
-      const settings = parsePiSettings(current);
-      const roles = modelRolesFromSettings(settings);
-      roles[role] = selector;
-      return JSON.stringify({ ...settings, modelRoles: roles }, null, 2);
-    });
-    return;
-  }
-  const settings = await readPiSettings(settingsPath);
-  const roles = modelRolesFromSettings(settings);
-  roles[role] = selector;
-  const next = { ...settings, modelRoles: roles };
-  const directory = path.dirname(settingsPath);
-  const temporary = path.join(directory, `.settings.${process.pid}.${randomUUID()}.tmp`);
-  await fs.mkdir(directory, { recursive: true });
-  try {
-    await fs.writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-    await fs.rename(temporary, settingsPath);
-  } finally {
-    await fs.unlink(temporary).catch((error) => {
-      if (!isNodeError(error) || error.code !== "ENOENT") throw error;
-    });
-  }
-}
-
-function stringSetting(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error;
+function modelMatches(candidate: PiModel, provider: string, modelId: string): boolean {
+  return candidate.provider === provider && candidate.id === modelId;
 }
 
 function requirePiSdk(value: unknown): PiSdkModule {
@@ -1171,6 +1353,10 @@ function requirePiSdk(value: unknown): PiSdkModule {
     "hasTrustRequiringProjectResources",
     "DefaultResourceLoader",
     "createAgentSession",
+    "createAgentSessionRuntime",
+    "copyToClipboard",
+    "resolveModelScopeWithDiagnostics",
+    "getPackageDir",
   ];
   const missing = required.filter((name) => value[name] === undefined);
   if (missing.length > 0) {
@@ -1180,6 +1366,20 @@ function requirePiSdk(value: unknown): PiSdkModule {
 }
 
 type ProjectTrustPolicy = "always" | "never" | "ask";
+
+function enforceIgnoreScriptsEnv(environment: NodeJS.ProcessEnv): void {
+  const names = [
+    "NPM_CONFIG_IGNORE_SCRIPTS",
+    "npm_config_ignore_scripts",
+    "PNPM_CONFIG_IGNORE_SCRIPTS",
+  ];
+  for (const target of environment === process.env ? [environment] : [environment, process.env]) {
+    for (const name of names) {
+      const value = target[name]?.trim().toLowerCase();
+      if (value !== "true" && value !== "1" && value !== "yes") target[name] = "true";
+    }
+  }
+}
 
 async function resolveProjectTrusted(
   sdk: PiSdkModule,
@@ -1212,7 +1412,7 @@ async function resolveProjectTrusted(
   return trusted;
 }
 
-const VALID_THINKING_LEVELS = new Set([
+const VALID_THINKING_LEVELS = new Set<PiThinkingLevel>([
   "off",
   "minimal",
   "low",
@@ -1222,19 +1422,22 @@ const VALID_THINKING_LEVELS = new Set([
   "max",
 ]);
 
-const VALID_CONFIGURED_THINKING_LEVELS = new Set(["inherit", ...VALID_THINKING_LEVELS]);
+type ConfiguredThinkingLevel = PiThinkingLevel | "inherit";
+const VALID_CONFIGURED_THINKING_LEVELS = new Set<ConfiguredThinkingLevel>([
+  "inherit",
+  ...VALID_THINKING_LEVELS,
+]);
 
-function validateConfiguredThinkingLevel(level: string): string {
-  if (VALID_CONFIGURED_THINKING_LEVELS.has(level)) return level;
+function validateConfiguredThinkingLevel(level: string): ConfiguredThinkingLevel {
+  if (VALID_CONFIGURED_THINKING_LEVELS.has(level as ConfiguredThinkingLevel)) {
+    return level as ConfiguredThinkingLevel;
+  }
   throw new Error(
     `Invalid configured thinking level "${level}". Valid values: ${[...VALID_CONFIGURED_THINKING_LEVELS].join(", ")}`,
   );
 }
 
-function supportedThinkingLevels(model: unknown): string[] {
-  if (!isJsonObject(model) || typeof model.reasoning !== "boolean") {
-    return [...VALID_THINKING_LEVELS];
-  }
+function supportedThinkingLevels(model: PiModel): PiThinkingLevel[] {
   if (!model.reasoning) return ["off"];
   const map = isJsonObject(model.thinkingLevelMap) ? model.thinkingLevelMap : {};
   return [...VALID_THINKING_LEVELS].filter((level) => {
@@ -1244,8 +1447,9 @@ function supportedThinkingLevels(model: unknown): string[] {
   });
 }
 
-function validateThinkingLevel(level: string | undefined): string | undefined {
-  if (level === undefined || VALID_THINKING_LEVELS.has(level)) return level;
+function validateThinkingLevel(level: string | undefined): PiThinkingLevel | undefined {
+  if (level === undefined) return undefined;
+  if (VALID_THINKING_LEVELS.has(level as PiThinkingLevel)) return level as PiThinkingLevel;
   throw new Error(
     `Invalid thinking level "${level}". Valid values: ${[...VALID_THINKING_LEVELS].join(", ")}`,
   );

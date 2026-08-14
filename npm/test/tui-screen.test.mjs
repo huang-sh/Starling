@@ -82,6 +82,21 @@ test("an unchanged normal window is not repainted, but force overrides the skip"
   assert.equal(writes.length, 1);
 });
 
+test("width changes clear terminal reflow before repainting", () => {
+  const { screen, writes, out } = makeScreen(false);
+  const wide = ["FRAME-A".padEnd(99, "·"), "FRAME-B".padEnd(99, "·")];
+  screen.paint({ mode: "normal", committed: [], live: wide }, { width: 100, height: 20 });
+
+  writes.length = 0;
+  const narrow = ["FRAME-A".padEnd(71, "·"), "FRAME-B".padEnd(71, "·")];
+  screen.paint(
+    { mode: "normal", committed: [], live: narrow },
+    { width: 72, height: 20, force: true },
+  );
+
+  assert.match(out(), /^\x1b\[2J\x1b\[H\x1b\[3J/);
+});
+
 test("reset clears the live window, restores modes, and leaves scrollback history intact", () => {
   const { screen, writes, out } = makeScreen(false);
   screen.paint({ mode: "normal", committed: ["old"], live: ["editor"] }, { height: 10 });

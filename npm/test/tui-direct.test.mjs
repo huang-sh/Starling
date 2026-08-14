@@ -79,7 +79,6 @@ test("runs the Starling TUI against an in-process ChatSession", async () => {
       extensions: [],
       noExtensions: false,
       surface: "tui",
-      starlingManaged: true,
     });
     assert.equal(runOptions.cwd, process.cwd());
     assert.equal(runOptions.pid, process.pid);
@@ -105,10 +104,10 @@ test("runs the Starling TUI against an in-process ChatSession", async () => {
     output.emit("resize");
     await until(() => output.chunks.length > writesBeforeResize);
     const resizePaint = output.chunks.slice(writesBeforeResize).join("");
-    assert.match(resizePaint, /\r\u001b\[\d+A/);
-    assert.doesNotMatch(resizePaint, /\u001b\[\?1049[hl]|\u001b\[2J|\u001b\[H/);
+    assert.match(resizePaint, /^\u001b\[2J\u001b\[H\u001b\[3J/);
+    assert.doesNotMatch(resizePaint, /\u001b\[\?1049[hl]/);
 
-    input.write("\u0004");
+    input.destroy();
     assert.equal(await running, 0);
     assert.equal(closeCalls, 1);
     assert.deepEqual(runFinishes, [{ exitCode: 0 }]);
@@ -209,6 +208,242 @@ test("discovers, completes, and invokes Pi SDK slash commands in the Starling TU
   }
 });
 
+test("/new replaces the Pi session through the real Starling command surface", async () => {
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  const originalInput = Object.getOwnPropertyDescriptor(process, "stdin");
+  const originalOutput = Object.getOwnPropertyDescriptor(process, "stdout");
+  const requests = [];
+  const updates = [];
+  let currentSessionId = "old-session";
+  let messages = [{ role: "assistant", content: "old transcript" }];
+  let launch;
+
+  Object.defineProperty(process, "stdin", { configurable: true, value: input });
+  Object.defineProperty(process, "stdout", { configurable: true, value: output });
+
+  try {
+    const running = runStarlingTui({
+      cwd: process.cwd(),
+      env: { STARLING_TUI_SYNC_OUTPUT: "0" },
+      async createRun() {
+        return {
+          runId: "new-session-run",
+          async updateSession(patch) {
+            updates.push(patch);
+          },
+          async finish() {},
+        };
+      },
+      createSession(options) {
+        launch = options.launch;
+        return {
+          async request(request) {
+            requests.push(request);
+            if (request.type === "get_state") {
+              return {
+                sessionId: currentSessionId,
+                model: { provider: "fake", id: "model-a" },
+              };
+            }
+            if (request.type === "get_messages") return { messages };
+            if (request.type === "get_commands") return { commands: [] };
+            if (request.type === "new_session") {
+              currentSessionId = "new-session";
+              messages = [];
+              return { cancelled: false };
+            }
+            return undefined;
+          },
+          async close() {},
+        };
+      },
+    });
+
+    await until(() => output.text().includes("old transcript"));
+    input.write("/new\r");
+    await until(() => requests.some(({ type }) => type === "new_session"));
+    await until(() => output.text().includes("New session started"));
+    await until(() => updates.some(({ sessionId }) => sessionId === "new-session"));
+
+    assert.equal(launch.starlingManaged, undefined, "bare Starling must allow Pi runtime replacement");
+    assert.match(output.text(), /new-session/);
+    assert.ok(
+      requests.filter(({ type }) => type === "get_messages").length >= 2,
+      "the replacement transcript must be hydrated through ChatSession",
+    );
+
+    input.write("\u0004");
+    assert.equal(await running, 0);
+  } finally {
+    if (originalInput) Object.defineProperty(process, "stdin", originalInput);
+    if (originalOutput) Object.defineProperty(process, "stdout", originalOutput);
+    input.destroy();
+    output.destroy();
+  }
+});
+
+test("! and !! execute Pi user bash and render command output in Starling", async () => {
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  const originalInput = Object.getOwnPropertyDescriptor(process, "stdin");
+  const originalOutput = Object.getOwnPropertyDescriptor(process, "stdout");
+  const requests = [];
+  let sessionOptions;
+  let sequence = 0;
+
+  Object.defineProperty(process, "stdin", { configurable: true, value: input });
+  Object.defineProperty(process, "stdout", { configurable: true, value: output });
+
+  try {
+    const running = runStarlingTui({
+      cwd: process.cwd(),
+      env: { STARLING_TUI_SYNC_OUTPUT: "0" },
+      async createRun() {
+        return {
+          runId: "bash-run",
+          async updateSession() {},
+          async finish() {},
+        };
+      },
+      createSession(options) {
+        sessionOptions = options;
+        return {
+          async request(request) {
+            requests.push(request);
+            if (request.type === "get_state") {
+              return { sessionId: "bash-session", model: { provider: "fake", id: "model-a" } };
+            }
+            if (request.type === "get_messages") return { messages: [] };
+            if (request.type === "get_commands") return { commands: [] };
+            if (request.type === "bash") {
+              const id = `bash-${++sequence}`;
+              sessionOptions.onRecord({
+                type: "starling_bash_started",
+                id,
+                command: request.command,
+                excludeFromContext: request.excludeFromContext,
+              });
+              sessionOptions.onRecord({ type: "starling_bash_updated", id, output: "fixture shell output" });
+              const result = {
+                output: "fixture shell output",
+                exitCode: 0,
+                cancelled: false,
+                truncated: false,
+              };
+              sessionOptions.onRecord({ type: "starling_bash_completed", id, result });
+              return result;
+            }
+            return undefined;
+          },
+          async close() {},
+        };
+      },
+    });
+
+    await until(() => requests.some(({ type }) => type === "get_commands"));
+    input.write("!pwd\r");
+    await until(() => requests.some((request) =>
+      request.type === "bash"
+      && request.command === "pwd"
+      && request.excludeFromContext === false));
+    await until(() => output.text().includes("fixture shell output"));
+
+    input.write("!!printf hidden\r");
+    await until(() => requests.some((request) =>
+      request.type === "bash"
+      && request.command === "printf hidden"
+      && request.excludeFromContext === true));
+
+    input.write("\u0004");
+    assert.equal(await running, 0);
+  } finally {
+    if (originalInput) Object.defineProperty(process, "stdin", originalInput);
+    if (originalOutput) Object.defineProperty(process, "stdout", originalOutput);
+    input.destroy();
+    output.destroy();
+  }
+});
+
+test("Pi application shortcuts execute through the real Starling TUI key path", async () => {
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  const originalInput = Object.getOwnPropertyDescriptor(process, "stdin");
+  const originalOutput = Object.getOwnPropertyDescriptor(process, "stdout");
+  const requests = [];
+  let model = { provider: "fake", id: "model-a" };
+  let thinkingLevel = "medium";
+
+  Object.defineProperty(process, "stdin", { configurable: true, value: input });
+  Object.defineProperty(process, "stdout", { configurable: true, value: output });
+
+  try {
+    const running = runStarlingTui({
+      cwd: process.cwd(),
+      env: { STARLING_TUI_SYNC_OUTPUT: "0" },
+      async createRun() {
+        return { runId: "pi-keys-run", async updateSession() {}, async finish() {} };
+      },
+      createSession() {
+        return {
+          async request(request) {
+            requests.push(request);
+            if (request.type === "get_state") {
+              return { sessionId: "pi-keys-session", model, thinkingLevel };
+            }
+            if (request.type === "get_messages") return { messages: [] };
+            if (request.type === "get_commands") return { commands: [] };
+            if (request.type === "cycle_thinking_level") {
+              thinkingLevel = "high";
+              return { thinkingLevel };
+            }
+            if (request.type === "cycle_model") {
+              model = { provider: "fake", id: request.direction === "forward" ? "model-b" : "model-a" };
+              return { model, thinkingLevel, isScoped: true };
+            }
+            if (request.type === "copy_last_message") return { copied: true };
+            if (request.type === "clear_queue") {
+              return { steering: ["queued steer"], followUp: ["queued follow-up"] };
+            }
+            if (request.type === "set_thinking_visible") return { visible: request.visible };
+            return undefined;
+          },
+          async close() {},
+        };
+      },
+    });
+
+    await until(() => requests.some(({ type }) => type === "get_commands"));
+    input.write("\u001b[Z");
+    await until(() => requests.some(({ type }) => type === "cycle_thinking_level"));
+    await until(() => output.text().includes("Thinking level: high"));
+
+    input.write("\u0010");
+    await until(() => requests.some(({ type, direction }) => type === "cycle_model" && direction === "forward"));
+    await until(() => output.text().includes("Model: fake/model-b"));
+
+    input.write("\u001b[112;6u");
+    await until(() => requests.some(({ type, direction }) => type === "cycle_model" && direction === "backward"));
+    input.write("\u000f");
+    await until(() => output.text().includes("Tool output:"));
+    input.write("\u0014");
+    await until(() => requests.some(({ type, visible }) => type === "set_thinking_visible" && visible === false));
+    input.write("\u0018");
+    await until(() => requests.some(({ type }) => type === "copy_last_message"));
+
+    input.write("\u001b[1;3A");
+    await until(() => output.text().includes("queued steer") && output.text().includes("queued follow-up"));
+    input.write("\u0015");
+    input.write("\u0004");
+    assert.equal(await running, 0);
+  } finally {
+    if (originalInput) Object.defineProperty(process, "stdin", originalInput);
+    if (originalOutput) Object.defineProperty(process, "stdout", originalOutput);
+    input.destroy();
+    output.destroy();
+  }
+});
+
 test("up arrow in the empty composer does not scroll the entire TUI", async () => {
   const input = new FakeInput();
   const output = new FakeOutput();
@@ -265,7 +500,7 @@ test("up arrow in the empty composer does not scroll the entire TUI", async () =
   }
 });
 
-test("bare /model selects a Pi SDK model and then configures its role", async () => {
+test("bare /model selects a Pi SDK default model and thinking level", async () => {
   const input = new FakeInput();
   const output = new FakeOutput();
   const originalInput = Object.getOwnPropertyDescriptor(process, "stdin");
@@ -304,18 +539,9 @@ test("bare /model selects a Pi SDK model and then configures its role", async ()
                 ],
               };
             }
-            if (request.type === "get_model_config") {
-              return {
-                defaultProvider: activeModel.provider,
-                defaultModel: activeModel.id,
-                modelRoles: { default: `${activeModel.provider}/${activeModel.id}` },
-              };
-            }
             if (request.type === "configure_model") {
-              if (request.role === "default") {
-                activeModel = { provider: request.provider, id: request.modelId };
-              }
-              return { ...activeModel, role: request.role };
+              activeModel = { provider: request.provider, id: request.modelId };
+              return activeModel;
             }
             return undefined;
           },
@@ -332,20 +558,11 @@ test("bare /model selects a Pi SDK model and then configures its role", async ()
     input.write("g55");
     await until(() => output.text().includes("Model Name: GPT-5.5"));
     input.write("\r");
-    await until(() => output.text().includes("Action for: gpt-5.5"));
+    await until(() => output.text().includes("Thinking for: gpt-5.5"));
     assert.equal(
       requests.some((request) => request.type === "configure_model"),
       false,
-      "choosing a model must open the role action menu before changing configuration",
-    );
-    assert.match(output.text(), /Set as DEFAULT \(Default\)/);
-    assert.match(output.text(), /Set as SMOL \(Fast\)/);
-    input.write("\r");
-    await until(() => output.text().includes("Thinking for: gpt-5.5 · DEFAULT"));
-    assert.equal(
-      requests.some((request) => request.type === "configure_model"),
-      false,
-      "choosing a role must open the thinking-level menu before saving",
+      "choosing a model must open the thinking-level menu before changing configuration",
     );
     assert.match(output.text(), /inherit\s+Inherit session default/);
     assert.match(output.text(), /high\s+Deep reasoning/);
@@ -354,9 +571,8 @@ test("bare /model selects a Pi SDK model and then configures its role", async ()
       request.type === "configure_model"
       && request.provider === "openai"
       && request.modelId === "gpt-5.5"
-      && request.role === "default"
       && request.thinkingLevel === "inherit"));
-    await until(() => output.text().includes("DEFAULT model set to openai/gpt-5.5"));
+    await until(() => output.text().includes("Model set to openai/gpt-5.5"));
 
     input.write("\u0004");
     assert.equal(await running, 0);

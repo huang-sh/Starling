@@ -1,5 +1,6 @@
-import { StringDecoder } from "node:string_decoder";
+import { MAX_JSONL_LINE_BYTES, StrictJsonlDecoder, } from "../agent-host/jsonl.js";
 import { isRecord } from "./state.js";
+export { MAX_JSONL_LINE_BYTES, StrictJsonlDecoder };
 const BOUNDED_QUERY_COMMANDS = new Set([
     "get_state",
     "get_messages",
@@ -15,42 +16,11 @@ const BOUNDED_QUERY_COMMANDS = new Set([
 export function rpcTimeoutForCommand(command, boundedTimeoutMs) {
     return BOUNDED_QUERY_COMMANDS.has(command) ? boundedTimeoutMs : undefined;
 }
-/** Strict LF-only JSONL decoder. U+2028/U+2029 remain ordinary JSON characters. */
-export class StrictJsonlDecoder {
-    decoder = new StringDecoder("utf8");
-    buffer = "";
-    push(chunk) {
-        this.buffer += typeof chunk === "string" ? chunk : this.decoder.write(chunk);
-        return this.takeLines();
-    }
-    end() {
-        this.buffer += this.decoder.end();
-        const lines = this.takeLines();
-        if (this.buffer)
-            lines.push(stripCarriageReturn(this.takeBuffer()));
-        return lines;
-    }
-    takeLines() {
-        const lines = [];
-        while (true) {
-            const newline = this.buffer.indexOf("\n");
-            if (newline < 0)
-                return lines;
-            lines.push(stripCarriageReturn(this.buffer.slice(0, newline)));
-            this.buffer = this.buffer.slice(newline + 1);
-        }
-    }
-    takeBuffer() {
-        const value = this.buffer;
-        this.buffer = "";
-        return value;
-    }
-}
 /** Owns request correlation and record framing for one `starling chat` child. */
 export class StarlingRpcClient {
     child;
     options;
-    decoder = new StrictJsonlDecoder();
+    decoder;
     pending = new Map();
     timeoutMs;
     sequence = 0;
@@ -59,6 +29,7 @@ export class StarlingRpcClient {
         this.child = child;
         this.options = options;
         this.timeoutMs = options.requestTimeoutMs ?? 15_000;
+        this.decoder = new StrictJsonlDecoder(options.onProtocolError);
         child.stdout.on("data", (chunk) => {
             for (const line of this.decoder.push(chunk))
                 this.handleLine(line);
@@ -156,9 +127,6 @@ export class StarlingRpcClient {
         }
         this.options.onRecord(raw);
     }
-}
-function stripCarriageReturn(value) {
-    return value.endsWith("\r") ? value.slice(0, -1) : value;
 }
 function asError(value) {
     return value instanceof Error ? value : new Error(String(value));

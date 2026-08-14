@@ -6,10 +6,7 @@ import {
 } from "./auth-picker.js";
 import { filterSlashCommands, type SlashCommandItem } from "./commands.js";
 import {
-  MODEL_CONFIG_ACTIONS,
   modelPickerProviders,
-  modelRoleMatches,
-  modelRoleTags,
   selectedModelPickerModel,
   thinkingOptionsForModel,
   visibleModelPickerModels,
@@ -73,9 +70,10 @@ export function renderStarlingFrame(
   }
 
   const footer = renderFooter(state, width, height, tick);
+  const intro = renderEmptyWorkspace(state, width);
   const transcript = state.timeline.length === 0
-    ? renderEmptyWorkspace(state, width)
-    : renderTranscriptLines(state, width);
+    ? intro
+    : [...intro, { text: "" }, ...renderTranscriptLines(state, width)];
   const bodySource = state.modelPicker || state.treePicker || (state.authPicker && !state.authPicker.working)
     ? []
     : state.timeline.length === 0 && state.activity.length > 0
@@ -140,6 +138,7 @@ function buildTranscriptRecords(state: StarlingTuiState): TranscriptRecord[] {
 }
 
 function renderRecordRange(
+  state: StarlingTuiState,
   records: readonly TranscriptRecord[],
   start: number,
   end: number,
@@ -152,7 +151,13 @@ function renderRecordRange(
     if (record.kind === "activity") {
       lines.push(...renderActivityLines([record.value], width));
     } else {
-      lines.push(...renderTimelineEntry(record.value, width));
+      lines.push(...renderTimelineEntry(
+        record.value,
+        width,
+        state.toolsExpanded,
+        state.thinkingVisible,
+        state.hiddenThinkingLabel,
+      ));
     }
   }
   return lines;
@@ -183,8 +188,12 @@ function renderTranscriptSplit(
     split -= 1;
   }
   return {
-    committed: renderRecordRange(records, 0, split, contentWidth),
-    liveTail: renderRecordRange(records, split, records.length, contentWidth),
+    committed: [
+      ...renderEmptyWorkspace(state, contentWidth),
+      { text: "" },
+      ...renderRecordRange(state, records, 0, split, contentWidth),
+    ],
+    liveTail: renderRecordRange(state, records, split, records.length, contentWidth),
   };
 }
 
@@ -238,7 +247,13 @@ export function renderTimelineLines(state: StarlingTuiState, width: number): Ren
   const lines: RenderLine[] = [];
   for (const entry of state.timeline) {
     if (lines.length > 0) lines.push({ text: "" });
-    lines.push(...renderTimelineEntry(entry, contentWidth));
+    lines.push(...renderTimelineEntry(
+      entry,
+      contentWidth,
+      state.toolsExpanded,
+      state.thinkingVisible,
+      state.hiddenThinkingLabel,
+    ));
   }
   return lines;
 }
@@ -280,7 +295,13 @@ export function renderTranscriptLines(state: StarlingTuiState, width: number): R
       lines.push(...renderActivityLines([record.value], contentWidth));
       continue;
     }
-    lines.push(...renderTimelineEntry(record.value, contentWidth));
+    lines.push(...renderTimelineEntry(
+      record.value,
+      contentWidth,
+      state.toolsExpanded,
+      state.thinkingVisible,
+      state.hiddenThinkingLabel,
+    ));
   }
   return lines;
 }
@@ -776,11 +797,9 @@ function renderModelPicker(
   width: number,
   height: number,
 ): RenderLine[] {
-  const actions = picker.stage === "actions" && picker.actionModel
-    ? renderModelActions(picker, width)
-    : picker.stage === "thinking" && picker.actionModel
-      ? renderModelThinking(picker, width)
-      : [];
+  const actions = picker.stage === "thinking" && picker.actionModel
+    ? renderModelThinking(picker, width)
+    : [];
   const rows: RenderLine[] = [];
   rows.push(...renderModelProviderTabs(picker, width));
 
@@ -813,12 +832,10 @@ function renderModelPicker(
       const absoluteIndex = start + index;
       const marker = absoluteIndex === selected ? "›" : " ";
       const current = model.selector === picker.current ? "  CURRENT" : "";
-      const roles = modelRoleTags(picker, model.selector);
-      const roleTags = roles.length > 0 ? `  ${roles.join(" ")}` : "";
       const reasoning = model.reasoning ? "  reasoning" : "";
       const context = model.contextWindow ? `  ${formatTokenCount(model.contextWindow)} ctx` : "";
       rows.push({
-        text: `${marker} ${model.selector}${current}${roleTags}${reasoning}${context}`,
+        text: `${marker} ${model.selector}${current}${reasoning}${context}`,
         tone: absoluteIndex === selected
           ? "active"
           : model.selector === picker.current ? "success" : "muted",
@@ -847,42 +864,13 @@ function renderModelPicker(
   return rows;
 }
 
-function renderModelActions(picker: ModelPickerState, width: number): RenderLine[] {
-  const model = picker.actionModel!;
-  const rows: RenderLine[] = [
-    { text: "" },
-    { text: "─".repeat(Math.min(18, width)), tone: "muted" },
-    { text: `Action for: ${model.id}`, tone: "assistant" },
-    { text: "" },
-  ];
-  MODEL_CONFIG_ACTIONS.forEach((action, index) => {
-    const marker = index === picker.actionSelected ? "›" : " ";
-    const current = modelRoleMatches(picker.roles[action.role], model.selector) ? "  CURRENT" : "";
-    rows.push({
-      text: `${marker} Set as ${action.tag} (${action.name})${current}`,
-      tone: index === picker.actionSelected ? "active" : current ? "success" : "muted",
-    });
-  });
-  if (picker.error) {
-    rows.push({ text: "" });
-    rows.push({ text: `× ${picker.error}`, tone: "error" });
-  }
-  rows.push({ text: "" });
-  rows.push({
-    text: picker.switching ? "Saving model configuration…" : "Enter: continue  Esc: cancel",
-    tone: picker.switching ? "active" : "muted",
-  });
-  return rows;
-}
-
 function renderModelThinking(picker: ModelPickerState, width: number): RenderLine[] {
   const model = picker.actionModel!;
-  const action = MODEL_CONFIG_ACTIONS[picker.actionSelected];
   const options = thinkingOptionsForModel(model);
   const rows: RenderLine[] = [
     { text: "" },
     { text: "─".repeat(Math.min(18, width)), tone: "muted" },
-    { text: `Thinking for: ${model.id} · ${action?.tag ?? "MODEL"}`, tone: "assistant" },
+    { text: `Thinking for: ${model.id}`, tone: "assistant" },
     { text: "" },
   ];
   options.forEach((option, index) => {
@@ -1032,8 +1020,7 @@ function renderInteraction(
   tick: number,
 ): RenderLine[] {
   const prompt = state.uiPrompt!;
-  const title = prompt.method === "confirm" ? "PERMISSION REQUIRED" : prompt.title;
-  const rows: RenderLine[] = [{ text: boxRule("╭─ ", title, " ╮", width), tone: "active" }];
+  const rows: RenderLine[] = [{ text: boxRule("╭─ ", prompt.title, " ╮", width), tone: "active" }];
   const messageLimit = Math.max(2, Math.min(10, height - 7));
   let emitted = 0;
   for (const logical of (prompt.message || prompt.title).split("\n")) {
@@ -1104,7 +1091,13 @@ function maskEditorValue(value: string, cursor: number | undefined): { value: st
   };
 }
 
-function renderTimelineEntry(entry: TimelineEntry, width: number): RenderLine[] {
+function renderTimelineEntry(
+  entry: TimelineEntry,
+  width: number,
+  toolsExpanded: boolean,
+  thinkingVisible: boolean,
+  hiddenThinkingLabel: string,
+): RenderLine[] {
   if (entry.kind === "user") {
     return wrapTerminalText(entry.text, Math.max(1, width - 4)).map((text) => ({
       text: `  ${text}`,
@@ -1113,11 +1106,14 @@ function renderTimelineEntry(entry: TimelineEntry, width: number): RenderLine[] 
   }
   if (entry.kind === "assistant") {
     const output: RenderLine[] = [];
-    if (entry.thinking) {
+    if (entry.thinking && thinkingVisible) {
       const thinking = wrapTerminalText(entry.thinking, Math.max(1, width - 4));
       for (const text of thinking) output.push({ text: `  ${text}`, tone: "thinking" });
     }
     const body = entry.text || (entry.pending ? "…" : "");
+    if (entry.thinking && !thinkingVisible) {
+      output.push({ text: `  ${hiddenThinkingLabel}`, tone: "thinking" });
+    }
     if (entry.thinking && body) output.push({ text: "" });
     if (body) {
       output.push(...wrapTerminalText(body, Math.max(1, width - 4)).map((text) => ({
@@ -1132,7 +1128,8 @@ function renderTimelineEntry(entry: TimelineEntry, width: number): RenderLine[] 
     const tone: RenderLine["tone"] = entry.toolState === "error"
       ? "toolError"
       : entry.toolState === "done" ? "tool" : "toolActive";
-    const body = wrapTerminalText(entry.text || "Waiting for output…", Math.max(1, width - 6)).slice(0, 6);
+    const wrapped = wrapTerminalText(entry.text || "Waiting for output…", Math.max(1, width - 6));
+    const body = toolsExpanded ? wrapped : wrapped.slice(0, 6);
     return [
       { text: `  ${glyph} ${entry.toolName || "tool"}`, tone },
       ...body.map((text) => ({ text: `    ${text}`, tone })),
@@ -1154,7 +1151,12 @@ function takeViewport(lines: RenderLine[], height: number, scrollOffset: number)
 
 function phaseGlyph(state: StarlingTuiState, tick: number): string {
   if (state.phase === "error") return "×";
-  if (state.busy || state.compacting) return spinner(tick);
+  if (state.busy || state.compacting) {
+    if (!state.workingVisible) return "·";
+    const frames = state.workingIndicatorFrames;
+    if (frames) return frames.length > 0 ? sanitizeTerminalText(frames[tick % frames.length] ?? "", false) : "";
+    return spinner(tick);
+  }
   if (state.ready) return "●";
   return "○";
 }
@@ -1467,5 +1469,11 @@ function toneCode(tone: NonNullable<RenderLine["tone"]>): string {
 /** Extract the first http(s) URL from a line, trimming trailing punctuation. */
 function detectUrl(text: string): string | undefined {
   const match = text.match(/https?:\/\/[^\s]+/);
-  return match ? match[0].replace(/[.,;:!?)\]}]+$/, "") : undefined;
+  const candidate = match?.[0].replace(/[.,;:!?)\]}]+$/, "");
+  if (!candidate || /[\u0000-\u001f\u007f-\u009f]/u.test(candidate)) return undefined;
+  try {
+    return /^https?:$/u.test(new URL(candidate).protocol) ? candidate : undefined;
+  } catch {
+    return undefined;
+  }
 }

@@ -9,10 +9,11 @@ class FakeSession {
     this.calls = [];
     this.shutdownCalls = 0;
     this.messages = [{ role: "user", content: "history" }];
+    this.sessionId = "in-process";
   }
 
   getState() {
-    return { sessionId: "in-process", isStreaming: false };
+    return { sessionId: this.sessionId, isStreaming: false };
   }
 
   getMessages() {
@@ -51,16 +52,12 @@ class FakeSession {
     return {
       defaultProvider: "fake",
       defaultModel: "model-a",
-      modelRoles: { default: "fake/model-a" },
     };
   }
 
-  async configureModel(provider, modelId, role, thinkingLevel) {
-    this.calls.push(["configureModel", provider, modelId, role, thinkingLevel]);
-    const selector = thinkingLevel === "inherit"
-      ? `${provider}/${modelId}`
-      : `${provider}/${modelId}:${thinkingLevel}`;
-    return { provider, id: modelId, role, thinkingLevel, selector };
+  async configureModel(provider, modelId, thinkingLevel) {
+    this.calls.push(["configureModel", provider, modelId, thinkingLevel]);
+    return { provider, id: modelId, thinkingLevel };
   }
 
   setThinkingLevel(level) {
@@ -124,6 +121,102 @@ class FakeSession {
     this.calls.push(["reload"]);
   }
 
+  async newSession() {
+    this.calls.push(["newSession"]);
+    this.sessionId = "new-session";
+    this.messages = [];
+    return { cancelled: false };
+  }
+
+  async resumeSession(sessionPath) {
+    this.calls.push(["resumeSession", sessionPath]);
+    this.sessionId = "resumed-session";
+    this.messages = [{ role: "user", content: "resumed history" }];
+    return { cancelled: false };
+  }
+
+  async forkSession(entryId) {
+    this.calls.push(["forkSession", entryId]);
+    this.sessionId = "forked-session";
+    return { cancelled: false, selectedText: "forked prompt" };
+  }
+
+  async cloneSession() {
+    this.calls.push(["cloneSession"]);
+    this.sessionId = "cloned-session";
+    return { cancelled: false };
+  }
+
+  async importSession(inputPath) {
+    this.calls.push(["importSession", inputPath]);
+    this.sessionId = "imported-session";
+    return { cancelled: false };
+  }
+
+  async executeBash(command, excludeFromContext) {
+    this.calls.push(["executeBash", command, excludeFromContext]);
+    return { output: "fixture output", exitCode: 0, cancelled: false, truncated: false };
+  }
+
+  abortBash() {
+    this.calls.push(["abortBash"]);
+  }
+
+  async exportSession(outputPath) {
+    this.calls.push(["exportSession", outputPath]);
+    return { path: outputPath ?? "/exports/session.html", format: "html" };
+  }
+
+  async copyLastAssistantMessage() {
+    this.calls.push(["copyLastAssistantMessage"]);
+    return { copied: true };
+  }
+
+  async configureSettings() {
+    this.calls.push(["configureSettings"]);
+    return { message: "Settings updated" };
+  }
+
+  async configureScopedModels() {
+    this.calls.push(["configureScopedModels"]);
+    return { message: "Scoped models updated" };
+  }
+
+  async shareSession() {
+    this.calls.push(["shareSession"]);
+    return { message: "Share URL: https://pi.dev/session/#fixture" };
+  }
+
+  getChangelog() {
+    this.calls.push(["getChangelog"]);
+    return { message: "Pi changelog" };
+  }
+
+  async configureProjectTrust() {
+    this.calls.push(["configureProjectTrust"]);
+    return { message: "Trust decision saved" };
+  }
+
+  async cycleModel(direction) {
+    this.calls.push(["cycleModel", direction]);
+    return { model: { provider: "fake", id: "model-b" }, thinkingLevel: "high" };
+  }
+
+  async cycleThinkingLevel() {
+    this.calls.push(["cycleThinkingLevel"]);
+    return { thinkingLevel: "xhigh" };
+  }
+
+  clearQueue() {
+    this.calls.push(["clearQueue"]);
+    return { steering: ["steer"], followUp: ["follow up"] };
+  }
+
+  async setThinkingVisible(visible) {
+    this.calls.push(["setThinkingVisible", visible]);
+    return { visible };
+  }
+
   async shutdown() {
     this.shutdownCalls += 1;
   }
@@ -181,7 +274,6 @@ test("exposes Pi SDK commands in-process and forwards lifecycle records", async 
   assert.deepEqual(await chat.request({ type: "get_model_config" }), {
     defaultProvider: "fake",
     defaultModel: "model-a",
-    modelRoles: { default: "fake/model-a" },
   });
   assert.deepEqual(await chat.request({
     type: "set_model",
@@ -192,14 +284,11 @@ test("exposes Pi SDK commands in-process and forwards lifecycle records", async 
     type: "configure_model",
     provider: "fake",
     modelId: "model-a",
-    role: "slow",
     thinkingLevel: "high",
   }), {
     provider: "fake",
     id: "model-a",
-    role: "slow",
     thinkingLevel: "high",
-    selector: "fake/model-a:high",
   });
   assert.deepEqual(await chat.request({ type: "get_auth_providers", mode: "login" }), {
     providers: [{ id: "anthropic", authType: "oauth" }],
@@ -232,6 +321,71 @@ test("exposes Pi SDK commands in-process and forwards lifecycle records", async 
     type: "compact",
     customInstructions: "short",
   }), { summary: "small" });
+  assert.deepEqual(await chat.request({ type: "new_session" }), { cancelled: false });
+  assert.deepEqual(await chat.request({ type: "get_state" }), {
+    sessionId: "new-session",
+    isStreaming: false,
+  });
+  assert.deepEqual(await chat.request({ type: "get_messages" }), { messages: [] });
+  assert.deepEqual(await chat.request({
+    type: "resume_session",
+    sessionPath: "/sessions/resume.jsonl",
+  }), { cancelled: false });
+  assert.equal((await chat.request({ type: "get_state" })).sessionId, "resumed-session");
+  assert.deepEqual(await chat.request({ type: "fork_session", entryId: "message-1" }), {
+    cancelled: false,
+    selectedText: "forked prompt",
+  });
+  assert.deepEqual(await chat.request({ type: "clone_session" }), { cancelled: false });
+  assert.deepEqual(await chat.request({
+    type: "import_session",
+    inputPath: "/imports/session.jsonl",
+  }), { cancelled: false });
+  assert.deepEqual(await chat.request({
+    type: "bash",
+    command: "pwd",
+    excludeFromContext: true,
+  }), {
+    output: "fixture output",
+    exitCode: 0,
+    cancelled: false,
+    truncated: false,
+  });
+  await chat.request({ type: "abort_bash" });
+  assert.deepEqual(await chat.request({ type: "export_session" }), {
+    path: "/exports/session.html",
+    format: "html",
+  });
+  assert.deepEqual(await chat.request({ type: "copy_last_message" }), { copied: true });
+  assert.deepEqual(await chat.request({ type: "configure_settings" }), {
+    message: "Settings updated",
+  });
+  assert.deepEqual(await chat.request({ type: "configure_scoped_models" }), {
+    message: "Scoped models updated",
+  });
+  assert.deepEqual(await chat.request({ type: "share_session" }), {
+    message: "Share URL: https://pi.dev/session/#fixture",
+  });
+  assert.deepEqual(await chat.request({ type: "get_changelog" }), {
+    message: "Pi changelog",
+  });
+  assert.deepEqual(await chat.request({ type: "configure_project_trust" }), {
+    message: "Trust decision saved",
+  });
+  assert.deepEqual(await chat.request({ type: "cycle_model", direction: "backward" }), {
+    model: { provider: "fake", id: "model-b" },
+    thinkingLevel: "high",
+  });
+  assert.deepEqual(await chat.request({ type: "cycle_thinking_level" }), {
+    thinkingLevel: "xhigh",
+  });
+  assert.deepEqual(await chat.request({ type: "clear_queue" }), {
+    steering: ["steer"],
+    followUp: ["follow up"],
+  });
+  assert.deepEqual(await chat.request({ type: "set_thinking_visible", visible: false }), {
+    visible: false,
+  });
   await chat.request({ type: "abort_compaction" });
   await chat.request({ type: "abort" });
 
@@ -241,7 +395,7 @@ test("exposes Pi SDK commands in-process and forwards lifecycle records", async 
     ["reload"],
     ["prompt", "hello", "followUp"],
     ["setModel", "fake", "model-a"],
-    ["configureModel", "fake", "model-a", "slow", "high"],
+    ["configureModel", "fake", "model-a", "high"],
     ["getAuthProviders", "login"],
     ["loginProvider", "anthropic", "oauth"],
     ["logoutProvider", "anthropic"],
@@ -251,6 +405,24 @@ test("exposes Pi SDK commands in-process and forwards lifecycle records", async 
     ["abortTreeNavigation"],
     ["setThinking", "high"],
     ["compact", "short"],
+    ["newSession"],
+    ["resumeSession", "/sessions/resume.jsonl"],
+    ["forkSession", "message-1"],
+    ["cloneSession"],
+    ["importSession", "/imports/session.jsonl"],
+    ["executeBash", "pwd", true],
+    ["abortBash"],
+    ["exportSession", undefined],
+    ["copyLastAssistantMessage"],
+    ["configureSettings"],
+    ["configureScopedModels"],
+    ["shareSession"],
+    ["getChangelog"],
+    ["configureProjectTrust"],
+    ["cycleModel", "backward"],
+    ["cycleThinkingLevel"],
+    ["clearQueue"],
+    ["setThinkingVisible", false],
     ["abortCompaction"],
     ["abort"],
   ]);

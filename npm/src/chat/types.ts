@@ -16,6 +16,8 @@ export type ChatSessionRequest = JsonObject & { type: string };
  */
 export interface ChatSession {
   request(request: ChatSessionRequest): Promise<unknown>;
+  /** Pass one raw terminal chunk through Pi extension input listeners. */
+  handleTerminalInput?(data: string): { consumed: boolean; data: string };
   /** Abort immediately by default; JSONL EOF may request an ordered drain. */
   close(options?: { drain?: boolean }): Promise<void>;
 }

@@ -11,20 +11,6 @@ export interface ModelPickerModel {
   maxTokens?: number;
 }
 
-export const MODEL_CONFIG_ACTIONS = [
-  { role: "default", tag: "DEFAULT", name: "Default" },
-  { role: "smol", tag: "SMOL", name: "Fast" },
-  { role: "slow", tag: "SLOW", name: "Thinking" },
-  { role: "vision", tag: "VISION", name: "Vision" },
-  { role: "plan", tag: "PLAN", name: "Architect" },
-  { role: "designer", tag: "DESIGNER", name: "Designer" },
-  { role: "commit", tag: "COMMIT", name: "Commit" },
-  { role: "tiny", tag: "TINY", name: "Tiny" },
-  { role: "task", tag: "TASK", name: "Subtask" },
-  { role: "advisor", tag: "ADVISOR", name: "Advisor" },
-] as const;
-
-export type ModelConfigRole = typeof MODEL_CONFIG_ACTIONS[number]["role"];
 export const MODEL_THINKING_LEVELS = [
   { level: "inherit", label: "inherit", description: "Inherit session default" },
   { level: "off", label: "off", description: "No reasoning" },
@@ -37,19 +23,17 @@ export const MODEL_THINKING_LEVELS = [
 ] as const;
 
 export type ModelThinkingLevel = typeof MODEL_THINKING_LEVELS[number]["level"];
-export type ModelPickerStage = "models" | "actions" | "thinking";
+export type ModelPickerStage = "models" | "thinking";
 
 export interface ModelPickerState {
   models: ModelPickerModel[];
   current: string;
-  roles: Record<string, string>;
   stage: ModelPickerStage;
   /** Empty means all providers. */
   provider: string;
   query: string;
   selected: number;
   actionModel?: ModelPickerModel;
-  actionSelected: number;
   thinkingSelected: number;
   switching: boolean;
   error?: string;
@@ -121,44 +105,6 @@ export function selectedModelPickerModel(picker: ModelPickerState): ModelPickerM
   return visibleModelPickerModels(picker)[picker.selected];
 }
 
-export function modelRolesFromResponse(value: unknown): Record<string, string> {
-  if (!isRecord(value)) return {};
-  const roles: Record<string, string> = {};
-  if (isRecord(value.modelRoles)) {
-    for (const [role, selector] of Object.entries(value.modelRoles)) {
-      if (typeof selector === "string" && selector.trim()) roles[role] = selector.trim();
-    }
-  }
-  const provider = text(value.defaultProvider);
-  const model = text(value.defaultModel);
-  if (provider && model) {
-    const selector = `${provider}/${model}`;
-    if (!modelRoleMatches(roles.default, selector)) roles.default = selector;
-  }
-  return roles;
-}
-
-export function modelRoleTags(picker: ModelPickerState, selector: string): string[] {
-  return MODEL_CONFIG_ACTIONS
-    .filter(({ role }) => modelRoleMatches(picker.roles[role], selector))
-    .map(({ tag }) => tag);
-}
-
-export function modelRoleMatches(assignment: string | undefined, selector: string): boolean {
-  if (assignment === selector) return true;
-  if (!assignment?.startsWith(`${selector}:`)) return false;
-  return isModelThinkingLevel(assignment.slice(selector.length + 1));
-}
-
-export function modelRoleThinkingLevel(
-  assignment: string | undefined,
-  selector: string,
-): ModelThinkingLevel {
-  if (!modelRoleMatches(assignment, selector) || assignment === selector) return "inherit";
-  const suffix = assignment!.slice(selector.length + 1);
-  return isModelThinkingLevel(suffix) ? suffix : "inherit";
-}
-
 export function thinkingOptionsForModel(
   model: ModelPickerModel,
 ): Array<typeof MODEL_THINKING_LEVELS[number]> {
@@ -217,10 +163,6 @@ function supportedThinkingLevels(model: Record<string, unknown>): ModelThinkingL
     });
 }
 
-function isModelThinkingLevel(value: string): value is ModelThinkingLevel {
-  return MODEL_THINKING_LEVELS.some(({ level }) => level === value);
-}
-
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -258,31 +200,6 @@ export function handleModelPickerKey(host: PickerHost, key: StarlingKey): void {
     if (key.type === "enter") void configureSelectedModel(host);
     return;
   }
-  if (picker.stage === "actions") {
-    if (key.type === "escape" || key.type === "ctrl-c") {
-      host.dispatch({ type: "model.action.close" });
-      return;
-    }
-    if (key.type === "up") {
-      host.dispatch({ type: "model.action.select", delta: -1 });
-      return;
-    }
-    if (key.type === "down" || key.type === "tab") {
-      host.dispatch({ type: "model.action.select", delta: 1 });
-      return;
-    }
-    if (key.type === "home" || key.type === "end") {
-      host.dispatch({
-        type: "model.action.select",
-        delta: key.type === "home"
-          ? -picker.actionSelected
-          : MODEL_CONFIG_ACTIONS.length - picker.actionSelected - 1,
-      });
-      return;
-    }
-    if (key.type === "enter") host.dispatch({ type: "model.thinking.open" });
-    return;
-  }
   if (key.type === "escape" || key.type === "ctrl-c") {
     host.dispatch({ type: picker.query ? "model.query.clear" : "model.close" });
     return;
@@ -310,7 +227,7 @@ export function handleModelPickerKey(host: PickerHost, key: StarlingKey): void {
   }
   if (key.type === "enter") {
     const selected = selectedModelPickerModel(picker);
-    if (selected) host.dispatch({ type: "model.action.open", model: selected });
+    if (selected) host.dispatch({ type: "model.thinking.open", model: selected });
     return;
   }
   if (key.type === "backspace") {
@@ -331,8 +248,7 @@ async function configureSelectedModel(host: PickerHost): Promise<void> {
   if (!host.session || !picker || picker.stage !== "thinking" || picker.switching || host.closing) return;
   const session = host.session;
   const selected = picker.actionModel;
-  const action = MODEL_CONFIG_ACTIONS[picker.actionSelected];
-  if (!selected || !action) return;
+  if (!selected) return;
   const thinking = thinkingOptionsForModel(selected)[picker.thinkingSelected];
   if (!thinking) return;
   host.dispatch({ type: "model.switching" });
@@ -341,27 +257,22 @@ async function configureSelectedModel(host: PickerHost): Promise<void> {
       type: "configure_model",
       provider: selected.provider,
       modelId: selected.id,
-      role: action.role,
       thinkingLevel: thinking.level,
     });
     let metadata: SessionMetadata | undefined;
-    if (action.role === "default") {
-      try {
-        metadata = await host.refreshSessionMetadata();
-      } catch (error) {
-        host.dispatch({
-          type: "diagnostic",
-          level: "error",
-          message: `Session metadata could not be refreshed: ${asError(error).message}`,
-        });
-      }
+    try {
+      metadata = await host.refreshSessionMetadata();
+    } catch (error) {
+      host.dispatch({
+        type: "diagnostic",
+        level: "error",
+        message: `Session metadata could not be refreshed: ${asError(error).message}`,
+      });
     }
     host.dispatch({ type: "model.close" });
     host.dispatch({
       type: "command.completed",
-      message: action.role === "default"
-        ? `DEFAULT model set to ${metadata?.model || selected.selector} · ${thinking.label}`
-        : `${action.tag} model set to ${selected.selector} · ${thinking.label}`,
+      message: `Model set to ${metadata?.model || selected.selector} · ${thinking.label}`,
     });
   } catch (error) {
     host.dispatch({ type: "model.failed", message: asError(error).message });

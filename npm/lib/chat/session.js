@@ -83,6 +83,7 @@ class PiChatSession {
         // Cancellation is a control plane, not ordinary queued work. In
         // particular abort_compaction must be able to interrupt compact itself.
         if (request.type === "abort"
+            || request.type === "abort_bash"
             || request.type === "abort_compaction"
             || request.type === "abort_authentication"
             || request.type === "abort_tree_navigation") {
@@ -97,6 +98,9 @@ class PiChatSession {
         });
         this.commandTail = result.then(() => undefined, () => undefined);
         return result;
+    }
+    handleTerminalInput(data) {
+        return this.ui.handleTerminalInput(data);
     }
     close(options = {}) {
         if (!this.closePromise) {
@@ -187,14 +191,13 @@ async function dispatchRequest(session, request) {
             return await session.getModelConfig();
         case "configure_model":
             if (typeof request.provider !== "string"
-                || typeof request.modelId !== "string"
-                || typeof request.role !== "string") {
-                throw new Error("configure_model requires provider, modelId, and role strings");
+                || typeof request.modelId !== "string") {
+                throw new Error("configure_model requires provider and modelId strings");
             }
             if (request.thinkingLevel !== undefined && typeof request.thinkingLevel !== "string") {
                 throw new Error("configure_model.thinkingLevel must be a string");
             }
-            return await session.configureModel(request.provider, request.modelId, request.role, request.thinkingLevel ?? "inherit");
+            return await session.configureModel(request.provider, request.modelId, request.thinkingLevel ?? "inherit");
         case "get_auth_providers":
             assertOnlyFields(request, "get_auth_providers", ["type", "id", "mode"]);
             if (request.mode !== "login" && request.mode !== "logout") {
@@ -278,6 +281,88 @@ async function dispatchRequest(session, request) {
             assertOnlyFields(request, "reload", ["type", "id"]);
             await session.reload();
             return undefined;
+        case "new_session":
+            assertOnlyFields(request, "new_session", ["type", "id"]);
+            return await session.newSession();
+        case "resume_session":
+            assertOnlyFields(request, "resume_session", ["type", "id", "sessionPath"]);
+            if (request.sessionPath !== undefined && typeof request.sessionPath !== "string") {
+                throw new Error("resume_session.sessionPath must be a string");
+            }
+            return await session.resumeSession(request.sessionPath?.trim() || undefined);
+        case "fork_session":
+            assertOnlyFields(request, "fork_session", ["type", "id", "entryId"]);
+            if (request.entryId !== undefined && typeof request.entryId !== "string") {
+                throw new Error("fork_session.entryId must be a string");
+            }
+            return await session.forkSession(request.entryId?.trim() || undefined);
+        case "clone_session":
+            assertOnlyFields(request, "clone_session", ["type", "id"]);
+            return await session.cloneSession();
+        case "import_session": {
+            assertOnlyFields(request, "import_session", ["type", "id", "inputPath"]);
+            if (typeof request.inputPath !== "string" || !request.inputPath.trim()) {
+                throw new Error("import_session.inputPath must be a non-empty string");
+            }
+            return await session.importSession(request.inputPath.trim());
+        }
+        case "bash": {
+            assertOnlyFields(request, "bash", ["type", "id", "command", "excludeFromContext"]);
+            if (typeof request.command !== "string" || !request.command.trim()) {
+                throw new Error("bash.command must be a non-empty string");
+            }
+            if (request.excludeFromContext !== undefined
+                && typeof request.excludeFromContext !== "boolean") {
+                throw new Error("bash.excludeFromContext must be a boolean");
+            }
+            return await session.executeBash(request.command.trim(), request.excludeFromContext === true);
+        }
+        case "abort_bash":
+            assertOnlyFields(request, "abort_bash", ["type", "id"]);
+            session.abortBash();
+            return undefined;
+        case "export_session":
+            assertOnlyFields(request, "export_session", ["type", "id", "outputPath"]);
+            if (request.outputPath !== undefined && typeof request.outputPath !== "string") {
+                throw new Error("export_session.outputPath must be a string");
+            }
+            return await session.exportSession(request.outputPath?.trim() || undefined);
+        case "copy_last_message":
+            assertOnlyFields(request, "copy_last_message", ["type", "id"]);
+            return await session.copyLastAssistantMessage();
+        case "configure_settings":
+            assertOnlyFields(request, "configure_settings", ["type", "id"]);
+            return await session.configureSettings();
+        case "configure_scoped_models":
+            assertOnlyFields(request, "configure_scoped_models", ["type", "id"]);
+            return await session.configureScopedModels();
+        case "share_session":
+            assertOnlyFields(request, "share_session", ["type", "id"]);
+            return await session.shareSession();
+        case "get_changelog":
+            assertOnlyFields(request, "get_changelog", ["type", "id"]);
+            return await session.getChangelog();
+        case "configure_project_trust":
+            assertOnlyFields(request, "configure_project_trust", ["type", "id"]);
+            return await session.configureProjectTrust();
+        case "cycle_model":
+            assertOnlyFields(request, "cycle_model", ["type", "id", "direction"]);
+            if (request.direction !== "forward" && request.direction !== "backward") {
+                throw new Error("cycle_model.direction must be forward or backward");
+            }
+            return await session.cycleModel(request.direction);
+        case "cycle_thinking_level":
+            assertOnlyFields(request, "cycle_thinking_level", ["type", "id"]);
+            return await session.cycleThinkingLevel();
+        case "clear_queue":
+            assertOnlyFields(request, "clear_queue", ["type", "id"]);
+            return session.clearQueue();
+        case "set_thinking_visible":
+            assertOnlyFields(request, "set_thinking_visible", ["type", "id", "visible"]);
+            if (typeof request.visible !== "boolean") {
+                throw new Error("set_thinking_visible.visible must be a boolean");
+            }
+            return await session.setThinkingVisible(request.visible);
         default:
             throw new Error(`Unknown command: ${request.type}`);
     }

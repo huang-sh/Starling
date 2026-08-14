@@ -6,7 +6,11 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 
 import { runAgentHost } from "../lib/agent-host/host.js";
-import { serializeJsonLine } from "../lib/agent-host/jsonl.js";
+import {
+  MAX_JSONL_LINE_BYTES,
+  attachStrictJsonlReader,
+  serializeJsonLine,
+} from "../lib/agent-host/jsonl.js";
 import { createPiSdkAdapter } from "../lib/agent-host/sdk-adapter.js";
 import { parseAgentHostArgs } from "../lib/agent-host/types.js";
 
@@ -63,16 +67,12 @@ class FakeSession {
     return {
       defaultProvider: "fake",
       defaultModel: "model-a",
-      modelRoles: { default: "fake/model-a" },
     };
   }
 
-  async configureModel(provider, modelId, role, thinkingLevel) {
-    this.calls.push(["configureModel", provider, modelId, role, thinkingLevel]);
-    const selector = thinkingLevel === "inherit"
-      ? `${provider}/${modelId}`
-      : `${provider}/${modelId}:${thinkingLevel}`;
-    return { provider, id: modelId, role, thinkingLevel, selector };
+  async configureModel(provider, modelId, thinkingLevel) {
+    this.calls.push(["configureModel", provider, modelId, thinkingLevel]);
+    return { provider, id: modelId, thinkingLevel };
   }
 
   setThinkingLevel(level) {
@@ -142,6 +142,7 @@ test("parses Rust-compatible Pi arguments without exposing Pi CLI mode", () => {
     "--model", "claude-test",
     "--thinking", "high",
     "--no-extensions",
+    "--starling-managed",
     "--extension", "gate.mjs",
   ], "/root");
 
@@ -155,11 +156,26 @@ test("parses Rust-compatible Pi arguments without exposing Pi CLI mode", () => {
     thinking: "high",
     extensions: ["/root/project/gate.mjs"],
     noExtensions: true,
+    starlingManaged: true,
   });
   assert.throws(
     () => parseAgentHostArgs(["--session", "relative.jsonl"], "/root"),
     /absolute Pi transcript/,
   );
+});
+
+test("strict JSONL input drops an oversized line and recovers at the next LF", async () => {
+  const input = new PassThrough();
+  const lines = [];
+  const errors = [];
+  attachStrictJsonlReader(input, (line) => lines.push(line), (error) => errors.push(error.message));
+  const ended = new Promise((resolve) => input.once("end", resolve));
+
+  input.end(`${"界".repeat(Math.ceil(MAX_JSONL_LINE_BYTES / 3) + 1)}\n{"ok":true}\n`);
+  await ended;
+
+  assert.deepEqual(lines, ['{"ok":true}']);
+  assert.deepEqual(errors, [`JSONL line exceeds ${MAX_JSONL_LINE_BYTES} bytes`]);
 });
 
 test("serves the existing Pi RPC command surface through an injected adapter", async () => {
@@ -196,7 +212,6 @@ test("serves the existing Pi RPC command surface through an injected adapter", a
       type: "configure_model",
       provider: "fake",
       modelId: "model-a",
-      role: "smol",
       thinkingLevel: "medium",
     },
     { id: "compact", type: "compact", customInstructions: "short" },
@@ -238,16 +253,15 @@ test("serves the existing Pi RPC command surface through an injected adapter", a
   ]);
   assert.equal(response(output, "tree").data.leafId, "root");
   assert.deepEqual(response(output, "navigate-tree").data, { cancelled: false });
-  assert.deepEqual(response(output, "model-config").data.modelRoles, {
-    default: "fake/model-a",
+  assert.deepEqual(response(output, "model-config").data, {
+    defaultProvider: "fake",
+    defaultModel: "model-a",
   });
   assert.deepEqual(response(output, "model").data, { provider: "fake", id: "model-a" });
   assert.deepEqual(response(output, "configure-model").data, {
     provider: "fake",
     id: "model-a",
-    role: "smol",
     thinkingLevel: "medium",
-    selector: "fake/model-a:medium",
   });
   assert.deepEqual(response(output, "compact").data, { summary: "small" });
   assert.equal(response(output, "abort-compact").success, true);
@@ -259,7 +273,7 @@ test("serves the existing Pi RPC command surface through an injected adapter", a
     ["getTree"],
     ["navigateTree", "root", { summarize: false }],
     ["setModel", "fake", "model-a"],
-    ["configureModel", "fake", "model-a", "smol", "medium"],
+    ["configureModel", "fake", "model-a", "medium"],
     ["compact", "short"],
     ["abortCompaction"],
     ["abortTreeNavigation"],
@@ -575,7 +589,7 @@ test("EOF followed by a delayed SDK open failure exits unsuccessfully", async ()
   assert.equal(diagnostics.filter((message) => message.includes("delayed open failure")).length, 1);
 });
 
-test("real adapter follows OMP's public createAgentSession lifecycle", async () => {
+test("real adapter follows OMP's public createAgentSession lifecycle", async (t) => {
   const calls = [];
   const extensionPath = "/tmp/starling-gate.mjs";
   const selectedModel = { provider: "fake", id: "model-a" };
@@ -660,7 +674,20 @@ test("real adapter follows OMP's public createAgentSession lifecycle", async () 
     },
   });
 
-  const adapter = createPiSdkAdapter(async () => fakeSdk, {});
+  const environment = {};
+  const ignoreScriptNames = [
+    "NPM_CONFIG_IGNORE_SCRIPTS",
+    "npm_config_ignore_scripts",
+    "PNPM_CONFIG_IGNORE_SCRIPTS",
+  ];
+  const previousIgnoreScripts = new Map(ignoreScriptNames.map((name) => [name, process.env[name]]));
+  t.after(() => {
+    for (const [name, value] of previousIgnoreScripts) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+  const adapter = createPiSdkAdapter(async () => fakeSdk, environment);
   const session = await adapter.open({
     cwd: "/work",
     name: "Starling session",
@@ -695,6 +722,12 @@ test("real adapter follows OMP's public createAgentSession lifecycle", async () 
     "sessionName",
     "Starling session",
   ]);
+  assert.deepEqual(environment, {
+    NPM_CONFIG_IGNORE_SCRIPTS: "true",
+    npm_config_ignore_scripts: "true",
+    PNPM_CONFIG_IGNORE_SCRIPTS: "true",
+  });
+  for (const name of ignoreScriptNames) assert.equal(process.env[name], "true");
   assert.equal(createOptions.cwd, "/work");
   assert.equal(createOptions.model, selectedModel);
   assert.equal(createOptions.thinkingLevel, "high");
@@ -714,26 +747,31 @@ test("real adapter follows OMP's public createAgentSession lifecycle", async () 
       handlers[event] = handler;
     },
   });
-  let confirmCalls = 0;
+  const confirmTitles = [];
   const deniedContext = {
     ui: {
-      async confirm() {
-        confirmCalls += 1;
+      async confirm(title) {
+        confirmTitles.push(title);
         return false;
       },
       notify() {},
     },
   };
   assert.equal(await handlers.tool_call({ toolName: "read", input: {} }, deniedContext), undefined);
-  assert.equal(confirmCalls, 0);
-  assert.deepEqual(
-    await handlers.tool_call({ toolName: "bash", input: { command: "rm nope" } }, deniedContext),
-    {
-      block: true,
-      reason: "Starling denied Pi tool 'bash' because approval was not granted.",
-    },
-  );
-  assert.equal(confirmCalls, 1);
+  for (const toolName of ["bash", "write", "custom"]) {
+    assert.deepEqual(
+      await handlers.tool_call({ toolName, input: {} }, deniedContext),
+      {
+        block: true,
+        reason: `Starling denied Pi tool '${toolName}' because approval was not granted.`,
+      },
+    );
+  }
+  assert.deepEqual(confirmTitles, [
+    "Allow Pi tool: bash?",
+    "Allow Pi tool: write?",
+    "Allow Pi tool: custom?",
+  ]);
   assert.deepEqual(await handlers.session_before_switch({}, deniedContext), { cancel: true });
 
   let accepted = false;
@@ -800,7 +838,7 @@ test("real adapter follows OMP's public createAgentSession lifecycle", async () 
   ]);
 });
 
-test("adapter persists the selected default and model role without replacing Pi settings", async (t) => {
+test("adapter persists the selected default through public Pi settings APIs", async (t) => {
   const agentDir = mkdtempSync(join(tmpdir(), "starling-model-config-"));
   t.after(() => rmSync(agentDir, { recursive: true, force: true }));
   const settingsPath = join(agentDir, "settings.json");
@@ -809,7 +847,6 @@ test("adapter persists the selected default and model role without replacing Pi 
     defaultModel: "model-a",
     defaultThinkingLevel: "low",
     packages: ["pi-taskflow"],
-    modelRoles: { slow: "fake/model-a" },
   }, null, 2));
 
   const calls = [];
@@ -876,25 +913,18 @@ test("adapter persists the selected default and model role without replacing Pi 
     defaultProvider: "fake",
     defaultModel: "model-a",
     defaultThinkingLevel: "low",
-    modelRoles: { slow: "fake/model-a" },
   });
-  await session.configureModel("fake", "model-b", "smol", "high");
-  await session.configureModel("fake", "model-b", "default", "max");
+  await session.configureModel("fake", "model-b", "max");
 
   const saved = JSON.parse(readFileSync(settingsPath, "utf8"));
   assert.deepEqual(saved.packages, ["pi-taskflow"], "unrelated Pi settings must survive");
-  assert.deepEqual(saved.modelRoles, {
-    slow: "fake/model-a",
-    smol: "fake/model-b:high",
-    default: "fake/model-b:max",
-  });
   assert.equal(saved.defaultProvider, "fake");
   assert.equal(saved.defaultModel, "model-b");
   assert.equal(saved.defaultThinkingLevel, "max");
-  assert.deepEqual(sdkSession.model, models[1], "DEFAULT also switches the live SDK session");
+  assert.deepEqual(sdkSession.model, models[1], "configuration switches the live SDK session");
   await assert.rejects(
-    () => session.configureModel("fake", "model-b", "unknown-role", "inherit"),
-    /Unsupported model role/,
+    () => session.configureModel("fake", "model-b", "invalid"),
+    /Invalid configured thinking level/,
   );
 
   await session.shutdown();
@@ -1200,6 +1230,7 @@ test("resume derives SDK resources from transcript cwd and persists asked trust"
 test("a cancelled startup trust prompt defaults to untrusted without persisting", async () => {
   const input = new PassThrough();
   const output = [];
+  const diagnostics = [];
   const calls = [];
   const trustWrites = [];
   let settingsTrust;
@@ -1215,7 +1246,10 @@ test("a cancelled startup trust prompt defaults to untrusted without persisting"
     },
     createSettings(_cwd, _agentDir, settingsOptions) {
       if (settingsOptions) settingsTrust = settingsOptions.projectTrusted;
-      return { getSessionDir: () => undefined };
+      return {
+        getSessionDir: () => undefined,
+        getHideThinkingBlock: () => false,
+      };
     },
   });
   const running = runAgentHost({
@@ -1223,7 +1257,7 @@ test("a cancelled startup trust prompt defaults to untrusted without persisting"
     processCwd: "/work",
     input,
     output: (value) => output.push(value),
-    diagnostic: () => {},
+    diagnostic: (message) => diagnostics.push(message),
     adapter: createPiSdkAdapter(async () => fakeSdk, {}),
   });
 
@@ -1238,7 +1272,7 @@ test("a cancelled startup trust prompt defaults to untrusted without persisting"
   await until(() => response(output, "ready") !== undefined);
   input.end();
 
-  assert.equal(await running, 0);
+  assert.equal(await running, 0, diagnostics.join("\n"));
   assert.equal(settingsTrust, false);
   assert.deepEqual(trustWrites, []);
 });
@@ -1383,6 +1417,13 @@ function makeMinimalPiSdk(calls, options = {}) {
 
   return {
     getAgentDir: () => options.agentDir ?? "/agent",
+    getPackageDir: () => "/package",
+    async resolveModelScopeWithDiagnostics() {
+      return { scopedModels: [], diagnostics: [] };
+    },
+    async copyToClipboard(text) {
+      calls.push(["copyToClipboard", text]);
+    },
     ModelRuntime: {
       async create(runtimeOptions) {
         calls.push(["modelRuntime", runtimeOptions]);
@@ -1432,7 +1473,52 @@ function makeMinimalPiSdk(calls, options = {}) {
     async createAgentSession(sessionOptions) {
       calls.push(["createAgentSession", sessionOptions]);
       options.onCreateAgentSession?.(sessionOptions);
+      session.sessionManager = sessionOptions.sessionManager;
+      session.resourceLoader ??= sessionOptions.resourceLoader;
       return { session };
+    },
+    async createAgentSessionRuntime(factory, runtimeOptions) {
+      calls.push(["createAgentSessionRuntime", runtimeOptions]);
+      if (options.createRuntimeHost) {
+        return await options.createRuntimeHost(factory, runtimeOptions);
+      }
+      let current = await factory(runtimeOptions);
+      let beforeSessionInvalidate;
+      let rebindSession;
+      return {
+        get session() {
+          return current.session;
+        },
+        get services() {
+          return current.services;
+        },
+        setBeforeSessionInvalidate(callback) {
+          beforeSessionInvalidate = callback;
+        },
+        setRebindSession(callback) {
+          rebindSession = callback;
+        },
+        async newSession() {
+          if (!options.newSessionRuntime) throw new Error("Fake runtime cannot create a new session");
+          current = await options.newSessionRuntime(factory, runtimeOptions, current);
+          await rebindSession?.(current.session);
+          return { cancelled: false };
+        },
+        async fork() {
+          return { cancelled: true };
+        },
+        async switchSession() {
+          return { cancelled: true };
+        },
+        async dispose() {
+          await current.session.extensionRunner?.emit({
+            type: "session_shutdown",
+            reason: "quit",
+          });
+          beforeSessionInvalidate?.();
+          current.session.dispose();
+        },
+      };
     },
   };
 }

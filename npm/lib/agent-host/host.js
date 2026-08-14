@@ -120,7 +120,7 @@ export async function runAgentHost(options) {
         const opening = runtime.open(launchOptions);
         const detach = attachStrictJsonlReader(options.input, (line) => {
             void runtime.handleLine(line);
-        });
+        }, (error) => options.diagnostic(error.message));
         finish = (code, drain = false, failure) => {
             if (finishing) {
                 if (!drain && draining) {

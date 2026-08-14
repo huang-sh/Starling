@@ -25,6 +25,7 @@ import {
 import {
   completeSlashCommand,
   filterSlashCommands,
+  formatHotkeys,
   formatSessionStats,
   formatSlashHelp,
   formatThinkingLevels,
@@ -36,7 +37,6 @@ import { StarlingInputDecoder, parseStarlingKeys, type StarlingKey } from "./inp
 import {
   availableModelsFromResponse,
   handleModelPickerKey,
-  modelRolesFromResponse,
 } from "./model-picker.js";
 import {
   handleTreePickerKey,
@@ -204,7 +204,11 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
       tick,
     });
     try {
-      screen.paint(parts, { height: stdout.rows || 24, force });
+      screen.paint(parts, {
+        width: stdout.columns || 80,
+        height: stdout.rows || 24,
+        force,
+      });
     } catch (error) {
       recordTerminalFailure(error);
       requestExit();
@@ -225,7 +229,7 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
 
   function dispatch(action: StarlingTuiAction): void {
     state = reduceStarlingTui(state, action);
-    if (!state.busy && !state.compacting) abortArmed = false;
+    if (!state.busy && !state.compacting && !state.bashRunning) abortArmed = false;
     scheduleRender();
   }
   function pickerHost(): PickerHost {
@@ -332,7 +336,8 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
   function handleRecord(value: Record<string, unknown>): void {
     const timeout = value.type === "extension_ui_request" ? value.timeout : undefined;
     let handledInteractiveRequest = false;
-    for (const event of normalizeChatRecord(value)) {
+    const events = normalizeChatRecord(value);
+    for (const event of events) {
       if (event.type === "interaction.requested") {
         handledInteractiveRequest = true;
         queueInteractiveUi(event.request, timeout);
@@ -343,12 +348,26 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
         continue;
       }
       dispatch({ type: "chat.event", event });
+      if (event.type === "session.snapshot" && managedRun) {
+        void managedRun.updateSession({
+          sessionId: event.snapshot.sessionId,
+          sessionFile: event.snapshot.sessionFile,
+          model: event.snapshot.model,
+          title: event.snapshot.sessionName,
+        }).catch((error) => {
+          dispatch({
+            type: "diagnostic",
+            level: "info",
+            message: `Session tracking unavailable: ${asError(error).message}`,
+          });
+        });
+      }
     }
     if (
       value.type === "extension_ui_request"
       && !handledInteractiveRequest
+      && events.length === 0
       && typeof value.id === "string"
-      && !["notify", "setStatus", "setTitle", "set_editor_text"].includes(String(value.method))
     ) {
       sendSessionRequest({
         type: "extension_ui_response",
@@ -438,11 +457,38 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
     return metadata;
   }
 
+  async function refreshSessionSnapshot(): Promise<ReturnType<typeof sessionMetadata>> {
+    if (!session || closing) return {};
+    const [stateResponse, messagesResponse] = await Promise.all([
+      session.request({ type: "get_state" }),
+      session.request({ type: "get_messages" }),
+    ]);
+    const messages = isRecord(messagesResponse) && Array.isArray(messagesResponse.messages)
+      ? messagesResponse.messages
+      : [];
+    const snapshot = normalizeChatSnapshot(stateResponse, messages);
+    dispatch({ type: "chat.event", event: { type: "session.snapshot", snapshot } });
+    const metadata = sessionMetadata(stateResponse);
+    if (managedRun) {
+      await managedRun.updateSession({
+        sessionId: metadata.sessionId,
+        sessionFile: metadata.sessionFile,
+        model: metadata.model,
+        title: metadata.sessionName,
+      });
+    }
+    return metadata;
+  }
+
   function submitComposer(): void {
     if (!session || !state.ready || closing) return;
     const text = state.composer.trim();
     if (!text) return;
     dispatch({ type: "history.push", text });
+    if (text.startsWith("!")) {
+      void executeUserBash(text);
+      return;
+    }
     if (isSlashInvocation(text)) {
       void executeSlashCommand(text);
       return;
@@ -457,9 +503,31 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
     });
   }
 
+  async function executeUserBash(text: string): Promise<void> {
+    if (!session || closing) return;
+    const excludeFromContext = text.startsWith("!!");
+    const command = text.slice(excludeFromContext ? 2 : 1).trim();
+    if (!command) return;
+    if (state.bashRunning) {
+      dispatch({ type: "command.failed", message: "A bash command is already running" });
+      return;
+    }
+    dispatch({ type: "command.submitted", name: excludeFromContext ? "!!" : "!" });
+    try {
+      await session.request({ type: "bash", command, excludeFromContext });
+      dispatch({ type: "command.completed" });
+    } catch (error) {
+      dispatch({ type: "command.failed", message: asError(error).message });
+    }
+  }
+
   async function executeSlashCommand(text: string): Promise<void> {
     if (!session || closing) return;
-    const plan = planSlashCommand(text, state.slashCommands, state.busy || state.compacting);
+    const plan = planSlashCommand(
+      text,
+      state.slashCommands,
+      state.busy || state.compacting || state.bashRunning,
+    );
     if (plan.kind === "error") {
       dispatch({ type: "command.submitted", name: commandName(text) });
       dispatch({ type: "command.failed", message: plan.message });
@@ -487,7 +555,17 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
             });
           }
         }
-        if (plan.refreshMetadata) {
+        if (plan.refreshTranscript) {
+          try {
+            refreshedMetadata = await refreshSessionSnapshot();
+          } catch (error) {
+            dispatch({
+              type: "diagnostic",
+              level: "error",
+              message: `Session transcript could not be refreshed: ${asError(error).message}`,
+            });
+          }
+        } else if (plan.refreshMetadata) {
           try {
             refreshedMetadata = await refreshSessionMetadata();
           } catch (error) {
@@ -497,6 +575,13 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
               message: `Session metadata could not be refreshed: ${asError(error).message}`,
             });
           }
+        }
+        if (
+          plan.command.name === "fork"
+          && isRecord(result)
+          && typeof result.selectedText === "string"
+        ) {
+          dispatch({ type: "composer.set", value: result.selectedText });
         }
         const message = requestCompletionMessage(plan, result, refreshedMetadata);
         dispatch({ type: "command.completed", message });
@@ -520,9 +605,11 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
         case "help":
           dispatch({ type: "command.completed", message: formatSlashHelp(state.slashCommands) });
           return;
+        case "hotkeys":
+          dispatch({ type: "command.completed", message: formatHotkeys() });
+          return;
         case "models": {
           const response = await session.request({ type: "get_available_models" });
-          const config = await session.request({ type: "get_model_config" });
           const models = availableModelsFromResponse(response);
           if (models.length === 0) {
             dispatch({ type: "command.failed", message: "No configured models found" });
@@ -532,7 +619,6 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
             type: "model.open",
             models,
             current: state.model,
-            roles: modelRolesFromResponse(config),
           });
           dispatch({ type: "command.completed" });
           return;
@@ -628,8 +714,11 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
   }
 
   function abortTurn(): void {
-    if (!session || (!state.busy && !state.compacting)) return;
-    if (state.compacting) {
+    if (!session || (!state.busy && !state.compacting && !state.bashRunning)) return;
+    if (state.bashRunning) {
+      sendSessionRequest({ type: "abort_bash" });
+      dispatch({ type: "diagnostic", level: "info", message: "Bash cancellation requested" });
+    } else if (state.compacting) {
       sendSessionRequest({ type: "abort_compaction" });
       dispatch({ type: "diagnostic", level: "info", message: "Compaction cancellation requested" });
     } else {
@@ -637,6 +726,75 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
       dispatch({ type: "diagnostic", level: "info", message: "Abort requested" });
     }
     abortArmed = true;
+  }
+
+  async function cycleSessionModel(direction: "forward" | "backward"): Promise<void> {
+    if (!session || closing) return;
+    try {
+      const result = await session.request({ type: "cycle_model", direction });
+      const metadata = await refreshSessionMetadata();
+      dispatch({
+        type: "command.completed",
+        message: isRecord(result) && result.unchanged === true
+          ? "Only one model is available"
+          : `Model: ${metadata.model ?? state.model}`,
+      });
+    } catch (error) {
+      dispatch({ type: "command.failed", message: asError(error).message });
+    }
+  }
+
+  async function cycleSessionThinking(): Promise<void> {
+    if (!session || closing) return;
+    try {
+      const result = await session.request({ type: "cycle_thinking_level" });
+      const metadata = await refreshSessionMetadata();
+      dispatch({
+        type: "command.completed",
+        message: isRecord(result) && result.unchanged === true
+          ? "This model does not support thinking"
+          : `Thinking level: ${metadata.thinking ?? state.thinking}`,
+      });
+    } catch (error) {
+      dispatch({ type: "command.failed", message: asError(error).message });
+    }
+  }
+
+  async function restoreQueuedMessages(): Promise<void> {
+    if (!session || closing) return;
+    try {
+      const result = await session.request({ type: "clear_queue" });
+      const steering = isRecord(result) && Array.isArray(result.steering)
+        ? result.steering.filter((value): value is string => typeof value === "string")
+        : [];
+      const followUp = isRecord(result) && Array.isArray(result.followUp)
+        ? result.followUp.filter((value): value is string => typeof value === "string")
+        : [];
+      const restored = [...steering, ...followUp].join("\n");
+      if (restored) dispatch({ type: "composer.set", value: restored });
+      dispatch({
+        type: "command.completed",
+        message: restored ? "Queued messages restored to the editor" : "No queued messages",
+      });
+    } catch (error) {
+      dispatch({ type: "command.failed", message: asError(error).message });
+    }
+  }
+
+  function suspendToBackground(): void {
+    if (process.platform === "win32") {
+      dispatch({ type: "diagnostic", level: "info", message: "Terminal suspension is unavailable on Windows" });
+      return;
+    }
+    restoreTerminal();
+    process.once("SIGCONT", () => {
+      if (closing) return;
+      stdin.off("error", onTerminalError);
+      stdout.off("error", onTerminalError);
+      enterTerminal();
+      scheduleRender(true, true);
+    });
+    process.kill(process.pid, "SIGTSTP");
   }
 
   function handleModalKey(key: StarlingKey): void {
@@ -776,12 +934,56 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
         return;
       }
     }
+    if (key.type === "shift-tab") {
+      void cycleSessionThinking();
+      return;
+    }
+    if (key.type === "ctrl-p" || key.type === "shift-ctrl-p") {
+      void cycleSessionModel(key.type === "ctrl-p" ? "forward" : "backward");
+      return;
+    }
+    if (key.type === "ctrl-l") {
+      void executeSlashCommand("/model");
+      return;
+    }
+    if (key.type === "ctrl-o") {
+      dispatch({ type: "tools.expanded", expanded: !state.toolsExpanded });
+      dispatch({
+        type: "command.completed",
+        message: `Tool output: ${state.toolsExpanded ? "collapsed" : "expanded"}`,
+      });
+      return;
+    }
+    if (key.type === "ctrl-t") {
+      const visible = !state.thinkingVisible;
+      dispatch({ type: "thinking.visibility", visible });
+      sendSessionRequest({ type: "set_thinking_visible", visible });
+      return;
+    }
+    if (key.type === "ctrl-x") {
+      void executeSlashCommand("/copy");
+      return;
+    }
+    if (key.type === "alt-up") {
+      void restoreQueuedMessages();
+      return;
+    }
+    if (key.type === "ctrl-z") {
+      suspendToBackground();
+      return;
+    }
     if (key.type === "ctrl-c") {
-      if ((state.busy || state.compacting) && !abortArmed) abortTurn();
+      if ((state.busy || state.compacting || state.bashRunning) && !abortArmed) abortTurn();
       else requestExit();
       return;
     }
-    if (key.type === "ctrl-d" && !state.busy && !state.compacting && !state.composer) {
+    if (
+      key.type === "ctrl-d"
+      && !state.busy
+      && !state.compacting
+      && !state.bashRunning
+      && !state.composer
+    ) {
       requestExit();
       return;
     }
@@ -828,7 +1030,7 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
       submitComposer();
       return;
     }
-    if (key.type === "alt-enter") {
+    if (key.type === "alt-enter" || key.type === "shift-enter") {
       dispatch({ type: "composer.append", value: "\n" });
       return;
     }
@@ -854,7 +1056,16 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
       clearTimeout(escapeTimer);
       escapeTimer = undefined;
     }
-    for (const key of inputDecoder.push(chunk.toString())) handleKey(key);
+    let data = chunk.toString();
+    try {
+      const filtered = session?.handleTerminalInput?.(data);
+      if (filtered?.consumed) return;
+      if (filtered) data = filtered.data;
+    } catch (error) {
+      dispatch({ type: "diagnostic", level: "error", message: `Extension input failed: ${asError(error).message}` });
+      return;
+    }
+    for (const key of inputDecoder.push(data)) handleKey(key);
     if (inputDecoder.hasPendingEscape) {
       escapeTimer = setTimeout(() => {
         escapeTimer = undefined;
@@ -899,6 +1110,7 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
     stdin.resume();
     stdin.on("data", deliverInput);
     stdin.once("end", onInputEnd);
+    stdin.once("close", onInputEnd);
     stdout.on("resize", onResize);
     process.once("SIGINT", onSigint);
     process.once("SIGTERM", onSigterm);
@@ -913,6 +1125,7 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
     try {
       stdin.off("data", deliverInput);
       stdin.off("end", onInputEnd);
+      stdin.off("close", onInputEnd);
       stdout.off("resize", onResize);
       process.off("SIGINT", onSigint);
       process.off("SIGTERM", onSigterm);
@@ -973,12 +1186,10 @@ export async function runStarlingTui(options: RunStarlingTuiOptions): Promise<nu
       launch: {
         cwd,
         extensions: [],
-        // Pi's extension commands, prompt templates, and skills are part of
-        // the SDK command surface. Project trust and Starling's managed gate
-        // still control what project resources and tools may execute.
+        // Pi's extension commands, prompt templates, skills, and session
+        // runtime are part of the bare Starling SDK surface.
         noExtensions: false,
         surface: "tui",
-        starlingManaged: true,
       },
       environment,
       onRecord: (value) => {
@@ -1141,6 +1352,10 @@ function requestCompletionMessage(
   metadata: ReturnType<typeof sessionMetadata> | undefined,
 ): string | undefined {
   if (plan.command.name === "session") return formatSessionStats(result);
+  if (isRecord(result) && typeof result.message === "string") return result.message;
+  if (plan.command.name === "export" && isRecord(result) && typeof result.path === "string") {
+    return `Session exported to: ${result.path}`;
+  }
   if (plan.command.name === "thinking") {
     return metadata?.thinking
       ? `Thinking level changed to ${metadata.thinking}`

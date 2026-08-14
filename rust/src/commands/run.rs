@@ -401,16 +401,25 @@ fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
 
 /// Relay only valid SDK host records. Starling guarantees that every forwarded
 /// record remains one LF-terminated JSON value.
+const MAX_CHAT_JSONL_LINE_BYTES: usize = 1024 * 1024;
+
 fn relay_sdk_host_jsonl(reader: impl Read, writer: &mut impl Write) -> Result<bool> {
     let mut reader = BufReader::new(reader);
     let mut line = Vec::new();
     let mut protocol_error = false;
     loop {
-        line.clear();
-        if reader.read_until(b'\n', &mut line)? == 0 {
+        let Some(oversized) = read_bounded_jsonl_line(&mut reader, &mut line)? else {
             break;
+        };
+        if oversized {
+            protocol_error = true;
+            eprintln!(
+                "{}: discarded oversized output from Pi SDK host stdout",
+                "warning".yellow()
+            );
+            continue;
         }
-        while matches!(line.last(), Some(b'\n' | b'\r')) {
+        while matches!(line.last(), Some(b'\r')) {
             line.pop();
         }
         if line.is_empty() || serde_json::from_slice::<Value>(&line).is_err() {
@@ -426,6 +435,34 @@ fn relay_sdk_host_jsonl(reader: impl Read, writer: &mut impl Write) -> Result<bo
         writer.flush()?;
     }
     Ok(protocol_error)
+}
+
+fn read_bounded_jsonl_line(
+    reader: &mut impl BufRead,
+    line: &mut Vec<u8>,
+) -> std::io::Result<Option<bool>> {
+    line.clear();
+    let mut oversized = false;
+    let mut saw_data = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(saw_data.then_some(oversized));
+        }
+        saw_data = true;
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let content_len = newline.unwrap_or(available.len());
+        if !oversized {
+            let remaining = MAX_CHAT_JSONL_LINE_BYTES.saturating_sub(line.len());
+            line.extend_from_slice(&available[..content_len.min(remaining)]);
+            oversized = content_len > remaining;
+        }
+        let consumed = content_len + usize::from(newline.is_some());
+        reader.consume(consumed);
+        if newline.is_some() {
+            return Ok(Some(oversized));
+        }
+    }
 }
 
 const STARLING_RUN_PTY_ENV: &str = "STARLING_RUN_PTY";
@@ -3246,10 +3283,17 @@ requires_openai_auth = true
 
     #[test]
     fn pi_sdk_host_relay_keeps_stdout_strict_jsonl() {
-        let input = b"{\"type\":\"agent_start\"}\r\nnot-json\n{\"type\":\"agent_end\"}";
+        let input = format!(
+            "{{\"type\":\"agent_start\"}}\r\n{{\"value\":\"{}\"}}\nnot-json\n{{\"type\":\"agent_end\"}}",
+            "x".repeat(1024 * 1024),
+        );
         let mut output = Vec::new();
-        let had_protocol_error = relay_sdk_host_jsonl(&input[..], &mut output).unwrap();
+        let had_protocol_error = relay_sdk_host_jsonl(input.as_bytes(), &mut output).unwrap();
         assert!(had_protocol_error);
+        assert!(
+            output.len() < 100,
+            "oversized JSONL records must be discarded"
+        );
         assert_eq!(
             String::from_utf8(output).unwrap(),
             "{\"type\":\"agent_start\"}\n{\"type\":\"agent_end\"}\n"
@@ -3268,25 +3312,14 @@ requires_openai_auth = true
     }
 
     #[test]
-    fn pi_chat_permission_gate_is_bounded_and_fail_closed() {
-        let gate = pi_chat_permission_gate_source();
-        assert!(gate.contains("read\", \"grep\", \"find\", \"ls"));
-        assert!(gate.contains("input.length > 4000"));
-        assert!(gate.contains("STARLING_PERMISSION_TIMEOUT_MS = 30000"));
-        assert!(gate.contains("ctx.ui?.confirm"));
-        assert!(gate.contains("approved = false"));
-        assert!(gate.contains("block: true"));
-        assert!(pi_chat_permission_gate_registration_source().contains("tool_call"));
-    }
-
-    #[test]
-    fn pi_chat_disables_discovered_extensions_but_loads_starling_gate() {
+    fn pi_chat_disables_discovered_extensions_and_enables_the_node_gate() {
         let mut args = Vec::new();
         append_pi_runtime_extension_args(&mut args, Path::new("/tmp/starling-pi-runtime.js"), true);
         assert_eq!(
             args,
             vec![
                 "--no-extensions",
+                "--starling-managed",
                 "--extension",
                 "/tmp/starling-pi-runtime.js"
             ]
@@ -3312,6 +3345,7 @@ fn append_pi_runtime_extension_args(
 ) {
     if enforce_pi_permissions {
         args.push("--no-extensions".into());
+        args.push("--starling-managed".into());
     }
     args.push("--extension".into());
     args.push(extension_file.to_string_lossy().to_string());
@@ -3510,11 +3544,10 @@ fn prepare_launch_with_pi_permissions(
             }
 
             if attach_hook {
-                let hook =
-                    create_pi_runtime_extension_with_permissions(run_id, enforce_pi_permissions)?;
+                let hook = create_pi_runtime_extension(run_id)?;
                 // Chat RPC has no native terminal permission UI. Disable all
                 // discovered user/project extensions so a custom tool cannot
-                // shadow a read-only built-in name and bypass this gate.
+                // shadow a read-only built-in name and bypass the Node gate.
                 // Pi still loads the explicit Starling runtime extension.
                 append_pi_runtime_extension_args(
                     &mut args,
@@ -4481,69 +4514,7 @@ fn pi_session_switch_guard_registration_source() -> &'static str {
   pi.on("session_before_fork", blockManagedSessionChange);"#
 }
 
-fn pi_chat_permission_gate_source() -> &'static str {
-    r#"// Pi-style risk-based permission gate: only intercept genuinely destructive
-// operations, auto-allow everything else. Mirrors pi's official
-// examples/extensions/permission-gate.ts and protected-paths.ts.
-const STARLING_PERMISSION_TIMEOUT_MS = 30000;
-const STARLING_DANGEROUS_BASH_PATTERNS = [
-  /\brm\b\s+(-[a-z]*r|--recursive)/i,
-  /\brm\b\s+(-[a-z]*f|--force)\b/i,
-  /\bsudo\b/i,
-  /\b(chmod|chown)\b[^|\n]*\b777\b/i,
-  /\bgit\b\s+push\b.*--force(?!-)/i,
-  /\bdd\b[^|\n]*\bof=/i,
-  /\bmkfs\b/i,
-  /\b(shutdown|reboot|halt|poweroff)\b/i,
-];
-const STARLING_PROTECTED_WRITE_PATHS = [".env", ".git/", "node_modules/"];
-
-async function enforceStarlingToolPermission(event, ctx) {
-  const toolName = String(event?.toolName ?? "").trim().toLowerCase();
-  const input = (event && typeof event.input === "object" && event.input) ? event.input : {};
-
-  if (toolName === "bash") {
-    const command = String(input.command ?? "");
-    if (STARLING_DANGEROUS_BASH_PATTERNS.some((p) => p.test(command))) {
-      let approved = false;
-      try {
-        approved = (await ctx.ui?.confirm?.(
-          `⚠️ Dangerous command:\n\n  ${command}\n\nAllow?`,
-          command,
-          { timeout: STARLING_PERMISSION_TIMEOUT_MS },
-        )) === true;
-      } catch (_) {
-        approved = false;
-      }
-      if (!approved) {
-        return { block: true, reason: `Starling blocked destructive bash: ${command}` };
-      }
-    }
-    return;
-  }
-
-  if (toolName === "write" || toolName === "edit") {
-    const target = String(input.path ?? "");
-    if (STARLING_PROTECTED_WRITE_PATHS.some((p) => target.includes(p))) {
-      ctx.ui?.notify?.(`Blocked write to protected path: ${target}`, "warning");
-      return { block: true, reason: `Path "${target}" is protected by Starling` };
-    }
-  }
-}"#
-}
-
-fn pi_chat_permission_gate_registration_source() -> &'static str {
-    r#"  pi.on("tool_call", enforceStarlingToolPermission);"#
-}
-
 pub(crate) fn create_pi_runtime_extension(run_id: &str) -> Result<PiRuntimeExtension> {
-    create_pi_runtime_extension_with_permissions(run_id, false)
-}
-
-fn create_pi_runtime_extension_with_permissions(
-    run_id: &str,
-    enforce_permissions: bool,
-) -> Result<PiRuntimeExtension> {
     let dir = default_starling_home().join("run-hooks");
     std::fs::create_dir_all(&dir)?;
     let extension_file = dir.join(format!("{run_id}.pi-extension.mjs"));
@@ -4556,7 +4527,6 @@ const RUN_ID = __RUN_ID__;
 const HOOK_FILE = __HOOK_FILE__;
 
 __SESSION_GUARD__
-__PERMISSION_GATE__
 
 function emit(eventName, event, ctx) {
   try {
@@ -4589,7 +4559,6 @@ export default function (pi) {
   // The inherited OS lock protects exactly one transcript. Prevent Pi's
   // in-process /new, /resume, and /fork flows from changing that identity.
 __SESSION_GUARD_REGISTRATIONS__
-__PERMISSION_GATE_REGISTRATION__
   pi.on("session_start", (event, ctx) => emit("SessionStart", event, ctx));
   pi.on("before_agent_start", (event, ctx) => emit("UserPromptSubmit", event, ctx));
   pi.on("tool_execution_start", (event, ctx) => emit("PreToolUse", event, ctx));
@@ -4606,24 +4575,8 @@ __PERMISSION_GATE_REGISTRATION__
         .replace("__RUN_ID__", &serde_json::to_string(run_id)?)
         .replace("__SESSION_GUARD__", pi_session_switch_guard_source())
         .replace(
-            "__PERMISSION_GATE__",
-            if enforce_permissions {
-                pi_chat_permission_gate_source()
-            } else {
-                ""
-            },
-        )
-        .replace(
             "__SESSION_GUARD_REGISTRATIONS__",
             pi_session_switch_guard_registration_source(),
-        )
-        .replace(
-            "__PERMISSION_GATE_REGISTRATION__",
-            if enforce_permissions {
-                pi_chat_permission_gate_registration_source()
-            } else {
-                ""
-            },
         )
         .replace(
             "__HOOK_FILE__",

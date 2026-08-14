@@ -26,7 +26,6 @@ const exitCode = await runStarlingTui({
       extensions: [],
       noExtensions: false,
       surface: "tui",
-      starlingManaged: true,
     });
     setTimeout(options.onShutdownRequested, 40);
     return {

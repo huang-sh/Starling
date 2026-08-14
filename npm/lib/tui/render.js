@@ -1,7 +1,7 @@
 import os from "node:os";
 import { selectedAuthProvider, visibleAuthProviders, } from "./auth-picker.js";
 import { filterSlashCommands } from "./commands.js";
-import { MODEL_CONFIG_ACTIONS, modelPickerProviders, modelRoleMatches, modelRoleTags, selectedModelPickerModel, thinkingOptionsForModel, visibleModelPickerModels, } from "./model-picker.js";
+import { modelPickerProviders, selectedModelPickerModel, thinkingOptionsForModel, visibleModelPickerModels, } from "./model-picker.js";
 import { TREE_SUMMARY_ACTIONS, selectedTreeEntry, visibleTreeEntries, } from "./tree-picker.js";
 export const STARLING_TUI_WIDE_MIN_COLUMNS = 100;
 /**
@@ -19,9 +19,10 @@ export function renderStarlingFrame(state, viewport) {
         return renderCompactFrame(state, width, height, tick, viewport.color === true);
     }
     const footer = renderFooter(state, width, height, tick);
+    const intro = renderEmptyWorkspace(state, width);
     const transcript = state.timeline.length === 0
-        ? renderEmptyWorkspace(state, width)
-        : renderTranscriptLines(state, width);
+        ? intro
+        : [...intro, { text: "" }, ...renderTranscriptLines(state, width)];
     const bodySource = state.modelPicker || state.treePicker || (state.authPicker && !state.authPicker.working)
         ? []
         : state.timeline.length === 0 && state.activity.length > 0
@@ -46,7 +47,7 @@ function buildTranscriptRecords(state) {
         ...state.activity.map((value) => ({ id: value.id, kind: "activity", value })),
     ].sort((left, right) => left.id - right.id);
 }
-function renderRecordRange(records, start, end, width) {
+function renderRecordRange(state, records, start, end, width) {
     const lines = [];
     for (let i = start; i < end; i += 1) {
         const record = records[i];
@@ -56,7 +57,7 @@ function renderRecordRange(records, start, end, width) {
             lines.push(...renderActivityLines([record.value], width));
         }
         else {
-            lines.push(...renderTimelineEntry(record.value, width));
+            lines.push(...renderTimelineEntry(record.value, width, state.toolsExpanded, state.thinkingVisible, state.hiddenThinkingLabel));
         }
     }
     return lines;
@@ -84,8 +85,12 @@ function renderTranscriptSplit(state, width) {
         split -= 1;
     }
     return {
-        committed: renderRecordRange(records, 0, split, contentWidth),
-        liveTail: renderRecordRange(records, split, records.length, contentWidth),
+        committed: [
+            ...renderEmptyWorkspace(state, contentWidth),
+            { text: "" },
+            ...renderRecordRange(state, records, 0, split, contentWidth),
+        ],
+        liveTail: renderRecordRange(state, records, split, records.length, contentWidth),
     };
 }
 /**
@@ -133,7 +138,7 @@ export function renderTimelineLines(state, width) {
     for (const entry of state.timeline) {
         if (lines.length > 0)
             lines.push({ text: "" });
-        lines.push(...renderTimelineEntry(entry, contentWidth));
+        lines.push(...renderTimelineEntry(entry, contentWidth, state.toolsExpanded, state.thinkingVisible, state.hiddenThinkingLabel));
     }
     return lines;
 }
@@ -170,7 +175,7 @@ export function renderTranscriptLines(state, width) {
             lines.push(...renderActivityLines([record.value], contentWidth));
             continue;
         }
-        lines.push(...renderTimelineEntry(record.value, contentWidth));
+        lines.push(...renderTimelineEntry(record.value, contentWidth, state.toolsExpanded, state.thinkingVisible, state.hiddenThinkingLabel));
     }
     return lines;
 }
@@ -594,11 +599,9 @@ function renderTreePicker(picker, width, height, tick) {
     return rows;
 }
 function renderModelPicker(picker, width, height) {
-    const actions = picker.stage === "actions" && picker.actionModel
-        ? renderModelActions(picker, width)
-        : picker.stage === "thinking" && picker.actionModel
-            ? renderModelThinking(picker, width)
-            : [];
+    const actions = picker.stage === "thinking" && picker.actionModel
+        ? renderModelThinking(picker, width)
+        : [];
     const rows = [];
     rows.push(...renderModelProviderTabs(picker, width));
     rows.push({
@@ -626,12 +629,10 @@ function renderModelPicker(picker, width, height) {
             const absoluteIndex = start + index;
             const marker = absoluteIndex === selected ? "›" : " ";
             const current = model.selector === picker.current ? "  CURRENT" : "";
-            const roles = modelRoleTags(picker, model.selector);
-            const roleTags = roles.length > 0 ? `  ${roles.join(" ")}` : "";
             const reasoning = model.reasoning ? "  reasoning" : "";
             const context = model.contextWindow ? `  ${formatTokenCount(model.contextWindow)} ctx` : "";
             rows.push({
-                text: `${marker} ${model.selector}${current}${roleTags}${reasoning}${context}`,
+                text: `${marker} ${model.selector}${current}${reasoning}${context}`,
                 tone: absoluteIndex === selected
                     ? "active"
                     : model.selector === picker.current ? "success" : "muted",
@@ -659,41 +660,13 @@ function renderModelPicker(picker, width, height) {
     }
     return rows;
 }
-function renderModelActions(picker, width) {
-    const model = picker.actionModel;
-    const rows = [
-        { text: "" },
-        { text: "─".repeat(Math.min(18, width)), tone: "muted" },
-        { text: `Action for: ${model.id}`, tone: "assistant" },
-        { text: "" },
-    ];
-    MODEL_CONFIG_ACTIONS.forEach((action, index) => {
-        const marker = index === picker.actionSelected ? "›" : " ";
-        const current = modelRoleMatches(picker.roles[action.role], model.selector) ? "  CURRENT" : "";
-        rows.push({
-            text: `${marker} Set as ${action.tag} (${action.name})${current}`,
-            tone: index === picker.actionSelected ? "active" : current ? "success" : "muted",
-        });
-    });
-    if (picker.error) {
-        rows.push({ text: "" });
-        rows.push({ text: `× ${picker.error}`, tone: "error" });
-    }
-    rows.push({ text: "" });
-    rows.push({
-        text: picker.switching ? "Saving model configuration…" : "Enter: continue  Esc: cancel",
-        tone: picker.switching ? "active" : "muted",
-    });
-    return rows;
-}
 function renderModelThinking(picker, width) {
     const model = picker.actionModel;
-    const action = MODEL_CONFIG_ACTIONS[picker.actionSelected];
     const options = thinkingOptionsForModel(model);
     const rows = [
         { text: "" },
         { text: "─".repeat(Math.min(18, width)), tone: "muted" },
-        { text: `Thinking for: ${model.id} · ${action?.tag ?? "MODEL"}`, tone: "assistant" },
+        { text: `Thinking for: ${model.id}`, tone: "assistant" },
         { text: "" },
     ];
     options.forEach((option, index) => {
@@ -829,8 +802,7 @@ function slashDisplayName(command) {
 }
 function renderInteraction(state, width, height, tick) {
     const prompt = state.uiPrompt;
-    const title = prompt.method === "confirm" ? "PERMISSION REQUIRED" : prompt.title;
-    const rows = [{ text: boxRule("╭─ ", title, " ╮", width), tone: "active" }];
+    const rows = [{ text: boxRule("╭─ ", prompt.title, " ╮", width), tone: "active" }];
     const messageLimit = Math.max(2, Math.min(10, height - 7));
     let emitted = 0;
     for (const logical of (prompt.message || prompt.title).split("\n")) {
@@ -898,7 +870,7 @@ function maskEditorValue(value, cursor) {
         cursor: graphemes(value.slice(0, at)).length,
     };
 }
-function renderTimelineEntry(entry, width) {
+function renderTimelineEntry(entry, width, toolsExpanded, thinkingVisible, hiddenThinkingLabel) {
     if (entry.kind === "user") {
         return wrapTerminalText(entry.text, Math.max(1, width - 4)).map((text) => ({
             text: `  ${text}`,
@@ -907,12 +879,15 @@ function renderTimelineEntry(entry, width) {
     }
     if (entry.kind === "assistant") {
         const output = [];
-        if (entry.thinking) {
+        if (entry.thinking && thinkingVisible) {
             const thinking = wrapTerminalText(entry.thinking, Math.max(1, width - 4));
             for (const text of thinking)
                 output.push({ text: `  ${text}`, tone: "thinking" });
         }
         const body = entry.text || (entry.pending ? "…" : "");
+        if (entry.thinking && !thinkingVisible) {
+            output.push({ text: `  ${hiddenThinkingLabel}`, tone: "thinking" });
+        }
         if (entry.thinking && body)
             output.push({ text: "" });
         if (body) {
@@ -928,7 +903,8 @@ function renderTimelineEntry(entry, width) {
         const tone = entry.toolState === "error"
             ? "toolError"
             : entry.toolState === "done" ? "tool" : "toolActive";
-        const body = wrapTerminalText(entry.text || "Waiting for output…", Math.max(1, width - 6)).slice(0, 6);
+        const wrapped = wrapTerminalText(entry.text || "Waiting for output…", Math.max(1, width - 6));
+        const body = toolsExpanded ? wrapped : wrapped.slice(0, 6);
         return [
             { text: `  ${glyph} ${entry.toolName || "tool"}`, tone },
             ...body.map((text) => ({ text: `    ${text}`, tone })),
@@ -950,8 +926,14 @@ function takeViewport(lines, height, scrollOffset) {
 function phaseGlyph(state, tick) {
     if (state.phase === "error")
         return "×";
-    if (state.busy || state.compacting)
+    if (state.busy || state.compacting) {
+        if (!state.workingVisible)
+            return "·";
+        const frames = state.workingIndicatorFrames;
+        if (frames)
+            return frames.length > 0 ? sanitizeTerminalText(frames[tick % frames.length] ?? "", false) : "";
         return spinner(tick);
+    }
     if (state.ready)
         return "●";
     return "○";
@@ -1232,5 +1214,13 @@ function toneCode(tone) {
 /** Extract the first http(s) URL from a line, trimming trailing punctuation. */
 function detectUrl(text) {
     const match = text.match(/https?:\/\/[^\s]+/);
-    return match ? match[0].replace(/[.,;:!?)\]}]+$/, "") : undefined;
+    const candidate = match?.[0].replace(/[.,;:!?)\]}]+$/, "");
+    if (!candidate || /[\u0000-\u001f\u007f-\u009f]/u.test(candidate))
+        return undefined;
+    try {
+        return /^https?:$/u.test(new URL(candidate).protocol) ? candidate : undefined;
+    }
+    catch {
+        return undefined;
+    }
 }

@@ -29,9 +29,7 @@ import {
   type TreePickerState,
 } from "./tree-picker.js";
 import {
-  MODEL_CONFIG_ACTIONS,
   modelPickerProviders,
-  modelRoleThinkingLevel,
   thinkingOptionsForModel,
   visibleModelPickerModels,
   type ModelPickerModel,
@@ -91,6 +89,13 @@ export interface StarlingTuiState {
   ready: boolean;
   busy: boolean;
   compacting: boolean;
+  bashRunning: boolean;
+  thinkingVisible: boolean;
+  toolsExpanded: boolean;
+  workingMessage?: string;
+  workingVisible: boolean;
+  workingIndicatorFrames?: string[];
+  hiddenThinkingLabel: string;
   runId?: string;
   sessionId?: string;
   sessionName?: string;
@@ -137,6 +142,8 @@ export type StarlingTuiAction =
   | { type: "composer.line"; delta: -1 | 1 }
   | { type: "composer.home" }
   | { type: "composer.end" }
+  | { type: "thinking.visibility"; visible: boolean }
+  | { type: "tools.expanded"; expanded: boolean }
   | { type: "history.push"; text: string }
   | { type: "history.prev" }
   | { type: "history.next" }
@@ -167,17 +174,14 @@ export type StarlingTuiAction =
   | { type: "tree.custom.clear" }
   | { type: "tree.working" }
   | { type: "tree.failed"; message: string }
-  | { type: "model.open"; models: ModelPickerModel[]; current: string; roles: Record<string, string> }
+  | { type: "model.open"; models: ModelPickerModel[]; current: string }
   | { type: "model.close" }
   | { type: "model.query.append"; value: string }
   | { type: "model.query.backspace" }
   | { type: "model.query.clear" }
   | { type: "model.select"; delta: number }
   | { type: "model.provider"; delta: number }
-  | { type: "model.action.open"; model: ModelPickerModel }
-  | { type: "model.action.close" }
-  | { type: "model.action.select"; delta: number }
-  | { type: "model.thinking.open" }
+  | { type: "model.thinking.open"; model: ModelPickerModel }
   | { type: "model.thinking.close" }
   | { type: "model.thinking.select"; delta: number }
   | { type: "model.switching" }
@@ -227,6 +231,11 @@ export function createInitialStarlingTuiState(cwd: string): StarlingTuiState {
     ready: false,
     busy: false,
     compacting: false,
+    bashRunning: false,
+    thinkingVisible: true,
+    toolsExpanded: false,
+    workingVisible: true,
+    hiddenThinkingLabel: "[thinking hidden]",
     model: "default model",
     thinking: "",
     queueDepth: 0,
@@ -274,6 +283,10 @@ export function reduceStarlingTui(
       return { ...state, composerCursor: lineStart(state.composer, state.composerCursor) };
     case "composer.end":
       return { ...state, composerCursor: lineEnd(state.composer, state.composerCursor) };
+    case "thinking.visibility":
+      return { ...state, thinkingVisible: action.visible };
+    case "tools.expanded":
+      return { ...state, toolsExpanded: action.expanded };
     case "history.push": {
       const text = action.text.trim();
       if (!text) return state;
@@ -490,12 +503,10 @@ export function reduceStarlingTui(
       const picker: ModelPickerState = {
         models: action.models,
         current: action.current,
-        roles: action.roles ?? {},
         stage: "models",
         provider: "",
         query: "",
         selected: 0,
-        actionSelected: 0,
         thinkingSelected: 0,
         switching: false,
       };
@@ -547,61 +558,15 @@ export function reduceStarlingTui(
         modelPicker: { ...state.modelPicker, provider, selected: 0, error: undefined },
       };
     }
-    case "model.action.open":
-      return state.modelPicker
-        ? {
-          ...state,
-          modelPicker: {
-            ...state.modelPicker,
-            stage: "actions",
-            actionModel: action.model,
-            actionSelected: 0,
-            thinkingSelected: 0,
-            error: undefined,
-          },
-        }
-        : state;
-    case "model.action.close":
-      return state.modelPicker
-        ? {
-          ...state,
-          modelPicker: {
-            ...state.modelPicker,
-            stage: "models",
-            actionModel: undefined,
-            actionSelected: 0,
-            thinkingSelected: 0,
-            switching: false,
-            error: undefined,
-          },
-        }
-        : state;
-    case "model.action.select": {
-      if (!state.modelPicker || state.modelPicker.stage !== "actions" || state.modelPicker.switching) return state;
-      const count = MODEL_CONFIG_ACTIONS.length;
-      return {
-        ...state,
-        modelPicker: {
-          ...state.modelPicker,
-          actionSelected: (state.modelPicker.actionSelected + action.delta % count + count) % count,
-          error: undefined,
-        },
-      };
-    }
     case "model.thinking.open": {
-      if (!state.modelPicker || state.modelPicker.stage !== "actions" || !state.modelPicker.actionModel) return state;
-      const model = state.modelPicker.actionModel;
-      const action = MODEL_CONFIG_ACTIONS[state.modelPicker.actionSelected];
-      if (!action) return state;
-      const options = thinkingOptionsForModel(model);
-      const current = modelRoleThinkingLevel(state.modelPicker.roles[action.role], model.selector);
-      const selected = options.findIndex(({ level }) => level === current);
+      if (!state.modelPicker || state.modelPicker.stage !== "models") return state;
       return {
         ...state,
         modelPicker: {
           ...state.modelPicker,
           stage: "thinking",
-          thinkingSelected: selected < 0 ? 0 : selected,
+          actionModel: action.model,
+          thinkingSelected: 0,
           error: undefined,
         },
       };
@@ -612,7 +577,8 @@ export function reduceStarlingTui(
           ...state,
           modelPicker: {
             ...state.modelPicker,
-            stage: "actions",
+            stage: "models",
+            actionModel: undefined,
             thinkingSelected: 0,
             switching: false,
             error: undefined,
@@ -829,6 +795,7 @@ function reduceChatEvent(state: StarlingTuiState, event: ChatEvent): StarlingTui
         ready: false,
         busy: false,
         compacting: false,
+        bashRunning: false,
         status: label,
         uiPrompt: undefined,
         authPicker: undefined,
@@ -845,9 +812,19 @@ function reduceChatEvent(state: StarlingTuiState, event: ChatEvent): StarlingTui
     case "session.thinking.changed":
       return { ...state, thinking: event.level };
     case "turn.started":
-      return { ...state, busy: true, phase: "working", status: "Agent is working…" };
+      return {
+        ...state,
+        busy: true,
+        phase: "working",
+        status: state.workingMessage || "Agent is working…",
+      };
     case "turn.generating":
-      return { ...state, busy: true, phase: "working", status: "Generating…" };
+      return {
+        ...state,
+        busy: true,
+        phase: "working",
+        status: state.workingMessage || "Generating…",
+      };
     case "turn.finalizing":
       return { ...state, status: "Finalizing…" };
     case "turn.settled":
@@ -887,6 +864,35 @@ function reduceChatEvent(state: StarlingTuiState, event: ChatEvent): StarlingTui
         event.failed ? "error" : "done",
         event.name,
       );
+    case "bash.started":
+      return appendTimeline(
+        {
+          ...state,
+          bashRunning: true,
+          phase: "working",
+          status: "Running shell command…",
+        },
+        {
+          kind: "tool",
+          text: event.command,
+          toolCallId: event.id,
+          toolName: event.excluded ? "bash (!!)" : "bash",
+          toolState: "running",
+        },
+      );
+    case "bash.updated":
+      return updateTool(state, event.id, event.output, "running", "bash");
+    case "bash.completed": {
+      const next = {
+        ...state,
+        bashRunning: false,
+        phase: state.busy || state.compacting ? "working" as const : "ready" as const,
+        status: state.busy
+          ? state.status
+          : state.compacting ? "Compacting context…" : "Ready",
+      };
+      return updateTool(next, event.id, event.output, event.failed ? "error" : "done", "bash");
+    }
     case "queue.changed":
       return { ...state, queueDepth: event.depth };
     case "context.compaction.started":
@@ -940,6 +946,16 @@ function reduceChatEvent(state: StarlingTuiState, event: ChatEvent): StarlingTui
     }
     case "terminal.title.changed":
       return { ...state, terminalTitle: event.title };
+    case "working.message.changed":
+      return { ...state, workingMessage: event.message };
+    case "working.visibility.changed":
+      return { ...state, workingVisible: event.visible };
+    case "working.indicator.changed":
+      return { ...state, workingIndicatorFrames: event.frames };
+    case "thinking.label.changed":
+      return { ...state, hiddenThinkingLabel: event.label || "[thinking hidden]" };
+    case "tools.expanded.changed":
+      return { ...state, toolsExpanded: event.expanded };
     case "diagnostic":
       return reduceDiagnostic(state, event.level === "error" ? "error" : "info", event.message);
     case "interaction.requested":
@@ -980,11 +996,15 @@ function hydrateSnapshot(state: StarlingTuiState, snapshot: ChatSessionSnapshot)
     ready: true,
     busy: snapshot.streaming,
     compacting,
+    bashRunning: false,
     sessionId: snapshot.sessionId,
     sessionName: snapshot.sessionName,
     sessionFile: snapshot.sessionFile,
     model: snapshot.model,
     thinking: snapshot.thinking,
+    thinkingVisible: snapshot.hideThinkingBlock === undefined
+      ? state.thinkingVisible
+      : !snapshot.hideThinkingBlock,
     queueDepth: snapshot.queueDepth,
     timeline: normalized.timeline,
     nextId: normalized.nextId,

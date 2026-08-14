@@ -14,6 +14,23 @@ test("terminal input parser recognizes navigation, control, Unicode, and alt-ent
   ]);
 });
 
+test("terminal input parser recognizes Pi application shortcuts", () => {
+  assert.deepEqual(parseStarlingKeys("\u001b[Z\u0010\u000c\u000f\u0014\u0018\u001a"), [
+    { type: "shift-tab" },
+    { type: "ctrl-p" },
+    { type: "ctrl-l" },
+    { type: "ctrl-o" },
+    { type: "ctrl-t" },
+    { type: "ctrl-x" },
+    { type: "ctrl-z" },
+  ]);
+  assert.deepEqual(parseStarlingKeys("\u001b[1;3A\u001b[13;2u\u001b[112;6u"), [
+    { type: "alt-up" },
+    { type: "shift-enter" },
+    { type: "shift-ctrl-p" },
+  ]);
+});
+
 test("bracketed paste remains one edit across arbitrary stream chunks", () => {
   const decoder = new StarlingInputDecoder();
 

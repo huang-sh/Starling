@@ -7,10 +7,11 @@ import {
   reduceStarlingTui,
 } from "../lib/tui/index.js";
 import {
+  MAX_TOOL_TEXT_BYTES,
   normalizeChatRecord,
   normalizeChatSnapshot,
 } from "../lib/tui/events.js";
-import { StrictJsonlDecoder } from "../lib/tui/protocol.js";
+import { MAX_JSONL_LINE_BYTES, StrictJsonlDecoder } from "../lib/tui/protocol.js";
 
 function dispatchRecords(state, records) {
   for (const record of records) {
@@ -142,6 +143,24 @@ test("normalizer consumes official Pi thinking, compaction, and retry events", (
   assert.ok(state.activity.some((entry) => entry.label === "retry" && entry.detail === "rate limited"));
 });
 
+test("Pi extension presentation controls update Starling-owned UI state", () => {
+  let state = createInitialStarlingTuiState("/work/starling");
+  state = dispatchRecords(state, [
+    { type: "extension_ui_request", id: "working", method: "setWorkingMessage", message: "Indexing" },
+    { type: "extension_ui_request", id: "visible", method: "setWorkingVisible", visible: false },
+    { type: "extension_ui_request", id: "indicator", method: "setWorkingIndicator", options: { frames: ["A", "B"] } },
+    { type: "extension_ui_request", id: "thinking", method: "setHiddenThinkingLabel", label: "Reasoning folded" },
+    { type: "extension_ui_request", id: "tools", method: "setToolsExpanded", expanded: true },
+    { type: "agent_start" },
+  ]);
+
+  assert.equal(state.status, "Indexing");
+  assert.equal(state.workingVisible, false);
+  assert.deepEqual(state.workingIndicatorFrames, ["A", "B"]);
+  assert.equal(state.hiddenThinkingLabel, "Reasoning folded");
+  assert.equal(state.toolsExpanded, true);
+});
+
 test("Pi assistant errors and aborts remain visible after live message completion", () => {
   let state = createInitialStarlingTuiState("/work/starling");
   state = dispatchRecords(state, [
@@ -208,6 +227,19 @@ test("normalizer ignores non-Pi compatibility field names", () => {
   }), []);
   assert.deepEqual(normalizeChatRecord({ type: "auto_compaction_start" }), []);
   assert.deepEqual(normalizeChatRecord({ type: "auto_compaction_end" }), []);
+});
+
+test("tool output is capped by UTF-8 bytes", () => {
+  const [event] = normalizeChatRecord({
+    type: "tool_execution_end",
+    toolCallId: "large-tool",
+    toolName: "read",
+    result: "界".repeat(MAX_TOOL_TEXT_BYTES),
+  });
+
+  assert.equal(event.type, "tool.completed");
+  assert.ok(Buffer.byteLength(event.output, "utf8") <= MAX_TOOL_TEXT_BYTES);
+  assert.match(event.output, /tool output truncated by Starling/);
 });
 
 test("confirmation prompts default to deny", () => {
@@ -345,6 +377,14 @@ test("strict JSONL decoder preserves Unicode line separators and UTF-8 chunks", 
     ...decoder.end(),
   ];
   assert.deepEqual(lines, ['{"text":"一 二"}', '{"ok":true}']);
+
+  const errors = [];
+  const bounded = new StrictJsonlDecoder((error) => errors.push(error.message));
+  assert.deepEqual(
+    bounded.push(`${"x".repeat(MAX_JSONL_LINE_BYTES + 1)}\n{"recovered":true}\n`),
+    ['{"recovered":true}'],
+  );
+  assert.deepEqual(errors, [`JSONL line exceeds ${MAX_JSONL_LINE_BYTES} bytes`]);
 });
 
 test("input history recalls submitted prompts and slash commands via Up/Down", () => {

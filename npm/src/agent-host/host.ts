@@ -153,7 +153,7 @@ export async function runAgentHost(options: RunAgentHostOptions): Promise<number
     const opening = runtime.open(launchOptions);
     const detach = attachStrictJsonlReader(options.input, (line) => {
       void runtime.handleLine(line);
-    });
+    }, (error) => options.diagnostic(error.message));
     finish = (code: number, drain = false, failure?: unknown): void => {
       if (finishing) {
         if (!drain && draining) {

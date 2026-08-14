@@ -75,7 +75,7 @@ npm 安装时还会把 Starling skill 安装到：
 npm explore -g starling-ai -- npm run install:skill
 ```
 
-npm 版 Starling 需要 Node.js 22.19.0 或更新版本，并固定依赖 `@earendil-works/pi-coding-agent` 0.82.0。裸 `starling` 会在 launcher 进程内通过 `createAgentSession()` 直接创建 Pi，不会启动 native chat supervisor、Pi CLI 或 JSONL 子进程；普通 session 管理命令不会初始化 SDK。`starling run pi` 继续作为启动 Pi 原生 CLI 的独立兼容入口。
+npm 版 Starling 需要 Node.js 22.19.0 或更新版本，并固定依赖 `@earendil-works/pi-coding-agent` 0.82.0。裸 `starling` 会在 launcher 进程内通过 `createAgentSession()` 直接创建 Pi，不会启动 native chat supervisor、Pi CLI 或 JSONL 子进程；普通 session 管理命令不会初始化 SDK。Pi resource loader 发起的 npm/pnpm 包安装会继承 `ignore-scripts`，不会执行依赖的生命周期脚本。`starling run pi` 继续作为启动 Pi 原生 CLI 的独立兼容入口。
 
 ## 快速开始
 
@@ -87,7 +87,15 @@ starling
 
 这里启动的是 Starling 自己的 TUI，并在同一个 Node 进程中嵌入 Pi。Starling 会直接记录 run，让活动 SDK session 仍可被 `starling top` 看到，并在等待 SDK shutdown 前先恢复终端。界面归 Starling 所有：只参考 OMP 的布局、输入解码、差量绘制和 synchronized-output 机制，不导入、不依赖也不会启动 Pi/OMP TUI。
 
-在编辑器中输入 `/` 会打开斜杠命令菜单。使用上/下方向键选择，Tab 或 Enter 补全，再按一次 Enter 执行。Starling 自己实现了 `/help`、`/model`、`/thinking`、`/compact`、`/name`、`/session`、`/reload` 和 `/quit`；同一个菜单还会通过公开 SDK 动态发现 Pi extension 命令、prompt template 与 `skill:*` 命令。裸 `starling` 会加载已经信任的 Pi 用户级/项目级资源，因此这些动态命令可以正常出现，同时继续启用 Starling 的权限确认与 transcript 锁定保护。
+在编辑器中输入 `/` 会打开斜杠命令菜单。使用上/下方向键选择，Tab 补全，或按 Enter 执行精确匹配的命令。Starling 实现了 Pi 的 `/settings`、`/new`、`/resume`、`/fork`、`/clone`、`/import`、`/export`、`/copy`、`/scoped-models`、`/model`、`/tree`、`/login`、`/logout`、`/thinking`、`/compact`、`/name`、`/session`、`/share`、`/changelog`、`/hotkeys`、`/trust` 与 `/reload` 工作流，另有 `/help` 和 `/quit`。同一菜单还会通过公开 SDK 动态发现 Pi extension 命令、prompt template 与 `skill:*` 命令。输入以 `!` 开头会运行 bash 并把结果放入上下文；`!!` 则不放入上下文。
+
+`/new`、`/resume`、`/fork`、`/clone` 与 `/import` 通过 `AgentSessionRuntime` 替换当前 Pi session，并立即刷新 Starling transcript 与受跟踪的 session identity。裸 `/model` 会打开由 SDK 支持的可搜索模型选择器（上/下选择，Tab 或左/右切换 provider）。按 Enter 先选择模型，再选择 thinking level；保存后会切换当前会话，并通过公开 SDK settings API 把它持久化为 Pi 默认模型。`/model <provider/model>` 仍可直接切换当前会话模型。
+
+Pi 的主要应用快捷键会经过 Starling TUI：Shift+Tab 切换 thinking level，Ctrl+P / Shift+Ctrl+P 前后切换模型，Ctrl+L 打开模型选择器，Ctrl+O 展开工具输出，Ctrl+T 切换 thinking block，Ctrl+X 复制最新 Agent 消息，Alt+Up 恢复排队消息，Ctrl+Z 挂起进程。Enter 发送；Shift+Enter 或 Alt+Enter 插入换行，因此保留 Starling 现有编辑器行为和头部提示。
+
+使用 `/tree` 可以在不创建新 session 文件的情况下浏览 Pi 当前会话树。选择器读取 `SessionManager.getTree()`、保留 Pi 原始 entry ID，并在调用 `AgentSession.navigateTree()` 前询问如何处理被放弃的分支：直接丢弃、自动总结或按自定义提示总结。
+
+使用 `/login` 选择 Pi provider，并配置 subscription/OAuth 或 API key；`/login <provider>` 可直接跳到匹配项。Starling 会在界面中显示 OAuth URL 与 device code，遮蔽秘密输入，并拒绝把终端控制字符写入可点击 URL 目标。`/logout` 只列出 Pi 已存储的凭据，`/logout <provider>` 可直接移除一个；logout 不会修改 provider 环境变量或 `models.json`。裸 `starling` 会加载已信任的 Pi 用户级/项目级资源，并且不安装外部 JSONL adapter 的权限/session gate，因此 extension 命令与 extension 驱动的 session replacement 均可使用；Pi extension UI request 由 Starling TUI 渲染。
 
 列出最近会话：
 
@@ -150,9 +158,9 @@ starling chat --cwd /path/to/project --title "Review" pi
 starling chat --cwd /path/to/project pi --session /absolute/path/to/session.jsonl
 ```
 
-`starling chat pi` 是 Starling 的外部 JSONL 适配器；裸 `starling` 不依赖它。两种入口使用同一个 `ChatSession` 模块，并采用 OMP 的同进程 SDK 生命周期：创建 agent session、订阅 SDK 事件、直接提交 prompt，最后取消订阅并 dispose。在 Starling 固定使用的 Node 兼容 Pi SDK 中，这套生命周期会先构造 `ModelRuntime`、`SessionManager`、`SettingsManager` 和 `DefaultResourceLoader`，再调用 `createAgentSession()`。适配器不会执行 `pi --mode rpc`，也不会启动 Pi TUI。新 chat 由 `SessionManager.create()` 生成真实 session identity，不会预分配 `--session-id`；恢复时的 `--session` 只接受已有 Pi transcript 的绝对路径。标准输入与 SDK 事件采用换行分隔 JSON。标准输出只包含以 LF 结尾的 JSON 记录：Starling 会在兼容消息前后发送 `starling_started` 与 `starling_exited`，其 `schema` 为 `starling.chat`、`schemaVersion` 为 `1`。诊断日志只写到标准错误。
+`starling chat pi` 是 Starling 的外部 JSONL 适配器；裸 `starling` 不依赖它。两种入口共用同一个与传输无关的 `ChatSession.request()` API，覆盖 prompt、interrupt/queue、模型与 thinking 切换、compaction、bash、export/copy、settings/trust/authentication，以及 new/resume/fork/clone/import session replacement。它们采用 OMP 的同进程 SDK 生命周期：创建 agent session、订阅 SDK 事件、直接提交 prompt，最后取消订阅并 dispose。在 Starling 固定使用的 Node 兼容 Pi SDK 中，这套生命周期会先构造 `ModelRuntime`、`SessionManager`、`SettingsManager` 和 `DefaultResourceLoader`，再调用 `createAgentSession()`。适配器不会执行 `pi --mode rpc`，也不会启动 Pi TUI。新 chat 由 `SessionManager.create()` 生成真实 session identity，不会预分配 `--session-id`；恢复时的 `--session` 只接受已有 Pi transcript 的绝对路径。标准输入与 SDK 事件采用换行分隔 JSON，单条物理行上限为 1 MiB。标准输出只包含以 LF 结尾的 JSON 记录：Starling 会在兼容消息前后发送 `starling_started` 与 `starling_exited`，其 `schema` 为 `starling.chat`、`schemaVersion` 为 `1`。诊断日志只写到标准错误。
 
-chat runtime 会关闭自动发现的用户级和项目级 Pi extensions，只显式加载 Starling 自己的 runtime gate，并自动允许内置只读工具 `read`、`grep`、`find` 和 `ls`。`bash`、`edit`、`write` 以及未知工具会发出 Pi `extension_ui_request` 确认事件，RPC client 必须响应；拒绝、取消、UI 异常或 30 秒内没有响应时都会阻止工具调用。普通交互式 `starling run pi` 的权限行为不变。
+chat runtime 会关闭自动发现的用户级和项目级 Pi extensions，加载 Starling 的 tracking/session guard，并启用唯一一份由 Node 管理的权限 gate。内置只读工具 `read`、`grep`、`find` 和 `ls` 自动放行；`bash`、`edit`、`write` 以及未知工具会发出 Pi `extension_ui_request` 确认事件，RPC client 必须响应。拒绝、取消、UI 异常或 30 秒内没有响应时都会阻止工具调用。Starling 展示的工具文本上限为 16 KiB。这套确认策略是审批边界，不是 sandbox；获批工具仍以 Starling 进程的操作系统权限运行。普通交互式 `starling run pi` 的权限行为不变。
 
 Starling 自己的参数必须放在 Agent 名称之前。`-s` 是 `--setting` 的短别名，`-c` 是 `--catalog` 的短别名。Agent 参数放在 `claude`、`codex` 或 `pi` 后面。Starling 可能额外注入 runtime hook，并把显式的已有 session selector 固定到已锁定的 transcript 路径：
 
