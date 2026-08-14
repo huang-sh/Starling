@@ -75,6 +75,8 @@ enum Evt {
     ToolResult { call_id: String, name: String, error: bool, output: String },
     Compaction { id: String, summary: String, tokens_before: Option<i64> },
     System { id: String, event: &'static str, summary: String, model: Option<String> },
+    /// Explicit turn terminator (codex task_complete / turn_aborted).
+    TurnEnd { aborted: bool },
     /// Cumulative usage snapshot (codex token_count); replaces stats totals.
     UsageTotals(Value),
 }
@@ -351,6 +353,8 @@ fn evt_codex(obj: &Map<String, Value>) -> Vec<Evt> {
             id: String::new(),
             text: payload.get("message").and_then(Value::as_str).unwrap_or("").into(),
         }],
+        ("event_msg", "task_complete") => vec![Evt::TurnEnd { aborted: false }],
+        ("event_msg", "turn_aborted") => vec![Evt::TurnEnd { aborted: true }],
         ("event_msg", "context_compacted") | ("compacted", _) => vec![Evt::Compaction {
             id: String::new(),
             summary: payload
@@ -498,7 +502,7 @@ pub fn project(path: &Path, provider: &str, full: bool, max_records: usize) -> R
     let mut ignored = 0usize;
 
     macro_rules! close_turn {
-        ($completed:expr) => {
+        ($completed:expr, $status:expr) => {
             if turn_active {
                 if let Some(t) = turns.last_mut() {
                     t["completedAt"] = json!(iso($completed));
@@ -506,7 +510,7 @@ pub fn project(path: &Path, provider: &str, full: bool, max_records: usize) -> R
                         parse_ts(t.get("startedAt").and_then(Value::as_str)),
                         $completed
                     ));
-                    t["status"] = json!("complete");
+                    t["status"] = json!($status);
                     t["tokens"] = turn_tokens.clone();
                 }
                 turn_active = false;
@@ -559,7 +563,7 @@ pub fn project(path: &Path, provider: &str, full: bool, max_records: usize) -> R
                     }
                 }
                 Evt::User { id, text } => {
-                    close_turn!(ts);
+                    close_turn!(ts, "complete");
                     ensure_turn!(ts);
                     after_tool_result = false;
                     if first_user.is_empty() {
@@ -613,7 +617,12 @@ pub fn project(path: &Path, provider: &str, full: bool, max_records: usize) -> R
                     for block in blocks {
                         let (kind, event, summary, detail, call_id) = match block {
                             Block::Thinking(t) => {
-                                ("reasoning", "thinking", shorten(&t, SUMMARY_LIMIT), Some(shorten(&t, DETAIL_LIMIT)), None)
+                                let summary = if t.trim().is_empty() {
+                                    "(encrypted reasoning)".to_string()
+                                } else {
+                                    shorten(&t, SUMMARY_LIMIT)
+                                };
+                                ("reasoning", "thinking", summary, Some(shorten(&t, DETAIL_LIMIT)), None)
                             }
                             Block::Text(t) => {
                                 ("assistant", "message", shorten(&t, SUMMARY_LIMIT), Some(shorten(&t, DETAIL_LIMIT)), None)
@@ -657,9 +666,10 @@ pub fn project(path: &Path, provider: &str, full: bool, max_records: usize) -> R
                     }
                 }
                 Evt::ToolResult { call_id, name, error, output } => {
-                    ensure_turn!(ts);
-                    after_tool_result = true;
                     if let Some(pos) = pending_tools.remove(&call_id) {
+                        // Completes an existing tool record; never reopens a
+                        // turn that was explicitly ended (codex turn_aborted).
+                        after_tool_result = true;
                         if error {
                             tool_errors += 1;
                         }
@@ -673,6 +683,8 @@ pub fn project(path: &Path, provider: &str, full: bool, max_records: usize) -> R
                         }
                     } else if !call_id.is_empty() {
                         // Orphan result (call predates the record window).
+                        ensure_turn!(ts);
+                        after_tool_result = true;
                         tool_calls += 1;
                         if error {
                             tool_errors += 1;
@@ -742,6 +754,9 @@ pub fn project(path: &Path, provider: &str, full: bool, max_records: usize) -> R
                         id,
                     });
                 }
+                Evt::TurnEnd { aborted } => {
+                    close_turn!(ts, if aborted { "aborted" } else { "complete" });
+                }
                 Evt::UsageTotals(snapshot) => {
                     for key in ["input", "output", "cacheRead", "cacheWrite"] {
                         if let Some(v) = snapshot.get(key).and_then(Value::as_i64) {
@@ -752,7 +767,7 @@ pub fn project(path: &Path, provider: &str, full: bool, max_records: usize) -> R
             }
         }
     }
-    close_turn!(last_ts);
+    close_turn!(last_ts, "complete");
 
     let truncated = drafts.len().saturating_sub(max_records);
     if truncated > 0 {
@@ -936,11 +951,12 @@ fn render(t: &Value, fallback_id: &str) {
         println!(
             "{}",
             format!(
-                "── Turn {} · {} · {} · {} steps",
+                "── Turn {} · {} · {} · {} steps{}",
                 idx,
                 time,
                 fmt_duration(turn["durationMs"].as_i64()),
                 turn["steps"].as_i64().unwrap_or(0),
+                if turn["status"].as_str() == Some("aborted") { " · aborted" } else { "" },
             )
             .yellow()
         );
@@ -1068,6 +1084,7 @@ mod tests {
             json!({"type":"response_item","timestamp":"2026-01-01T00:00:04Z","payload":{"type":"function_call_output","call_id":"f1","output":"ok"}}),
             json!({"type":"event_msg","timestamp":"2026-01-01T00:00:06Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"output_tokens":50,"cached_input_tokens":900}}}}),
             json!({"type":"response_item","timestamp":"2026-01-01T00:00:07Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}),
+            json!({"type":"event_msg","timestamp":"2026-01-01T00:00:08Z","payload":{"type":"turn_aborted"}}),
         ]);
         let t = project(&file, "codex", true, 500).unwrap();
         assert_eq!(t["session"]["provider"], "codex");
@@ -1082,6 +1099,12 @@ mod tests {
         // token_count is a cumulative snapshot: totals reflect it directly.
         assert_eq!(t["stats"]["tokens"]["input"], 500);
         assert_eq!(t["stats"]["tokens"]["cacheRead"], 900);
+        // turn_aborted marks the turn aborted.
+        assert_eq!(t["turns"][0]["status"], "aborted");
+        // Empty (encrypted) reasoning summary gets an explicit label.
+        assert!(records
+            .iter()
+            .any(|r| r["kind"] == "reasoning" && r["summary"] == "think"));
     }
 
     #[test]
