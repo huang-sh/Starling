@@ -9,7 +9,6 @@ import readline from "node:readline";
 import { fileURLToPath } from "url";
 import { renderTopSnapshot, renderTopWatchFrame } from "../lib/render/top.js";
 import { getRenderPlan, renderCommandResult } from "../lib/render/commands.js";
-import { runStarlingTui, StarlingTuiError } from "../lib/tui/index.js";
 import {
   MINIMUM_BUNDLED_PI_NODE_VERSION,
   bundledPiEnvironment,
@@ -170,9 +169,14 @@ function detectPackageManager() {
 }
 
 const cliArgs = process.argv.slice(2);
-// The interactive workspace is a same-process Node/Pi SDK application. Native
-// Starling is resolved lazily only for explicit CLI subcommands.
-const binaryPath = cliArgs.length === 0 ? null : findStarlingExecutable();
+// Bare `starling` launches Pi's interactive TUI through the managed native
+// launcher (`starling run pi`), so run recording, session locks, and
+// `starling top` visibility keep working. The interface is Pi's own TUI,
+// branded "Starling" via the installed package's `piConfig.name`.
+if (cliArgs.length === 0) {
+  cliArgs.push("run", "pi");
+}
+const binaryPath = findStarlingExecutable();
 
 // Use an asynchronous spawn so that Node is able to respond to signals
 // (e.g. Ctrl-C / SIGINT) while the native binary is executing. This allows
@@ -191,15 +195,21 @@ const env = {
 };
 
 const usesPiSdkHost = cliArgs[0] === "chat";
-if (cliArgs.length > 0 && cliArgs[0] !== "chat") configureBundledPi(env);
+if (cliArgs[0] !== "chat") configureBundledPi(env);
 if (usesPiSdkHost) configurePiSdkHost(env);
 
-if (cliArgs.length === 0 && !nodeSupportsBundledPi(process.versions.node)) {
-  console.error(
-    `Starling's Pi SDK workspace requires Node.js ${MINIMUM_BUNDLED_PI_NODE_VERSION} or newer; current version is ${process.versions.node}.`,
-  );
-  process.exit(1);
+// Pi is branded "starling" (piConfig.name), so it reads STARLING_* override
+// variables. Mirror any PI_* overrides so both surfaces agree on the location
+// of the agent/session directories.
+for (const [piVar, starlingVar] of [
+  ["PI_CODING_AGENT_DIR", "STARLING_CODING_AGENT_DIR"],
+  ["PI_CODING_AGENT_SESSION_DIR", "STARLING_CODING_AGENT_SESSION_DIR"],
+]) {
+  if (env[piVar]?.trim() && !env[starlingVar]?.trim()) {
+    env[starlingVar] = env[piVar];
+  }
 }
+
 if (usesPiSdkHost && !hasConfiguredPiSdkHost(env)) {
   const versionHint = nodeSupportsBundledPi(process.versions.node)
     ? "Reinstall starling-ai so its SDK Host files are present."
@@ -207,18 +217,7 @@ if (usesPiSdkHost && !hasConfiguredPiSdkHost(env)) {
   console.error(`Starling Chat requires its Pi SDK Host. ${versionHint}`);
   process.exit(1);
 }
-if (cliArgs.length === 0) {
-  try {
-    const exitCode = await runStarlingTui({
-      env,
-      cwd: process.cwd(),
-    });
-    process.exit(exitCode);
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exit(error instanceof StarlingTuiError && error.code === "NOT_TTY" ? 2 : 1);
-  }
-}
+
 if (shouldRenderTop(cliArgs)) {
   await runTopRenderer(cliArgs);
   process.exit(0);

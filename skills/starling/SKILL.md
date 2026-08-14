@@ -16,7 +16,7 @@ This skill is an operating manual for agents using Starling. Do not treat it as 
 - Do not rewrite agent-owned data under `~/.claude`, `~/.codex`, or `~/.pi`.
 - Use one plain catalog name in examples unless the task is specifically about catalog hierarchy.
 - Put Starling options before the agent name in `starling run`; pass agent-native arguments after `claude`, `codex`, or `pi`.
-- Use bare `starling` for Starling's interactive SDK-backed workspace. It is a Starling-owned TUI and does not launch Pi's TUI.
+- Use bare `starling` for the interactive workspace. It launches Pi's TUI (branded "Starling") through the managed `starling run pi` path.
 - Use `starling chat pi` only when acting as a machine client; its stdin and stdout are a JSONL protocol, not an interactive terminal.
 
 ## Catalogs

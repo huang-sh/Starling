@@ -16,7 +16,6 @@
     "lib/agent-host/",
     "lib/chat/",
     "lib/render/",
-    "lib/tui/",
     "scripts/install-agent-skills.js",
     "skills/"
   ],

@@ -75,7 +75,7 @@ If npm lifecycle scripts were disabled with `--ignore-scripts`, install the skil
 npm explore -g starling-ai -- npm run install:skill
 ```
 
-The npm distribution requires Node.js 22.19.0 or newer and installs `@earendil-works/pi-coding-agent` 0.82.0 as a fixed dependency. Bare `starling` creates Pi directly in the launcher process through `createAgentSession()`; it does not start the native chat supervisor, Pi CLI, or a JSONL subprocess. Session-management commands do not initialize the SDK. Package installs initiated by Pi's resource loader inherit `ignore-scripts` for npm and pnpm, so dependency lifecycle scripts are not executed. `starling run pi` remains the separate compatibility path for launching Pi's native CLI.
+The npm distribution requires Node.js 22.19.0 or newer and installs `@earendil-works/pi-coding-agent` 0.82.0 as a fixed dependency. Bare `starling` launches Pi's own TUI through the managed launcher (`starling run pi`); it does not start the native chat supervisor or a JSONL subprocess. Session-management commands do not initialize the SDK. The bundled Pi package is branded "starling" during postinstall via `piConfig.name`; its `PI_CODING_AGENT_DIR`/`PI_CODING_AGENT_SESSION_DIR` overrides are mirrored to the corresponding `STARLING_*` names so both surfaces agree. Package installs initiated by Pi's resource loader inherit `ignore-scripts` for npm and pnpm, so dependency lifecycle scripts are not executed.
 
 ## Quick Start
 
@@ -85,17 +85,9 @@ Open a new SDK-backed coding session in the current directory:
 starling
 ```
 
-This starts Starling's own TUI and embeds Pi in the same Node process. Starling records the run directly so the active SDK session remains visible to `starling top`, and restores terminal ownership before SDK shutdown. The interface is Starling-owned: it references OMP's layout, input decoding, differential painting, and synchronized-output mechanics, but does not import, depend on, or start the Pi or OMP TUI.
+This launches Pi's interactive TUI through Starling's managed launcher (the same path as `starling run pi`). Starling does not maintain its own TUI: the interface is Pi's, installed as a fixed dependency and branded "Starling" at install time through Pi's supported `piConfig.name` field, so the startup header and terminal title read `starling` while sessions, credentials, and settings keep living in `~/.pi`. The managed launcher records the run, so the active session stays visible to `starling top`.
 
-Type `/` in the editor to open the slash-command menu. Use Up/Down to select, Tab to complete, or Enter to run an exact command. Starling implements Pi's `/settings`, `/new`, `/resume`, `/fork`, `/clone`, `/import`, `/export`, `/copy`, `/scoped-models`, `/model`, `/tree`, `/login`, `/logout`, `/thinking`, `/compact`, `/name`, `/session`, `/share`, `/changelog`, `/hotkeys`, `/trust`, and `/reload` workflows, plus `/help` and `/quit`. The same menu discovers Pi extension commands, prompt templates, and `skill:*` commands through the public SDK. Prefix input with `!` to run bash and keep its result in context, or `!!` to exclude it from context.
-
-`/new`, `/resume`, `/fork`, `/clone`, and `/import` replace the live Pi session through `AgentSessionRuntime` and immediately refresh Starling's transcript and tracked session identity. Bare `/model` opens Starling's SDK-backed searchable model picker (Up/Down select, Tab or Left/Right cycle providers). Enter chooses a model and then its thinking level; saving switches the live session and persists that model as Pi's default through the public SDK settings API. `/model <provider/model>` remains available for direct session switching.
-
-Pi's main application shortcuts run through the Starling TUI: Shift+Tab cycles thinking, Ctrl+P / Shift+Ctrl+P cycle models, Ctrl+L opens the model picker, Ctrl+O expands tool output, Ctrl+T toggles thinking blocks, Ctrl+X copies the latest agent message, Alt+Up restores queued messages, and Ctrl+Z suspends the process. Enter sends; Shift+Enter or Alt+Enter inserts a newline, preserving Starling's existing editor behavior and header.
-
-Use `/tree` to navigate Pi's current session tree without creating a new session file. The picker reads `SessionManager.getTree()`, keeps Pi entry IDs intact, and asks whether to discard, summarize, or custom-summarize the abandoned branch before calling `AgentSession.navigateTree()`.
-
-Use `/login` to choose a Pi provider and configure its subscription/OAuth or API-key method; `/login <provider>` jumps directly to matching providers. OAuth URLs and device codes are shown inside Starling, secret inputs are masked, and terminal controls are rejected from clickable URL targets. `/logout` lists only credentials stored by Pi, while `/logout <provider>` removes one directly. Logout does not alter provider environment variables or `models.json`. Bare `starling` loads trusted Pi user/project resources and does not install the external JSONL adapter's permission/session gate, so extension commands and extension-driven session replacement remain available. Pi extension UI requests are rendered by the Starling TUI.
+All of Pi's interactive features are available as-is: `/settings`, `/new`, `/resume`, `/fork`, `/clone`, `/import`, `/export`, `/copy`, `/scoped-models`, `/model`, `/tree`, `/login`, `/logout`, `/compact`, `/name`, `/session`, `/share`, `/changelog`, `/hotkeys`, `/trust`, `/reload`, extension commands, prompt templates, and `skill:*` commands. Prefix input with `!` to run bash and keep its result in context, or `!!` to exclude it from context. See Pi's own documentation for keyboard shortcuts (`/hotkeys`).
 
 List recent sessions:
 
@@ -416,7 +408,7 @@ starling config unset pi
 starling config show
 ```
 
-For explicit `starling chat pi`, the npm launcher exposes the external JSONL SDK host as `STARLING_PI_SDK_HOST` and its compatible Node executable as `STARLING_PI_SDK_NODE`; the native chat command uses that pair to start the adapter. Bare `starling` imports the SDK dependency directly and does not configure or launch that host. Separately, the launcher can still resolve the package's public `rpc-entry` export and expose `cli.js` as `STARLING_BUNDLED_PI_BIN` for the legacy `starling run pi` command. Explicit `STARLING_PI_BIN` or `STARLING_BUNDLED_PI_BIN` values are never overwritten.
+For explicit `starling chat pi`, the npm launcher exposes the external JSONL SDK host as `STARLING_PI_SDK_HOST` and its compatible Node executable as `STARLING_PI_SDK_NODE`; the native chat command uses that pair to start the adapter. Bare `starling` does not configure or launch that host. Separately, the launcher resolves the package's public `rpc-entry` export, exposes `cli.js` as `STARLING_BUNDLED_PI_BIN` for the managed `starling run pi` launch that bare `starling` reuses, and mirrors `PI_CODING_AGENT_DIR`/`PI_CODING_AGENT_SESSION_DIR` overrides to the `STARLING_*` names Pi reads under its Starling branding. Explicit `STARLING_PI_BIN` or `STARLING_BUNDLED_PI_BIN` values are never overwritten.
 
 Starling does not move or rewrite the original Claude Code, Codex, or Pi session files. It reads them from agent-owned locations such as `~/.claude/projects`, `~/.codex/sessions`, and `~/.pi/agent/sessions`, and stores only Starling metadata and profiles under the Starling data directory. Starling honors Pi's `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, global `settings.json`, and project-local `<cwd>/.pi/settings.json` `sessionDir` settings when the launch cwd is known.
 
