@@ -1,7 +1,11 @@
-//! `starling trajectory` — project a Pi session transcript into a
+//! `starling trajectory` — project an agent session transcript into a
 //! turn-aware trajectory ledger (turns → steps → records) with timing,
 //! token usage, and tool outcomes. Schema mirrors the trajectory-v1 shape
 //! used by codex-trajectory (inspired by DeepSeek Harness's event ledger).
+//!
+//! Provider adapters (pi / claude / codex) translate their transcript
+//! vocabularies into one internal event stream; turn/step accounting,
+//! tool-call pairing, truncation, stats, and rendering are shared.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -12,7 +16,7 @@ use colored::*;
 use serde_json::{json, Map, Value};
 
 use crate::cli::*;
-use crate::core::discovery::{find_session_by_id, find_sessions, Provider as DiscoveryProvider};
+use crate::core::discovery::{find_session_by_id, find_sessions};
 use crate::core::session::parse_jsonl_file;
 
 const DEFAULT_MAX_RECORDS: usize = 500;
@@ -29,7 +33,7 @@ pub fn handle(
 ) -> Result<()> {
     let max_records = max_records.clamp(HARD_MIN_RECORDS, HARD_MAX_RECORDS);
     let meta = resolve_session(session_id.as_deref())?;
-    let trajectory = project(Path::new(&meta.file_path), full, max_records)?;
+    let trajectory = project(Path::new(&meta.file_path), &meta.provider, full, max_records)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&trajectory)?);
@@ -39,69 +43,408 @@ pub fn handle(
     Ok(())
 }
 
-/// Default to the most recent Pi session; explicit IDs reuse the normal
-/// resolver. Trajectory speaks the Pi transcript vocabulary only.
+/// Default to the most recent session of any provider; explicit IDs reuse
+/// the normal resolver.
 fn resolve_session(session_id: Option<&str>) -> Result<crate::types::SessionMeta> {
     let meta = match session_id {
         Some(id) => find_session_by_id(id),
-        None => find_sessions(50, Some(DiscoveryProvider::Pi))
+        None => find_sessions(50, None)
             .into_iter()
             .find(|m| Path::new(&m.file_path).is_file()),
     };
     match meta {
-        Some(m) if m.provider == "pi" => Ok(m),
-        Some(m) => anyhow::bail!(
-            "trajectory supports Pi sessions; {} session {} uses a different transcript format",
-            m.provider,
-            m.session_id
-        ),
-        None => anyhow::bail!("Pi session not found"),
+        Some(m) => Ok(m),
+        None => anyhow::bail!("session not found"),
     }
 }
 
-fn parse_ts(value: Option<&str>) -> Option<DateTime<Utc>> {
-    value.and_then(|s| DateTime::parse_from_rfc3339(s).ok()).map(|d| d.with_timezone(&Utc))
+// ---------------------------------------------------------------------------
+// Provider event vocabulary
+// ---------------------------------------------------------------------------
+
+enum Block {
+    Thinking(String),
+    Text(String),
+    ToolCall { id: String, name: String, args: String },
 }
 
-fn iso(ts: Option<DateTime<Utc>>) -> Option<String> {
-    ts.map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+enum Evt {
+    Session { id: String, cwd: Option<String> },
+    User { id: String, text: String },
+    Assistant { id: String, model: Option<String>, blocks: Vec<Block>, usage: Option<Value> },
+    ToolResult { call_id: String, name: String, error: bool, output: String },
+    Compaction { id: String, summary: String, tokens_before: Option<i64> },
+    System { id: String, event: &'static str, summary: String, model: Option<String> },
+    /// Cumulative usage snapshot (codex token_count); replaces stats totals.
+    UsageTotals(Value),
 }
 
-fn ms_between(start: Option<DateTime<Utc>>, end: Option<DateTime<Utc>>) -> Option<i64> {
-    match (start, end) {
-        (Some(a), Some(b)) if b >= a => Some((b - a).num_milliseconds()),
-        _ => None,
+/// Pi sessions: entries keyed by `type` with `message` payloads
+/// (roles user/assistant/toolResult) plus lifecycle entries.
+fn evt_pi(obj: &Map<String, Value>) -> Vec<Evt> {
+    let id = obj.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+    let msg = obj.get("message");
+    let text_of = |v: Option<&Value>| -> String {
+        v.and_then(|c| match c {
+            Value::String(s) => Some(s.clone()),
+            Value::Array(blocks) => blocks
+                .iter()
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string()
+                .into(),
+            _ => None,
+        })
+        .unwrap_or_default()
+    };
+    match obj.get("type").and_then(Value::as_str) {
+        Some("session") => vec![Evt::Session {
+            id: obj.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
+            cwd: obj.get("cwd").and_then(Value::as_str).map(str::to_string),
+        }],
+        Some("message") => {
+            let role = msg.and_then(|m| m.get("role")).and_then(Value::as_str).unwrap_or("");
+            match role {
+                "user" => vec![Evt::User {
+                    id,
+                    text: text_of(msg.and_then(|m| m.get("content"))),
+                }],
+                "assistant" => {
+                    let mut blocks = Vec::new();
+                    if let Some(arr) = msg.and_then(|m| m.get("content")).and_then(Value::as_array) {
+                        for b in arr {
+                            match b.get("type").and_then(Value::as_str).unwrap_or("") {
+                                "thinking" => blocks.push(Block::Thinking(
+                                    b.get("thinking").and_then(Value::as_str).unwrap_or("").into(),
+                                )),
+                                "text" => blocks.push(Block::Text(
+                                    b.get("text").and_then(Value::as_str).unwrap_or("").into(),
+                                )),
+                                "toolCall" => blocks.push(Block::ToolCall {
+                                    id: b.get("id").and_then(Value::as_str).unwrap_or("").into(),
+                                    name: b.get("name").and_then(Value::as_str).unwrap_or("tool").into(),
+                                    args: b
+                                        .get("arguments")
+                                        .map(|a| serde_json::to_string(a).unwrap_or_default())
+                                        .unwrap_or_default(),
+                                }),
+                                _ => {}
+                            }
+                        }
+                    }
+                    vec![Evt::Assistant {
+                        id,
+                        model: msg
+                            .and_then(|m| m.get("model"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        blocks,
+                        usage: msg.as_ref().and_then(|m| m.get("usage")).cloned().filter(|u| u.is_object()),
+                    }]
+                }
+                "toolResult" => vec![Evt::ToolResult {
+                    call_id: msg
+                        .and_then(|m| m.get("toolCallId"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .into(),
+                    name: msg
+                        .and_then(|m| m.get("toolName"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool")
+                        .into(),
+                    error: msg
+                        .and_then(|m| m.get("isError"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    output: text_of(msg.and_then(|m| m.get("content"))),
+                }],
+                _ => Vec::new(),
+            }
+        }
+        Some("compaction") => vec![Evt::Compaction {
+            id,
+            summary: obj.get("summary").and_then(Value::as_str).unwrap_or("").into(),
+            tokens_before: obj.get("tokensBefore").and_then(Value::as_i64),
+        }],
+        Some("model_change") => vec![Evt::System {
+            id,
+            event: "model_change",
+            summary: format!(
+                "{}/{}",
+                obj.get("provider").and_then(Value::as_str).unwrap_or(""),
+                obj.get("modelId").and_then(Value::as_str).unwrap_or("")
+            ),
+            model: Some(format!(
+                "{}/{}",
+                obj.get("provider").and_then(Value::as_str).unwrap_or(""),
+                obj.get("modelId").and_then(Value::as_str).unwrap_or("")
+            )),
+        }],
+        Some("thinking_level_change") => vec![Evt::System {
+            id,
+            event: "thinking_level",
+            summary: obj.get("thinkingLevel").and_then(Value::as_str).unwrap_or("").into(),
+            model: None,
+        }],
+        Some("branch_summary") => vec![Evt::System {
+            id,
+            event: "branch_summary",
+            summary: obj.get("summary").and_then(Value::as_str).unwrap_or("").into(),
+            model: None,
+        }],
+        _ => Vec::new(),
     }
 }
 
-/// First line of text, whitespace-normalized, bounded.
-fn shorten(text: &str, limit: usize) -> String {
-    let flat: String = text
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let flat = flat.replace('\n', " ");
-    if flat.chars().count() <= limit {
-        flat
-    } else {
-        let cut: String = flat.chars().take(limit).collect();
-        format!("{}…", cut.trim_end())
+/// Claude Code sessions: flat entries with `type` user/assistant; tool
+/// results ride inside user-type messages; usage on assistant messages.
+fn evt_claude(obj: &Map<String, Value>) -> Vec<Evt> {
+    let id = obj.get("uuid").and_then(Value::as_str).unwrap_or("").to_string();
+    let msg = obj.get("message").cloned().unwrap_or(Value::Null);
+    match obj.get("type").and_then(Value::as_str) {
+        _ if obj.get("isSidechain").and_then(Value::as_bool) == Some(true) => Vec::new(),
+        Some("user") => {
+            let content = msg.get("content");
+            let mut out = Vec::new();
+            if let Some(blocks) = content.and_then(Value::as_array) {
+                for b in blocks {
+                    if b.get("type").and_then(Value::as_str) == Some("tool_result") {
+                        let text = match b.get("content") {
+                            Some(Value::String(s)) => s.clone(),
+                            Some(Value::Array(parts)) => parts
+                                .iter()
+                                .filter_map(|p| p.get("text").and_then(Value::as_str))
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                            _ => String::new(),
+                        };
+                        out.push(Evt::ToolResult {
+                            call_id: b
+                                .get("tool_use_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .into(),
+                            name: String::new(), // paired via tool_use id
+                            error: b.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                            output: text,
+                        });
+                    } else if b.get("type").and_then(Value::as_str) == Some("text") {
+                        out.push(Evt::User {
+                            id: id.clone(),
+                            text: b.get("text").and_then(Value::as_str).unwrap_or("").into(),
+                        });
+                    }
+                }
+                // Tool-result carriers are not new turns: keep only ToolResults
+                // when the message has no user-authored text.
+                let has_user = out.iter().any(|e| matches!(e, Evt::User { .. }));
+                if !has_user {
+                    out.retain(|e| matches!(e, Evt::ToolResult { .. }));
+                }
+                out
+            } else if obj.get("isMeta").and_then(Value::as_bool) == Some(true) {
+                Vec::new()
+            } else {
+                let text = content.and_then(Value::as_str).unwrap_or("").to_string();
+                if text.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Evt::User { id, text }]
+                }
+            }
+        }
+        Some("assistant") => {
+            let mut blocks = Vec::new();
+            if let Some(arr) = msg.get("content").and_then(Value::as_array) {
+                for b in arr {
+                    match b.get("type").and_then(Value::as_str).unwrap_or("") {
+                        "thinking" => blocks.push(Block::Thinking(
+                            b.get("thinking").and_then(Value::as_str).unwrap_or("").into(),
+                        )),
+                        "text" => blocks.push(Block::Text(
+                            b.get("text").and_then(Value::as_str).unwrap_or("").into(),
+                        )),
+                        "tool_use" => blocks.push(Block::ToolCall {
+                            id: b.get("id").and_then(Value::as_str).unwrap_or("").into(),
+                            name: b.get("name").and_then(Value::as_str).unwrap_or("tool").into(),
+                            args: b
+                                .get("input")
+                                .map(|a| serde_json::to_string(a).unwrap_or_default())
+                                .unwrap_or_default(),
+                        }),
+                        _ => {}
+                    }
+                }
+            }
+            // Normalize Claude usage keys to the shared shape.
+            let usage = msg.get("usage").and_then(|u| {
+                let g = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);
+                if u.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+                    None
+                } else {
+                    Some(json!({
+                        "input": g("input_tokens"),
+                        "output": g("output_tokens"),
+                        "cacheRead": g("cache_read_input_tokens"),
+                        "cacheWrite": g("cache_creation_input_tokens"),
+                    }))
+                }
+            });
+            vec![Evt::Assistant {
+                id,
+                model: msg.get("model").and_then(Value::as_str).map(str::to_string),
+                blocks,
+                usage,
+            }]
+        }
+        _ => Vec::new(),
     }
 }
 
-fn content_text(content: &Value) -> String {
-    match content {
-        Value::String(s) => s.clone(),
-        Value::Array(blocks) => blocks
-            .iter()
-            .filter_map(|b| b.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string(),
-        _ => String::new(),
+/// Codex rollouts: `{type, payload, timestamp}` envelopes with
+/// session_meta / turn_context / event_msg / response_item payloads.
+fn evt_codex(obj: &Map<String, Value>) -> Vec<Evt> {
+    let Some(payload) = obj.get("payload").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let ptype = payload.get("type").and_then(Value::as_str).unwrap_or("");
+    let texts = |parts: Option<&Value>| -> String {
+        parts
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|p| p.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    };
+    match (obj.get("type").and_then(Value::as_str).unwrap_or(""), ptype) {
+        ("session_meta", _) => vec![Evt::Session {
+            id: payload
+                .get("session_id")
+                .or_else(|| payload.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .into(),
+            cwd: payload.get("cwd").and_then(Value::as_str).map(str::to_string),
+        }],
+        ("turn_context", _) => {
+            let model = payload.get("model").and_then(Value::as_str).unwrap_or("");
+            let effort = payload.get("effort").and_then(Value::as_str).unwrap_or("");
+            let summary = [model, effort].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" · ");
+            if summary.is_empty() {
+                Vec::new()
+            } else {
+                vec![Evt::System {
+                    id: String::new(),
+                    event: "turn_context",
+                    summary,
+                    model: Some(model.to_string()),
+                }]
+            }
+        }
+        ("event_msg", "user_message") => vec![Evt::User {
+            id: String::new(),
+            text: payload.get("message").and_then(Value::as_str).unwrap_or("").into(),
+        }],
+        ("event_msg", "context_compacted") | ("compacted", _) => vec![Evt::Compaction {
+            id: String::new(),
+            summary: payload
+                .get("message")
+                .or_else(|| payload.get("summary"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .into(),
+            tokens_before: None,
+        }],
+        ("event_msg", "token_count") => {
+            let usage = payload
+                .get("info")
+                .and_then(|i| i.get("total_token_usage"))
+                .and_then(|u| {
+                    let g = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);
+                    Some(json!({
+                        "input": g("input_tokens"),
+                        "output": g("output_tokens"),
+                        "cacheRead": g("cached_input_tokens"),
+                        "cacheWrite": 0,
+                    }))
+                });
+            match usage {
+                Some(u) => vec![Evt::UsageTotals(u)],
+                None => Vec::new(),
+            }
+        }
+        ("response_item", "message") => vec![Evt::Assistant {
+            id: String::new(),
+            model: None,
+            blocks: vec![Block::Text(texts(payload.get("content")))],
+            usage: None,
+        }],
+        ("response_item", "reasoning") => vec![Evt::Assistant {
+            id: String::new(),
+            model: None,
+            blocks: vec![Block::Thinking(texts(payload.get("summary")))],
+            usage: None,
+        }],
+        ("response_item", "function_call") | ("response_item", "custom_tool_call") => vec![
+            Evt::Assistant {
+                id: String::new(),
+                model: None,
+                blocks: vec![Block::ToolCall {
+                    id: payload
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .into(),
+                    name: payload.get("name").and_then(Value::as_str).unwrap_or("tool").into(),
+                    args: payload
+                        .get("arguments")
+                        .or_else(|| payload.get("input"))
+                        .map(|a| serde_json::to_string(a).unwrap_or_default())
+                        .unwrap_or_default(),
+                }],
+                usage: None,
+            },
+        ],
+        ("response_item", "function_call_output") | ("response_item", "custom_tool_call_output") => {
+            let output = payload
+                .get("output")
+                .map(|o| match o {
+                    Value::String(s) => s.clone(),
+                    other => serde_json::to_string(other).unwrap_or_default(),
+                })
+                .unwrap_or_default();
+            // Codex marks failures inside the output payload (best effort).
+            let error = match serde_json::from_str::<Value>(&output) {
+                Ok(Value::Object(map)) => {
+                    map.get("isError").and_then(Value::as_bool) == Some(true)
+                        || map.get("success").and_then(Value::as_bool) == Some(false)
+                }
+                _ => false,
+            };
+            vec![Evt::ToolResult {
+                call_id: payload
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .into(),
+                name: String::new(),
+                error,
+                output,
+            }]
+        }
+        _ => Vec::new(),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Shared projection core
+// ---------------------------------------------------------------------------
 
 struct RecordDraft {
     kind: &'static str,
@@ -119,11 +462,16 @@ struct RecordDraft {
     id: String,
 }
 
-pub fn project(path: &Path, full: bool, max_records: usize) -> Result<Value> {
+pub fn project(path: &Path, provider: &str, full: bool, max_records: usize) -> Result<Value> {
     let entries = parse_jsonl_file(path);
     if entries.is_empty() {
         anyhow::bail!("no readable JSONL entries in {}", path.display());
     }
+    let adapter: fn(&Map<String, Value>) -> Vec<Evt> = match provider {
+        "claude" => evt_claude,
+        "codex" => evt_codex,
+        _ => evt_pi,
+    };
 
     let mut session_id = String::new();
     let mut cwd: Option<String> = None;
@@ -136,8 +484,8 @@ pub fn project(path: &Path, full: bool, max_records: usize) -> Result<Value> {
     let mut drafts: Vec<RecordDraft> = Vec::new();
     let mut turns: Vec<Value> = Vec::new();
     let mut warnings: Vec<Value> = Vec::new();
-    // toolCallId → (record position, started timestamp)
-    let mut pending_tools: HashMap<String, (usize, Option<DateTime<Utc>>)> = HashMap::new();
+    // toolCallId → record position
+    let mut pending_tools: HashMap<String, usize> = HashMap::new();
 
     let mut current_turn: usize = 0;
     let mut current_step: usize = 0;
@@ -168,14 +516,14 @@ pub fn project(path: &Path, full: bool, max_records: usize) -> Result<Value> {
     }
 
     macro_rules! ensure_turn {
-        ($ts:expr, $id:expr) => {{
+        ($ts:expr) => {{
             if !turn_active {
                 current_turn += 1;
                 current_step = 0;
                 turn_active = true;
                 turns.push(json!({
                     "index": current_turn,
-                    "id": $id,
+                    "id": Value::Null,
                     "startedAt": iso($ts),
                     "completedAt": Value::Null,
                     "durationMs": Value::Null,
@@ -195,279 +543,217 @@ pub fn project(path: &Path, full: bool, max_records: usize) -> Result<Value> {
             first_ts = first_ts.or(ts);
             last_ts = Some(ts.unwrap());
         }
-        match obj.get("type").and_then(Value::as_str) {
-            Some("session") => {
-                session_id = obj
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                cwd = obj.get("cwd").and_then(Value::as_str).map(str::to_string);
-            }
-            Some("message") => {
-                let msg = obj.get("message").cloned().unwrap_or(Value::Null);
-                let role = msg.get("role").and_then(Value::as_str).unwrap_or("");
-                let id = obj.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-                match role {
-                    "user" => {
-                        close_turn!(ts);
-                        ensure_turn!(ts, Value::Null);
+        let events = adapter(obj);
+        if events.is_empty() {
+            ignored += 1;
+            continue;
+        }
+        for evt in events {
+            match evt {
+                Evt::Session { id, cwd: c } => {
+                    if session_id.is_empty() && !id.is_empty() {
+                        session_id = id;
+                    }
+                    if cwd.is_none() {
+                        cwd = c;
+                    }
+                }
+                Evt::User { id, text } => {
+                    close_turn!(ts);
+                    ensure_turn!(ts);
+                    after_tool_result = false;
+                    if first_user.is_empty() {
+                        first_user = text.clone();
+                    }
+                    drafts.push(RecordDraft {
+                        kind: "user",
+                        event: "user".into(),
+                        summary: shorten(&text, SUMMARY_LIMIT),
+                        started_at: ts,
+                        completed_at: ts,
+                        status: "complete",
+                        input: if full { Some(shorten(&text, DETAIL_LIMIT)) } else { None },
+                        output: None,
+                        usage: None,
+                        metadata: Map::new(),
+                        turn: current_turn,
+                        step: Some(1),
+                        id,
+                    });
+                }
+                Evt::Assistant { id, model: m, blocks, usage } => {
+                    ensure_turn!(ts);
+                    if after_tool_result {
+                        current_step += 1;
                         after_tool_result = false;
-                        let text = content_text(msg.get("content").unwrap_or(&Value::Null));
-                        if first_user.is_empty() {
-                            first_user = text.clone();
+                    }
+                    if model.is_none() {
+                        if let Some(mv) = &m {
+                            model = Some(mv.clone());
+                        }
+                    }
+                    for key in ["input", "output", "cacheRead", "cacheWrite"] {
+                        let v = usage
+                            .as_ref()
+                            .and_then(|u| u.get(key))
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0);
+                        turn_tokens[key] = json!(turn_tokens[key].as_i64().unwrap_or(0) + v);
+                        totals[key] = json!(totals[key].as_i64().unwrap_or(0) + v);
+                    }
+                    let cost = usage
+                        .as_ref()
+                        .and_then(|u| u.get("cost"))
+                        .and_then(|c| c.get("total"))
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.0);
+                    turn_tokens["cost"] = json!(turn_tokens["cost"].as_f64().unwrap_or(0.0) + cost);
+                    totals["cost"] = json!(totals["cost"].as_f64().unwrap_or(0.0) + cost);
+
+                    for block in blocks {
+                        let (kind, event, summary, detail, call_id) = match block {
+                            Block::Thinking(t) => {
+                                ("reasoning", "thinking", shorten(&t, SUMMARY_LIMIT), Some(shorten(&t, DETAIL_LIMIT)), None)
+                            }
+                            Block::Text(t) => {
+                                ("assistant", "message", shorten(&t, SUMMARY_LIMIT), Some(shorten(&t, DETAIL_LIMIT)), None)
+                            }
+                            Block::ToolCall { id: cid, name, args } => {
+                                tool_calls += 1;
+                                let summary = format!("{} {}", name, shorten(&args, 60));
+                                ("tool", "", shorten(summary.trim(), SUMMARY_LIMIT), Some(shorten(&args, DETAIL_LIMIT)), Some((cid, name)))
+                            }
+                        };
+                        current_step = current_step.max(1);
+                        let step = current_step;
+                        if let Some(t) = turns.last_mut() {
+                            t["steps"] = json!(t["steps"].as_i64().unwrap_or(0).max(step as i64));
+                        }
+                        let pos = drafts.len();
+                        let (event, id) = match &call_id {
+                            Some((_, name)) => (name.clone(), call_id.as_ref().map(|(c, _)| c.clone()).unwrap_or_default()),
+                            None => (event.to_string(), id.clone()),
+                        };
+                        drafts.push(RecordDraft {
+                            kind,
+                            event,
+                            summary,
+                            started_at: ts,
+                            completed_at: if kind == "tool" { None } else { ts },
+                            status: if kind == "tool" { "running" } else { "complete" },
+                            input: if full { detail } else { None },
+                            output: None,
+                            usage: usage.clone(),
+                            metadata: Map::new(),
+                            turn: current_turn,
+                            step: Some(step),
+                            id,
+                        });
+                        if let Some((cid, _)) = call_id {
+                            if !cid.is_empty() {
+                                pending_tools.insert(cid, pos);
+                            }
+                        }
+                    }
+                }
+                Evt::ToolResult { call_id, name, error, output } => {
+                    ensure_turn!(ts);
+                    after_tool_result = true;
+                    if let Some(pos) = pending_tools.remove(&call_id) {
+                        if error {
+                            tool_errors += 1;
+                        }
+                        if let Some(record) = drafts.get_mut(pos) {
+                            record.completed_at = ts;
+                            record.status = if error { "error" } else { "complete" };
+                            record.output = if full { Some(shorten(&output, DETAIL_LIMIT)) } else { None };
+                            if error {
+                                record.summary = shorten(&format!("{} · error", record.summary), SUMMARY_LIMIT);
+                            }
+                        }
+                    } else if !call_id.is_empty() {
+                        // Orphan result (call predates the record window).
+                        tool_calls += 1;
+                        if error {
+                            tool_errors += 1;
                         }
                         drafts.push(RecordDraft {
-                            kind: "user",
-                            event: "user".into(),
-                            summary: shorten(&text, SUMMARY_LIMIT),
+                            kind: "tool",
+                            event: if name.is_empty() { "tool".into() } else { name.clone() },
+                            summary: shorten(&name, SUMMARY_LIMIT),
                             started_at: ts,
                             completed_at: ts,
-                            status: "complete",
-                            input: if full { Some(shorten(&text, DETAIL_LIMIT)) } else { None },
-                            output: None,
+                            status: if error { "error" } else { "complete" },
+                            input: None,
+                            output: if full { Some(shorten(&output, DETAIL_LIMIT)) } else { None },
                             usage: None,
                             metadata: Map::new(),
                             turn: current_turn,
-                            step: Some(1),
-                            id,
+                            step: Some(current_step.max(1)),
+                            id: call_id.clone(),
                         });
                     }
-                    "assistant" => {
-                        ensure_turn!(ts, Value::Null);
-                        if after_tool_result {
-                            current_step += 1;
-                            after_tool_result = false;
+                }
+                Evt::Compaction { id, summary, tokens_before } => {
+                    ensure_turn!(ts);
+                    let mut metadata = Map::new();
+                    if let Some(t) = tokens_before {
+                        metadata.insert("tokensBefore".into(), json!(t));
+                    }
+                    drafts.push(RecordDraft {
+                        kind: "compaction",
+                        event: "compaction".into(),
+                        summary: shorten(&summary, SUMMARY_LIMIT),
+                        started_at: ts,
+                        completed_at: ts,
+                        status: "complete",
+                        input: if full { Some(shorten(&summary, DETAIL_LIMIT)) } else { None },
+                        output: None,
+                        usage: None,
+                        metadata,
+                        turn: current_turn,
+                        step: Some(current_step.max(1)),
+                        id,
+                    });
+                }
+                Evt::System { id, event, summary, model: m } => {
+                    if let Some(mv) = &m {
+                        if !mv.is_empty() && !models_seen.contains(mv) {
+                            models_seen.push(mv.clone());
                         }
-                        let usage = msg.get("usage").cloned().filter(|u| u.is_object());
-                        for key in ["input", "output", "cacheRead", "cacheWrite"] {
-                            let v = usage
-                                .as_ref()
-                                .and_then(|u| u.get(key))
-                                .and_then(Value::as_i64)
-                                .unwrap_or(0);
-                            turn_tokens[key] = json!(turn_tokens[key].as_i64().unwrap_or(0) + v);
-                            totals[key] = json!(totals[key].as_i64().unwrap_or(0) + v);
-                        }
-                        let cost = usage
-                            .as_ref()
-                            .and_then(|u| u.get("cost"))
-                            .and_then(|c| c.get("total"))
-                            .and_then(Value::as_f64)
-                            .unwrap_or(0.0);
-                        turn_tokens["cost"] = json!(turn_tokens["cost"].as_f64().unwrap_or(0.0) + cost);
-                        totals["cost"] = json!(totals["cost"].as_f64().unwrap_or(0.0) + cost);
-
-                        if model.is_none() {
-                            if let Some(m) = msg.get("model").and_then(Value::as_str) {
-                                model = Some(m.to_string());
-                            }
-                        }
-                        if let Some(blocks) = msg.get("content").and_then(Value::as_array) {
-                            for block in blocks {
-                                let btype = block.get("type").and_then(Value::as_str).unwrap_or("");
-                                let (kind, event, summary, detail) = match btype {
-                                    "thinking" => {
-                                        let t = block.get("thinking").and_then(Value::as_str).unwrap_or("");
-                                        ("reasoning", "thinking", shorten(t, SUMMARY_LIMIT), Some(shorten(t, DETAIL_LIMIT)))
-                                    }
-                                    "text" => {
-                                        let t = block.get("text").and_then(Value::as_str).unwrap_or("");
-                                        ("assistant", "message", shorten(t, SUMMARY_LIMIT), Some(shorten(t, DETAIL_LIMIT)))
-                                    }
-                                    "toolCall" => {
-                                        let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
-                                        let args = block
-                                            .get("arguments")
-                                            .map(|a| serde_json::to_string(a).unwrap_or_default())
-                                            .unwrap_or_default();
-                                        tool_calls += 1;
-                                        let summary = format!("{} {}", name, shorten(&args, 60));
-                                        ("tool", name, shorten(summary.trim(), SUMMARY_LIMIT), Some(shorten(&args, DETAIL_LIMIT)))
-                                    }
-                                    _ => continue,
-                                };
-                                if kind == "tool" {
-                                    current_step = current_step.max(1);
-                                }
-                                let step = if current_step == 0 { 1 } else { current_step };
-                                if let Some(t) = turns.last_mut() {
-                                    t["steps"] = json!(t["steps"].as_i64().unwrap_or(0).max(step as i64));
-                                }
-                                let pos = drafts.len();
-                                let mut call_id = String::new();
-                                drafts.push(RecordDraft {
-                                    kind,
-                                    event: event.to_string(),
-                                    summary,
-                                    started_at: ts,
-                                    completed_at: if kind == "tool" { None } else { Some(ts.unwrap_or_default()) },
-                                    status: if kind == "tool" { "running" } else { "complete" },
-                                    input: if full { detail } else { None },
-                                    output: None,
-                                    usage: usage.clone(),
-                                    metadata: Map::new(),
-                                    turn: current_turn,
-                                    step: Some(step),
-                                    id: {
-                                        if kind == "tool" {
-                                            call_id = block.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-                                            call_id.clone()
-                                        } else {
-                                            id.clone()
-                                        }
-                                    },
-                                });
-                                if kind == "tool" && !call_id.is_empty() {
-                                    pending_tools.insert(call_id, (pos, ts));
-                                }
-                            }
+                        if !mv.is_empty() {
+                            model = Some(mv.clone());
                         }
                     }
-                    "toolResult" => {
-                        ensure_turn!(ts, Value::Null);
-                        after_tool_result = true;
-                        let call_id = msg.get("toolCallId").and_then(Value::as_str).unwrap_or("");
-                        let is_error = msg.get("isError").and_then(Value::as_bool).unwrap_or(false);
-                        let name = msg.get("toolName").and_then(Value::as_str).unwrap_or("tool");
-                        if let Some((pos, started)) = pending_tools.remove(call_id) {
-                            if is_error {
-                                tool_errors += 1;
-                            }
-                            if let Some(record) = drafts.get_mut(pos) {
-                                record.completed_at = ts;
-                                record.status = if is_error { "error" } else { "complete" };
-                                let out = content_text(msg.get("content").unwrap_or(&Value::Null));
-                                record.output = if full { Some(shorten(&out, DETAIL_LIMIT)) } else { None };
-                                if is_error {
-                                    record.summary = shorten(&format!("{} · error", record.summary), SUMMARY_LIMIT);
-                                }
-                            }
-                            let _ = started;
-                        } else {
-                            // Orphan result (call predates the record window).
-                            drafts.push(RecordDraft {
-                                kind: "tool",
-                                event: name.to_string(),
-                                summary: shorten(name, SUMMARY_LIMIT),
-                                started_at: ts,
-                                completed_at: ts,
-                                status: if is_error { "error" } else { "complete" },
-                                input: None,
-                                output: None,
-                                usage: None,
-                                metadata: Map::new(),
-                                turn: current_turn,
-                                step: Some(current_step.max(1)),
-                                id: call_id.to_string(),
-                            });
-                            if is_error {
-                                tool_errors += 1;
-                            }
-                            tool_calls += 1;
+                    ensure_turn!(ts);
+                    drafts.push(RecordDraft {
+                        kind: "system",
+                        event: event.into(),
+                        summary: shorten(&summary, SUMMARY_LIMIT),
+                        started_at: ts,
+                        completed_at: ts,
+                        status: "complete",
+                        input: None,
+                        output: None,
+                        usage: None,
+                        metadata: Map::new(),
+                        turn: current_turn,
+                        step: Some(current_step.max(1)),
+                        id,
+                    });
+                }
+                Evt::UsageTotals(snapshot) => {
+                    for key in ["input", "output", "cacheRead", "cacheWrite"] {
+                        if let Some(v) = snapshot.get(key).and_then(Value::as_i64) {
+                            totals[key] = json!(v);
                         }
                     }
-                    _ => {
-                        ignored += 1;
-                    }
                 }
-            }
-            Some("compaction") => {
-                let tokens_before = obj.get("tokensBefore").and_then(Value::as_i64);
-                let summary_text = obj.get("summary").and_then(Value::as_str).unwrap_or("");
-                ensure_turn!(ts, Value::Null);
-                let mut metadata = Map::new();
-                if let Some(t) = tokens_before {
-                    metadata.insert("tokensBefore".into(), json!(t));
-                }
-                drafts.push(RecordDraft {
-                    kind: "compaction",
-                    event: "compaction".into(),
-                    summary: shorten(summary_text, SUMMARY_LIMIT),
-                    started_at: ts,
-                    completed_at: ts,
-                    status: "complete",
-                    input: if full { Some(shorten(summary_text, DETAIL_LIMIT)) } else { None },
-                    output: None,
-                    usage: obj.get("usage").cloned(),
-                    metadata,
-                    turn: current_turn,
-                    step: Some(current_step.max(1)),
-                    id: obj.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
-                });
-            }
-            Some("model_change") => {
-                let provider = obj.get("provider").and_then(Value::as_str).unwrap_or("");
-                let model_id = obj.get("modelId").and_then(Value::as_str).unwrap_or("");
-                let label = format!("{}/{}", provider, model_id);
-                if !models_seen.contains(&label) {
-                    models_seen.push(label.clone());
-                }
-                model = Some(label.clone());
-                ensure_turn!(ts, Value::Null);
-                drafts.push(RecordDraft {
-                    kind: "system",
-                    event: "model_change".into(),
-                    summary: shorten(&label, SUMMARY_LIMIT),
-                    started_at: ts,
-                    completed_at: ts,
-                    status: "complete",
-                    input: None,
-                    output: None,
-                    usage: None,
-                    metadata: Map::new(),
-                    turn: current_turn,
-                    step: Some(current_step.max(1)),
-                    id: obj.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
-                });
-            }
-            Some("thinking_level_change") => {
-                let level = obj.get("thinkingLevel").and_then(Value::as_str).unwrap_or("");
-                ensure_turn!(ts, Value::Null);
-                drafts.push(RecordDraft {
-                    kind: "system",
-                    event: "thinking_level".into(),
-                    summary: level.to_string(),
-                    started_at: ts,
-                    completed_at: ts,
-                    status: "complete",
-                    input: None,
-                    output: None,
-                    usage: None,
-                    metadata: Map::new(),
-                    turn: current_turn,
-                    step: Some(current_step.max(1)),
-                    id: obj.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
-                });
-            }
-            Some("branch_summary") => {
-                let summary_text = obj.get("summary").and_then(Value::as_str).unwrap_or("");
-                ensure_turn!(ts, Value::Null);
-                drafts.push(RecordDraft {
-                    kind: "system",
-                    event: "branch_summary".into(),
-                    summary: shorten(summary_text, SUMMARY_LIMIT),
-                    started_at: ts,
-                    completed_at: ts,
-                    status: "complete",
-                    input: if full { Some(shorten(summary_text, DETAIL_LIMIT)) } else { None },
-                    output: None,
-                    usage: None,
-                    metadata: Map::new(),
-                    turn: current_turn,
-                    step: Some(current_step.max(1)),
-                    id: obj.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
-                });
-            }
-            _ => {
-                ignored += 1;
             }
         }
     }
     close_turn!(last_ts);
 
-    // Any tool call still pending at EOF stays "running" only if the session
-    // is live; a finished file marks it aborted. Keep it simple: leave as-is.
     let truncated = drafts.len().saturating_sub(max_records);
     if truncated > 0 {
         warnings.push(json!({
@@ -534,7 +820,7 @@ pub fn project(path: &Path, full: bool, max_records: usize) -> Result<Value> {
             "id": if session_id.is_empty() { path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default() } else { session_id },
             "title": shorten(if first_user.is_empty() { "Untitled session" } else { &first_user }, 100),
             "cwd": cwd,
-            "provider": "pi",
+            "provider": provider,
             "model": model,
             "models": models_seen,
             "startedAt": iso(first_ts),
@@ -547,16 +833,41 @@ pub fn project(path: &Path, full: bool, max_records: usize) -> Result<Value> {
     }))
 }
 
+fn parse_ts(value: Option<&str>) -> Option<DateTime<Utc>> {
+    value
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&Utc))
+}
+
+fn iso(ts: Option<DateTime<Utc>>) -> Option<String> {
+    ts.map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+fn ms_between(start: Option<DateTime<Utc>>, end: Option<DateTime<Utc>>) -> Option<i64> {
+    match (start, end) {
+        (Some(a), Some(b)) if b >= a => Some((b - a).num_milliseconds()),
+        _ => None,
+    }
+}
+
+/// First line of text, whitespace-normalized, bounded.
+fn shorten(text: &str, limit: usize) -> String {
+    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = flat.replace('\n', " ");
+    if flat.chars().count() <= limit {
+        flat
+    } else {
+        let cut: String = flat.chars().take(limit).collect();
+        format!("{}…", cut.trim_end())
+    }
+}
+
 fn fmt_duration(ms: Option<i64>) -> String {
     match ms {
         None => "—".into(),
         Some(ms) if ms < 1_000 => format!("{}ms", ms),
         Some(ms) if ms < 60_000 => format!("{:.1}s", ms as f64 / 1_000.0),
-        Some(ms) if ms < 3_600_000 => {
-            let m = ms / 60_000;
-            let s = (ms % 60_000) / 1_000;
-            format!("{}m{}s", m, s)
-        }
+        Some(ms) if ms < 3_600_000 => format!("{}m{}s", ms / 60_000, (ms % 60_000) / 1_000),
         Some(ms) => format!("{}h{}m", ms / 3_600_000, (ms % 3_600_000) / 60_000),
     }
 }
@@ -583,12 +894,9 @@ fn render(t: &Value, fallback_id: &str) {
         .cyan()
         .bold()
     );
-    println!(
-        "  {} {}",
-        "Title:".dimmed(),
-        session["title"].as_str().unwrap_or("Untitled")
-    );
+    println!("  {} {}", "Title:".dimmed(), session["title"].as_str().unwrap_or("Untitled"));
     let mut meta_bits = vec![
+        format!("Provider: {}", session["provider"].as_str().unwrap_or("—")),
         format!("Model: {}", session["model"].as_str().unwrap_or("—")),
         format!("Turns: {}", stats["turns"]),
         format!("Records: {}", stats["records"]),
@@ -624,11 +932,7 @@ fn render(t: &Value, fallback_id: &str) {
 
     for turn in turns {
         let idx = turn["index"].as_i64().unwrap_or(0);
-        let time = turn["startedAt"]
-            .as_str()
-            .and_then(|s| s.get(11..19))
-            .unwrap_or("—");
-        let status = turn["status"].as_str().unwrap_or("complete");
+        let time = turn["startedAt"].as_str().and_then(|s| s.get(11..19)).unwrap_or("—");
         println!(
             "{}",
             format!(
@@ -662,7 +966,6 @@ fn render(t: &Value, fallback_id: &str) {
                 );
             }
         } else {
-            let _ = status;
             println!("  {}", "(records truncated)".dimmed());
         }
     }
@@ -690,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn projects_turns_steps_and_tool_results() {
+    fn projects_pi_turns_steps_and_tool_results() {
         let file = write_session(&[
             json!({"type":"session","id":"abc","cwd":"/tmp/p","timestamp":"2026-01-01T00:00:00Z","version":3}),
             json!({"type":"message","id":"e1","parentId":null,"timestamp":"2026-01-01T00:00:01Z",
@@ -708,7 +1011,7 @@ mod tests {
                               "usage":{"input":20,"output":7,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.02}}}}),
             json!({"type":"model_change","id":"e5","parentId":"e4","timestamp":"2026-01-01T00:00:07Z","provider":"x","modelId":"m2"}),
         ]);
-        let t = project(&file, true, 500).unwrap();
+        let t = project(&file, "pi", true, 500).unwrap();
         assert_eq!(t["session"]["id"], "abc");
         assert_eq!(t["session"]["model"], "x/m2");
         assert_eq!(t["stats"]["turns"], 1);
@@ -726,6 +1029,62 @@ mod tests {
     }
 
     #[test]
+    fn projects_claude_tool_use_pairs() {
+        let file = write_session(&[
+            json!({"type":"user","uuid":"u1","sessionId":"s1","cwd":"/tmp/c","timestamp":"2026-01-01T00:00:00Z",
+                   "message":{"role":"user","content":"run tests"}}),
+            json!({"type":"assistant","uuid":"a1","sessionId":"s1","timestamp":"2026-01-01T00:00:01Z",
+                   "message":{"role":"assistant","model":"claude-x","content":[
+                       {"type":"thinking","thinking":"plan"},
+                       {"type":"tool_use","id":"t1","name":"Bash","input":{"command":"pytest"}}],
+                       "usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":50,"cache_creation_input_tokens":5}}}),
+            json!({"type":"user","uuid":"u2","sessionId":"s1","timestamp":"2026-01-01T00:00:03Z","toolUseResult":{},
+                   "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","is_error":false,"content":"3 passed"}]}}),
+            json!({"type":"assistant","uuid":"a2","sessionId":"s1","timestamp":"2026-01-01T00:00:05Z",
+                   "message":{"role":"assistant","model":"claude-x","content":[{"type":"text","text":"all green"}],
+                       "usage":{"input_tokens":200,"output_tokens":20,"cache_read_input_tokens":80,"cache_creation_input_tokens":0}}}),
+        ]);
+        let t = project(&file, "claude", true, 500).unwrap();
+        assert_eq!(t["session"]["provider"], "claude");
+        assert_eq!(t["session"]["model"], "claude-x");
+        assert_eq!(t["stats"]["turns"], 1, "tool-result carrier must not open a new turn");
+        let records = t["records"].as_array().unwrap();
+        let tool = records.iter().find(|r| r["kind"] == "tool").unwrap();
+        assert_eq!(tool["event"], "Bash");
+        assert_eq!(tool["output"], "3 passed");
+        assert_eq!(tool["durationMs"], 2000);
+        assert_eq!(t["stats"]["tokens"]["input"], 300);
+        assert_eq!(t["stats"]["tokens"]["cacheRead"], 130);
+    }
+
+    #[test]
+    fn projects_codex_rollout() {
+        let file = write_session(&[
+            json!({"type":"session_meta","timestamp":"2026-01-01T00:00:00Z","payload":{"session_id":"cx1","cwd":"/tmp/x"}}),
+            json!({"type":"event_msg","timestamp":"2026-01-01T00:00:01Z","payload":{"type":"user_message","message":"refactor"}}),
+            json!({"type":"turn_context","timestamp":"2026-01-01T00:00:01Z","payload":{"type":"turn_context","model":"gpt-x","effort":"high"}}),
+            json!({"type":"response_item","timestamp":"2026-01-01T00:00:02Z","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"think"}]}}),
+            json!({"type":"response_item","timestamp":"2026-01-01T00:00:02Z","payload":{"type":"function_call","name":"shell","call_id":"f1","arguments":"{\"cmd\":\"cargo test\"}"}}),
+            json!({"type":"response_item","timestamp":"2026-01-01T00:00:04Z","payload":{"type":"function_call_output","call_id":"f1","output":"ok"}}),
+            json!({"type":"event_msg","timestamp":"2026-01-01T00:00:06Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"output_tokens":50,"cached_input_tokens":900}}}}),
+            json!({"type":"response_item","timestamp":"2026-01-01T00:00:07Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}),
+        ]);
+        let t = project(&file, "codex", true, 500).unwrap();
+        assert_eq!(t["session"]["provider"], "codex");
+        assert_eq!(t["session"]["model"], "gpt-x");
+        assert_eq!(t["stats"]["turns"], 1);
+        let records = t["records"].as_array().unwrap();
+        let tool = records.iter().find(|r| r["kind"] == "tool").unwrap();
+        assert_eq!(tool["event"], "shell");
+        assert_eq!(tool["output"], "ok");
+        assert!(records.iter().any(|r| r["kind"] == "reasoning"));
+        assert!(records.iter().any(|r| r["kind"] == "assistant" && r["summary"] == "done"));
+        // token_count is a cumulative snapshot: totals reflect it directly.
+        assert_eq!(t["stats"]["tokens"]["input"], 500);
+        assert_eq!(t["stats"]["tokens"]["cacheRead"], 900);
+    }
+
+    #[test]
     fn marks_tool_errors_and_truncates() {
         let mut lines = vec![json!({"type":"session","id":"t2","cwd":"/tmp","timestamp":"2026-01-01T00:00:00Z"})];
         for i in 0..60 {
@@ -738,7 +1097,7 @@ mod tests {
                     "content":[{"type":"text","text":"boom"}]}}));
         }
         let file = write_session(&lines);
-        let t = project(&file, false, 50).unwrap();
+        let t = project(&file, "pi", false, 50).unwrap();
         assert_eq!(t["stats"]["toolErrors"], 60);
         assert_eq!(t["stats"]["toolCalls"], 60);
         assert_eq!(t["stats"]["truncated"], 70); // 120 total records - 50

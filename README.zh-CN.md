@@ -110,7 +110,7 @@ starling trajectory --json --full   # trajectory-v1 JSON，含限幅的输入/�
 starling trajectory --max-records 1000
 ```
 
-JSON 输出采用 codex-trajectory 使用的 trajectory-v1 结构（schemaVersion 1，其设计源自 DeepSeek Harness 的事件台账）：`session`、`stats`、`turns`、`records`、`warnings`。每条 user 消息开启一个新 turn；工具结果之后恢复的 assistant 输出开启一个新 step。`toolResult` 会补全对应 tool record 的耗时与错误状态；`model_change`、`thinking_level_change`、`compaction`、`branch_summary` 记为 `system`/`compaction` record。默认 summary 限幅 100 字符，`--full` 时包含限幅（4 KiB）的输入/输出文本；超过 `--max-records`（50–1000，默认 500）时从最旧开始截断。仅支持 Pi 会话。
+JSON 输出采用 codex-trajectory 使用的 trajectory-v1 结构（schemaVersion 1，其设计源自 DeepSeek Harness 的事件台账）：`session`、`stats`、`turns`、`records`、`warnings`。每条 user 消息开启一个新 turn；工具结果之后恢复的 assistant 输出开启一个新 step。`toolResult`/`tool_result`/`*_call_output` 会补全对应 tool record 的耗时与错误状态；`model_change`、`thinking_level_change`、`compaction`、`branch_summary` 记为 `system`/`compaction` record。默认 summary 限幅 100 字符，`--full` 时包含限幅（4 KiB）的输入/输出文本；超过 `--max-records`（50–1000，默认 500）时从最旧开始截断。支持全部三个 provider：Pi、Claude Code、Codex（Codex 的 reasoning record 使用 summary 文本，token 总量来自累进的 `token_count` 快照）。
 
 恢复一个会话：
 
