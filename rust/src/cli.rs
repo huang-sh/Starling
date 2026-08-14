@@ -97,10 +97,10 @@ pub enum Command {
         session_id: String,
     },
 
-    /// Project a Pi session transcript into a turn-aware trajectory ledger
+    /// Project an agent session transcript into a turn-aware trajectory ledger
     #[command(alias = "traj")]
     Trajectory {
-        /// Session ID (defaults to the most recent Pi session)
+        /// Session ID (defaults to the most recent session of any provider)
         session_id: Option<String>,
 
         /// Max records returned (50-1000, oldest truncated first)
