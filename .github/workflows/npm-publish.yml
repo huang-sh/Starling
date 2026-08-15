@@ -2,9 +2,9 @@ name: NPM package smoke
 
 on:
   pull_request:
-    branches: [main, dev, rust]
+    branches: [main, dev]
   push:
-    branches: [main, dev, rust]
+    branches: [main, dev]
   workflow_dispatch:
 
 permissions:
