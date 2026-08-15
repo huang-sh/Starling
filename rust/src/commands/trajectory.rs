@@ -832,7 +832,8 @@ pub fn project(path: &Path, provider: &str, full: bool, max_records: usize) -> R
         "detailLevel": if full { "full" } else { "summary" },
         "generatedAt": crate::constants::now_iso(),
         "session": {
-            "id": if session_id.is_empty() { path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default() } else { session_id },
+            "id": effective_session_id(&session_id, path),
+            "parentSessionId": if effective_session_id(&session_id, path) == session_id { Value::Null } else { json!(session_id) },
             "title": shorten(if first_user.is_empty() { "Untitled session" } else { &first_user }, 100),
             "cwd": cwd,
             "provider": provider,
@@ -852,6 +853,35 @@ fn parse_ts(value: Option<&str>) -> Option<DateTime<Utc>> {
     value
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|d| d.with_timezone(&Utc))
+}
+
+/// Preferred display id: a trailing UUID in the file name (how Starling and
+/// `starling session ls` index sessions) when it disagrees with the id embedded
+/// in the transcript (e.g. Codex nested review rollouts carry the parent's
+/// session id in session_meta). Falls back to the embedded id, then the stem.
+fn effective_session_id(embedded: &str, path: &Path) -> String {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    // Last five '-'-separated segments of the stem, i.e. a trailing UUID.
+    let tail: Vec<&str> = stem.rsplit('-').take(5).collect();
+    if tail.len() == 5 {
+        let candidate = tail.iter().rev().copied().collect::<Vec<_>>().join("-");
+        let is_uuid = candidate.len() == 36
+            && candidate.bytes().enumerate().all(|(i, b)| {
+                if matches!(i, 8 | 13 | 18 | 23) {
+                    b == b'-'
+                } else {
+                    b.is_ascii_hexdigit()
+                }
+            });
+        if is_uuid && !candidate.eq_ignore_ascii_case(embedded) {
+            return candidate;
+        }
+    }
+    if embedded.is_empty() {
+        stem
+    } else {
+        embedded.to_string()
+    }
 }
 
 fn iso(ts: Option<DateTime<Utc>>) -> Option<String> {
@@ -910,6 +940,9 @@ fn render(t: &Value, fallback_id: &str) {
         .bold()
     );
     println!("  {} {}", "Title:".dimmed(), session["title"].as_str().unwrap_or("Untitled"));
+    if let Some(parent) = session["parentSessionId"].as_str() {
+        println!("  {} {} (nested rollout)", "Parent:".dimmed(), parent);
+    }
     let mut meta_bits = vec![
         format!("Provider: {}", session["provider"].as_str().unwrap_or("—")),
         format!("Model: {}", session["model"].as_str().unwrap_or("—")),
