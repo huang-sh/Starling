@@ -10,6 +10,12 @@
 
 Launch, switch, and organize Claude Code, Codex, and Pi sessions with model profiles, catalogs, project views, live monitoring, and VS Code integration.
 
+<p align="center">
+  <img src="assets/Starling-trajectory.png" alt="Starling trajectory ledger" width="720">
+</p>
+
+Session trajectory: turn-aware ledgers for Pi, Claude Code, and Codex sessions — steps, tool timing, token usage, and errors, with full-text search and per-record inspection (`starling trajectory`).
+
 Current release: **0.3.0**
 
 - npm: [`starling-ai`](https://www.npmjs.com/package/starling-ai)
