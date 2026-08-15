@@ -833,7 +833,7 @@ pub fn project(path: &Path, provider: &str, full: bool, max_records: usize) -> R
         "generatedAt": crate::constants::now_iso(),
         "session": {
             "id": effective_session_id(&session_id, path),
-            "parentSessionId": if effective_session_id(&session_id, path) == session_id { Value::Null } else { json!(session_id) },
+            "parentSessionId": if session_id.is_empty() || effective_session_id(&session_id, path) == session_id { Value::Null } else { json!(session_id) },
             "title": shorten(if first_user.is_empty() { "Untitled session" } else { &first_user }, 100),
             "cwd": cwd,
             "provider": provider,
