@@ -10,12 +10,6 @@
 
 Starling 用来启动、切换和组织 Claude Code、Codex 与 Pi 会话，支持模型配置、Catalog、项目视图、实时监控和 VS Code 集成。
 
-<p align="center">
-  <img src="assets/Starling-trajectory.png" alt="Starling trajectory 台账" width="720">
-</p>
-
-会话 trajectory：Pi、Claude Code、Codex 会话的 turn 粒度台账——steps、工具耗时、token 用量与错误，支持全文搜索与逐条 record 检视（`starling trajectory`）。
-
 当前版本：**0.3.0**
 
 - npm：[`starling-ai`](https://www.npmjs.com/package/starling-ai)
@@ -208,6 +202,10 @@ starling session delete <session-id> --yes
 ```
 
 ### Trajectory
+
+<p align="center">
+  <img src="assets/Starling-trajectory.png" alt="Starling trajectory 台账" width="720">
+</p>
 
 把 Pi、Claude Code、Codex 会话投影成 turn 粒度的台账：
 
