@@ -10,10 +10,10 @@
 
 Starling 用来启动、切换和组织 Claude Code、Codex 与 Pi 会话，支持模型配置、Catalog、项目视图、实时监控和 VS Code 集成。
 
-当前版本：**0.2.1**
+当前版本：**0.3.0**
 
 - npm：[`starling-ai`](https://www.npmjs.com/package/starling-ai)
-- GitHub Release：[`rust-v0.2.1`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.2.1)
+- GitHub Release：[`rust-v0.3.0`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.3.0)
 - VS Code 扩展：[`huangsh.starling-ai`](https://marketplace.visualstudio.com/items?itemName=huangsh.starling-ai)
 
 ## 功能
@@ -26,8 +26,9 @@ Starling 用来启动、切换和组织 Claude Code、Codex 与 Pi 会话，支�
 - 在会话文件提供信息时统计 token 使用量。
 - 在 `~/.starling/session-index.json` 维护本地索引，加速项目和 Catalog 视图。
 - 通过 `starling run` 启动 Claude Code、Codex 或 Pi，并把新会话自动归档到指定 Catalog。
-- 不带子命令运行 `starling`，直接进入 Starling 自己的交互式编码工作台；底层在同一进程中使用 `ChatSession` 与官方 `@earendil-works/pi-coding-agent` SDK。
-- 通过 `starling chat pi` 把同一个与传输无关的 `ChatSession` 引擎独立暴露为机器可读 JSONL 适配器，供编辑器集成使用。
+- 不带子命令运行 `starling`，通过托管 launcher（`starling run pi` 同一路径）启动 Pi 自带的交互式 TUI（经 Pi 官方支持的 `piConfig.name` 改品牌为 "starling"），run 记录与 `starling top` 可见性保持不变。
+- 用 `starling trajectory` 把 Pi、Claude Code、Codex 会话投影成 turn 粒度的 trajectory 台账：steps、工具耗时、token 用量、错误与中止状态；JSON 输出沿用 codex-trajectory 的 trajectory-v1 结构。
+- 通过 `starling chat pi` 把与传输无关的 `ChatSession` 引擎独立暴露为机器可读 JSONL 适配器，供编辑器集成使用。
 - 在 `~/.starling/settings` 下管理 Claude、Codex 和 Pi 的模型配置。
 - 通过类似 `top` 的终端视图混合监控最活跃的 20 个 pinned 和 unpinned sessions，区分 `running`、`waiting`、`idle`、`stopped` 状态。
 - 使用 JSON 输出作为终端渲染和 VS Code 扩展共享的数据契约。
@@ -58,7 +59,7 @@ GNU Linux 包以 GLIBC 2.31 为兼容基线构建，x64 binary 在发布前还�
 相同的 native 压缩包和 sha256 文件也会附在 GitHub Release 中：
 
 ```text
-https://github.com/huang-sh/Starling/releases/tag/rust-v0.2.1
+https://github.com/huang-sh/Starling/releases/tag/rust-v0.3.0
 ```
 
 npm 安装时还会把 Starling skill 安装到：
@@ -85,7 +86,7 @@ npm 版 Starling 需要 Node.js 22.19.0 或更新版本，并以 `>=0.82.0` 的�
 starling
 ```
 
-这里通过 Starling 的托管 launcher（与 `starling run pi` 同一条路径）启动 Pi 的交互式 TUI。Starling 不再自研 TUI：界面就是 Pi 自带的 TUI，作为固定依赖安装，并在安装时通过 Pi 官方支持的 `piConfig.name` 字段改品牌为 "Starling"，启动头部与终端标题显示 `starling`，而 session、凭据与设置仍存放在 `~/.pi`。托管 launcher 会记录 run，因此活动 session 仍可被 `starling top` 看到。
+这里通过 Starling 的托管 launcher（与 `starling run pi` 同一条路径）启动 Pi 的交互式 TUI。Starling 不再自研 TUI：界面就是 Pi 自带的 TUI（`>=0.82.0` 版本范围安装），并在安装时通过 Pi 官方支持的 `piConfig.name` 字段改品牌为 "Starling"，启动头部与终端标题显示 `starling`，而 session、凭据与设置仍存放在 `~/.pi`。托管 launcher 会记录 run，因此活动 session 仍可被 `starling top` 看到。
 
 Pi 的全部交互功能原样可用：`/settings`、`/new`、`/resume`、`/fork`、`/clone`、`/import`、`/export`、`/copy`、`/scoped-models`、`/model`、`/tree`、`/login`、`/logout`、`/compact`、`/name`、`/session`、`/share`、`/changelog`、`/hotkeys`、`/trust`、`/reload`，以及 extension 命令、prompt template 和 `skill:*` 命令。输入以 `!` 开头会运行 bash 并把结果放入上下文；`!!` 则不放入上下文。键盘快捷键详见 Pi 自身文档（`/hotkeys`）。
 
@@ -161,7 +162,7 @@ starling chat --cwd /path/to/project --title "Review" pi
 starling chat --cwd /path/to/project pi --session /absolute/path/to/session.jsonl
 ```
 
-`starling chat pi` 是 Starling 的外部 JSONL 适配器；裸 `starling` 不依赖它。两种入口共用同一个与传输无关的 `ChatSession.request()` API，覆盖 prompt、interrupt/queue、模型与 thinking 切换、compaction、bash、export/copy、settings/trust/authentication，以及 new/resume/fork/clone/import session replacement。它们采用 OMP 的同进程 SDK 生命周期：创建 agent session、订阅 SDK 事件、直接提交 prompt，最后取消订阅并 dispose。在 Starling 固定使用的 Node 兼容 Pi SDK 中，这套生命周期会先构造 `ModelRuntime`、`SessionManager`、`SettingsManager` 和 `DefaultResourceLoader`，再调用 `createAgentSession()`。适配器不会执行 `pi --mode rpc`，也不会启动 Pi TUI。新 chat 由 `SessionManager.create()` 生成真实 session identity，不会预分配 `--session-id`；恢复时的 `--session` 只接受已有 Pi transcript 的绝对路径。标准输入与 SDK 事件采用换行分隔 JSON，单条物理行上限为 1 MiB。标准输出只包含以 LF 结尾的 JSON 记录：Starling 会在兼容消息前后发送 `starling_started` 与 `starling_exited`，其 `schema` 为 `starling.chat`、`schemaVersion` 为 `1`。诊断日志只写到标准错误。
+`starling chat pi` 是 Starling 的外部 JSONL 适配器；裸 `starling` 不依赖它。两种入口共用同一个与传输无关的 `ChatSession.request()` API，覆盖 prompt、interrupt/queue、模型与 thinking 切换、compaction、bash、export/copy、settings/trust/authentication，以及 new/resume/fork/clone/import session replacement。它们采用 OMP 的同进程 SDK 生命周期：创建 agent session、订阅 SDK 事件、直接提交 prompt，最后取消订阅并 dispose。在 Starling 捆绑的 Node 兼容 Pi SDK（`>=0.82.0`）中，这套生命周期会先构造 `ModelRuntime`、`SessionManager`、`SettingsManager` 和 `DefaultResourceLoader`，再调用 `createAgentSession()`。适配器不会执行 `pi --mode rpc`，也不会启动 Pi TUI。新 chat 由 `SessionManager.create()` 生成真实 session identity，不会预分配 `--session-id`；恢复时的 `--session` 只接受已有 Pi transcript 的绝对路径。标准输入与 SDK 事件采用换行分隔 JSON，单条物理行上限为 1 MiB。标准输出只包含以 LF 结尾的 JSON 记录：Starling 会在兼容消息前后发送 `starling_started` 与 `starling_exited`，其 `schema` 为 `starling.chat`、`schemaVersion` 为 `1`。诊断日志只写到标准错误。
 
 chat runtime 会关闭自动发现的用户级和项目级 Pi extensions，加载 Starling 的 tracking/session guard，并启用唯一一份由 Node 管理的权限 gate。内置只读工具 `read`、`grep`、`find` 和 `ls` 自动放行；`bash`、`edit`、`write` 以及未知工具会发出 Pi `extension_ui_request` 确认事件，RPC client 必须响应。拒绝、取消、UI 异常或 30 秒内没有响应时都会阻止工具调用。Starling 展示的工具文本上限为 16 KiB。这套确认策略是审批边界，不是 sandbox；获批工具仍以 Starling 进程的操作系统权限运行。普通交互式 `starling run pi` 的权限行为不变。
 
@@ -199,6 +200,18 @@ starling session note <session-id> "Follow up on benchmark results"
 starling session unpin <session-id>
 starling session delete <session-id> --yes
 ```
+
+### Trajectory
+
+把 Pi、Claude Code、Codex 会话投影成 turn 粒度的台账：
+
+```bash
+starling trajectory                 # 任意 provider 中最近的一个会话
+starling trajectory <session-id>    # 指定会话（支持 ID 前缀）
+starling trajectory --json --full --max-records 1000
+```
+
+投影规则（turn/step 语义、工具配对、aborted 状态、嵌套 Codex rollout）见上文「快速开始」部分；JSON 字段见下方机器可读输出。
 
 `starling ses` 是 `starling session` 的别名。
 
@@ -447,6 +460,7 @@ starling project ls --json
 starling model ls --json
 starling top --json
 starling run status --json
+starling trajectory --json --full --max-records 1000
 ```
 
 Claude profile 是 JSON 文件，Starling 会把它作为 settings 传给 Claude Code。

@@ -10,10 +10,10 @@
 
 Launch, switch, and organize Claude Code, Codex, and Pi sessions with model profiles, catalogs, project views, live monitoring, and VS Code integration.
 
-Current release: **0.2.1**
+Current release: **0.3.0**
 
 - npm: [`starling-ai`](https://www.npmjs.com/package/starling-ai)
-- GitHub Release: [`rust-v0.2.1`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.2.1)
+- GitHub Release: [`rust-v0.3.0`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.3.0)
 - VS Code extension: [`huangsh.starling-ai`](https://marketplace.visualstudio.com/items?itemName=huangsh.starling-ai)
 
 ## Features
@@ -26,8 +26,9 @@ Current release: **0.2.1**
 - Track token usage when it is available in the session file.
 - Maintain a local session index at `~/.starling/session-index.json` for faster project and catalog views.
 - Launch Claude Code, Codex, or Pi through `starling run` and automatically assign the created session to a catalog.
-- Run `starling` with no subcommand to open Starling's own interactive coding workspace, backed by an in-process `ChatSession` and the official `@earendil-works/pi-coding-agent` SDK.
-- Expose the same transport-neutral `ChatSession` engine as a separate machine-readable JSONL adapter through `starling chat pi` for editor integrations.
+- Run `starling` with no subcommand to launch Pi's interactive TUI through the managed `starling run pi` path (branded "starling" via Pi's supported `piConfig.name`), with run recording and `starling top` visibility intact.
+- Project any Pi, Claude Code, or Codex session into a turn-aware trajectory ledger (`starling trajectory`) with steps, tool timing, token usage, errors, and abort status; JSON output follows the trajectory-v1 shape used by codex-trajectory.
+- Expose the transport-neutral `ChatSession` engine as a separate machine-readable JSONL adapter through `starling chat pi` for editor integrations.
 - Manage Claude, Codex, and Pi model profiles under `~/.starling/settings`.
 - Monitor the top 20 active pinned and unpinned sessions together with a top-style terminal view that separates `running`, `waiting`, `idle`, and `stopped` states.
 - Use JSON output as the stable data contract for terminal rendering and the VS Code extension.
@@ -58,7 +59,7 @@ GNU Linux packages are built against a GLIBC 2.31 baseline and the x64 binary is
 The same native archives and sha256 files are attached to the GitHub release:
 
 ```text
-https://github.com/huang-sh/Starling/releases/tag/rust-v0.2.1
+https://github.com/huang-sh/Starling/releases/tag/rust-v0.3.0
 ```
 
 The npm install step also installs the bundled Starling skill to:
@@ -160,7 +161,7 @@ starling chat --cwd /path/to/project --title "Review" pi
 starling chat --cwd /path/to/project pi --session /absolute/path/to/session.jsonl
 ```
 
-`starling chat pi` is Starling's external JSONL adapter; bare `starling` does not depend on it. Both surfaces use the same transport-neutral `ChatSession.request()` API for prompts, interruption and queues, model/thinking changes, compaction, bash, export/copy, settings/trust/authentication, and new/resume/fork/clone/import session replacement. They follow OMP's in-process SDK lifecycle: create an agent session, subscribe to SDK events, prompt it directly, then unsubscribe and dispose it. With Starling's fixed Node-compatible Pi SDK this lifecycle constructs `ModelRuntime`, `SessionManager`, `SettingsManager`, and `DefaultResourceLoader` before calling `createAgentSession()`. The adapter never launches `pi --mode rpc` or Pi's TUI. A new chat lets `SessionManager.create()` allocate the session identity and receives no preallocated `--session-id`; `--session` accepts only an absolute existing Pi transcript path. Standard input and SDK events use newline-delimited JSON with a 1 MiB maximum physical line size. Standard output contains only LF-terminated JSON records: Starling brackets the compatibility records with `starling_started` and `starling_exited` events whose `schema` is `starling.chat` and `schemaVersion` is `1`. Diagnostics are written to standard error.
+`starling chat pi` is Starling's external JSONL adapter; bare `starling` does not depend on it. Both surfaces use the same transport-neutral `ChatSession.request()` API for prompts, interruption and queues, model/thinking changes, compaction, bash, export/copy, settings/trust/authentication, and new/resume/fork/clone/import session replacement. They follow OMP's in-process SDK lifecycle: create an agent session, subscribe to SDK events, prompt it directly, then unsubscribe and dispose it. With Starling's bundled Node-compatible Pi SDK (range `>=0.82.0`) this lifecycle constructs `ModelRuntime`, `SessionManager`, `SettingsManager`, and `DefaultResourceLoader` before calling `createAgentSession()`. The adapter never launches `pi --mode rpc` or Pi's TUI. A new chat lets `SessionManager.create()` allocate the session identity and receives no preallocated `--session-id`; `--session` accepts only an absolute existing Pi transcript path. Standard input and SDK events use newline-delimited JSON with a 1 MiB maximum physical line size. Standard output contains only LF-terminated JSON records: Starling brackets the compatibility records with `starling_started` and `starling_exited` events whose `schema` is `starling.chat` and `schemaVersion` is `1`. Diagnostics are written to standard error.
 
 The chat runtime disables discovered user/project Pi extensions, loads Starling's tracking/session guard, and enables one Node-owned permission gate. It auto-allows the built-in read-only `read`, `grep`, `find`, and `ls` tools. `bash`, `edit`, `write`, and unknown tools issue Pi `extension_ui_request` confirmation events. The RPC client must answer those requests; rejection, cancellation, UI errors, or no response within 30 seconds block the tool call. Tool text shown by Starling is capped at 16 KiB. This confirmation policy is an approval boundary, not a sandbox: approved tools run with the Starling process's OS privileges. Ordinary interactive `starling run pi` permission behavior is unchanged.
 
@@ -198,6 +199,18 @@ starling session note <session-id> "Follow up on benchmark results"
 starling session unpin <session-id>
 starling session delete <session-id> --yes
 ```
+
+### Trajectory
+
+Project any Pi, Claude Code, or Codex session into a turn-aware ledger:
+
+```bash
+starling trajectory                 # most recent session of any provider
+starling trajectory <session-id>    # specific session (id prefix works)
+starling trajectory --json --full --max-records 1000
+```
+
+See the "Quick Start" section above for the projection rules (turn/step semantics, tool pairing, aborted turns, nested Codex rollouts) and the JSON entry points below.
 
 `starling ses` is an alias for `starling session`.
 
@@ -446,6 +459,7 @@ starling project ls --json
 starling model ls --json
 starling top --json
 starling run status --json
+starling trajectory --json --full --max-records 1000
 ```
 
 Claude profiles are JSON files that Starling passes to Claude Code as settings.
