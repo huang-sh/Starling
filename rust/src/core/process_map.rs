@@ -126,6 +126,10 @@ pub fn provider_from_cmdline(args: &[String]) -> Option<Provider> {
         "claude" | "claude-code" => return Some(Provider::Claude),
         "codex" => return Some(Provider::Codex),
         "pi" => return Some(Provider::Pi),
+        // `starling run/chat pi` replaces the child's argv with the starling
+        // binary; the process is still a Pi runtime host (its environ carries
+        // STARLING_PI_HOOK_FILE / STARLING_SESSION_ID for managed runs).
+        "starling" => return Some(Provider::Pi),
         _ => {}
     }
 

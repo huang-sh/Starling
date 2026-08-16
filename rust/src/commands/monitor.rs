@@ -1000,7 +1000,7 @@ fn infer_status_with_runtime(
     {
         return status_guess("running", Some("pending_task"), false);
     }
-    if process_alive && has_explicit_live_running(live) {
+    if process_alive && has_explicit_live_running(live, now_ms) {
         return status_guess(
             "running",
             live.activity_signal.as_deref().or(Some("live_activity")),
@@ -1051,8 +1051,13 @@ fn is_fresh_live_running(live: &SessionLive, now_ms: u64) -> bool {
         && now_ms.saturating_sub(live.activity_since_ms) <= LIVE_RUNNING_STALE_MS
 }
 
-fn has_explicit_live_running(live: &SessionLive) -> bool {
-    is_live_running(live) && live.activity_since_ms > 0
+fn has_explicit_live_running(live: &SessionLive, now_ms: u64) -> bool {
+    // A transcript's last "running" marker (e.g. a user prompt whose assistant
+    // reply never landed — the process died mid-turn) must decay: an old
+    // marker means the session is sitting at the prompt, not working.
+    is_live_running(live)
+        && live.activity_since_ms > 0
+        && now_ms.saturating_sub(live.activity_since_ms) <= LIVE_RUNNING_STALE_MS
 }
 
 fn live_running_activity_should_override_waiting_hook(
@@ -1079,7 +1084,7 @@ fn live_running_activity_should_override_waiting_hook(
     {
         return true;
     }
-    has_explicit_live_running(live) || has_recent_transcript_activity(live, now_ms)
+    has_explicit_live_running(live, now_ms) || has_recent_transcript_activity(live, now_ms)
 }
 
 fn has_recent_transcript_activity(live: &SessionLive, now_ms: u64) -> bool {
@@ -1120,7 +1125,7 @@ fn is_expired_edge_running(
         && background_task_count == 0
         && live.pending_since_ms == 0
         && live.current_task.trim().is_empty()
-        && !has_explicit_live_running(live)
+        && !has_explicit_live_running(live, now_ms)
         && !has_recent_transcript_activity(live, now_ms)
 }
 
@@ -1664,31 +1669,38 @@ fn build_snapshot(
     // Tier-1 truth first: the global Pi reporter extension writes
     // pid↔session directly from inside every pi process (including manual
     // `pi --session ...` launches whose cmdline carries no session id).
+    // Reporter entries are authoritative: when present they WIN over the
+    // process-map's project-level fallback, which can mis-assign a pid to a
+    // sibling session when two pi processes share one cwd.
     let live_reported = crate::core::live_sessions::live_pi_sessions_verified();
     let detected = detect_running_sessions();
     for row in rows.iter_mut() {
         let row_key = canonical_session_id(&row.session_id, Some(&row.provider));
-        if row.pid.is_none() {
-            if let Some(entry) = live_reported.get(&row.session_id) {
-                row.pid = Some(entry.pid);
-                if row.file_path.is_none() {
-                    row.file_path = entry.transcript_path.clone();
-                }
+        let reported_entry = live_reported.get(&row.session_id);
+        if let Some(entry) = reported_entry {
+            row.pid = Some(entry.pid);
+            if row.file_path.is_none() {
+                row.file_path = entry.transcript_path.clone();
             }
         }
-        let info = detected
-            .get(&row.session_id)
-            .and_then(|bucket| select_detected_for_row(row, bucket))
-            .or_else(|| {
-                detected.iter().find_map(|(sid, bucket)| {
-                    let id_matches = bucket
-                        .iter()
-                        .any(|info| canonical_session_id(sid, Some(&info.provider)) == row_key);
-                    id_matches
-                        .then(|| select_detected_for_row(row, bucket))
-                        .flatten()
+        let info = if reported_entry.is_some() {
+            // Reporter already pinned this row; skip guess-based attachment.
+            None
+        } else {
+            detected
+                .get(&row.session_id)
+                .and_then(|bucket| select_detected_for_row(row, bucket))
+                .or_else(|| {
+                    detected.iter().find_map(|(sid, bucket)| {
+                        let id_matches = bucket.iter().any(|info| {
+                            canonical_session_id(sid, Some(&info.provider)) == row_key
+                        });
+                        id_matches
+                            .then(|| select_detected_for_row(row, bucket))
+                            .flatten()
+                    })
                 })
-            });
+        };
         if let Some(info) = info {
             row.pid = info.pid;
             if row.file_path.is_none() {
@@ -2116,12 +2128,16 @@ fn select_detected_for_row<'a>(
         }
     }
     if !row.project.is_empty() {
-        if let Some(candidate) = candidates
+        let by_project: Vec<&DetectedSession> = candidates
             .iter()
             .filter(provider_matches)
-            .find(|candidate| candidate.project_path.as_deref() == Some(row.project.as_str()))
-        {
-            return Some(candidate);
+            .filter(|candidate| candidate.project_path.as_deref() == Some(row.project.as_str()))
+            .collect();
+        // Two agents sharing one cwd (e.g. two pi processes in the same
+        // project) must not be cross-assigned: only use the project fallback
+        // when it is unambiguous.
+        if by_project.len() == 1 {
+            return Some(by_project[0]);
         }
     }
     let matching: Vec<&DetectedSession> = candidates.iter().filter(provider_matches).collect();
@@ -3248,7 +3264,7 @@ mod hook_status_tests {
     }
 
     #[test]
-    fn stale_live_running_activity_without_hook_stays_running() {
+    fn stale_live_running_with_pending_task_decays_to_idle() {
         let live = SessionLive {
             activity_status: Some("running".to_string()),
             activity_signal: Some("claude_tool_use".to_string()),
@@ -3270,13 +3286,41 @@ mod hook_status_tests {
             0,
         );
 
-        assert_eq!(guess.status, "running");
-        assert_eq!(guess.signal.as_deref(), Some("claude_tool_use"));
-        assert!(guess.realtime);
+        assert_eq!(guess.status, "idle");
     }
 
     #[test]
-    fn stale_live_running_without_pending_task_stays_running() {
+    fn stale_live_running_without_pending_task_decays_to_idle() {
+        // A user prompt whose assistant reply never landed (process was killed
+        // mid-turn, then a new process resumed the transcript) leaves the last
+        // "running" marker dangling forever. A live process with an
+        // over-age marker is sitting at the prompt: idle, not running.
+        let live = SessionLive {
+            activity_status: Some("running".to_string()),
+            activity_signal: Some("pi_user_prompt".to_string()),
+            activity_since_ms: 10_000,
+            pending_since_ms: 0,
+            current_task: String::new(),
+            ..Default::default()
+        };
+
+        let guess = infer_status_with_runtime(
+            true,
+            &live,
+            "",
+            "pi",
+            None,
+            10_000 + LIVE_RUNNING_STALE_MS + 1,
+            1,
+            0.0,
+            0,
+        );
+
+        assert_eq!(guess.status, "idle");
+    }
+
+    #[test]
+    fn fresh_live_running_still_running() {
         let live = SessionLive {
             activity_status: Some("running".to_string()),
             activity_signal: Some("claude_tool_use".to_string()),
@@ -3292,15 +3336,13 @@ mod hook_status_tests {
             "",
             "claude",
             None,
-            10_000 + LIVE_RUNNING_STALE_MS + 1,
+            10_000 + LIVE_RUNNING_STALE_MS - 1,
             1,
             0.0,
             0,
         );
 
         assert_eq!(guess.status, "running");
-        assert_eq!(guess.signal.as_deref(), Some("claude_tool_use"));
-        assert!(guess.realtime);
     }
 
     #[test]

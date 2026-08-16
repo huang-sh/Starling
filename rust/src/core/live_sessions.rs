@@ -68,8 +68,20 @@ pub fn pid_looks_like_pi(pid: u32) -> bool {
         .filter(|s| !s.is_empty())
         .map(|s| String::from_utf8_lossy(s).to_string())
         .collect();
-    crate::core::process_map::provider_from_cmdline(&args)
+    if crate::core::process_map::provider_from_cmdline(&args)
         .map(|p| matches!(p, crate::core::process_map::Provider::Pi))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    // starling run/chat pi spawn a Pi SDK host whose argv is the starling
+    // binary itself; the reporter extension runs inside that runtime, so a
+    // starling-named pid is also a legitimate pi producer.
+    args.first()
+        .map(|a| {
+            let base = a.rsplit('/').next().unwrap_or(a);
+            base == "starling" || base.starts_with("starling.")
+        })
         .unwrap_or(false)
 }
 
