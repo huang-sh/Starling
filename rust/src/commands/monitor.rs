@@ -1664,7 +1664,7 @@ fn build_snapshot(
     // Tier-1 truth first: the global Pi reporter extension writes
     // pid↔session directly from inside every pi process (including manual
     // `pi --session ...` launches whose cmdline carries no session id).
-    let live_reported = crate::core::live_sessions::live_pi_sessions();
+    let live_reported = crate::core::live_sessions::live_pi_sessions_verified();
     let detected = detect_running_sessions();
     for row in rows.iter_mut() {
         let row_key = canonical_session_id(&row.session_id, Some(&row.provider));

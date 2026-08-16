@@ -46,6 +46,38 @@ pub fn live_pi_sessions() -> HashMap<String, LiveSessionEntry> {
     })
 }
 
+/// Trust boundary: anything on the machine can write into live-sessions/, so
+/// a reported pid must still be verified as a pi process (cmdline heuristic,
+/// same one process_map uses) before monitor treats it as session truth.
+/// Reuses /proc on unix; on other platforms falls back to accepting the entry
+/// (single-user workstations) — the file still requires local write access.
+pub fn live_pi_sessions_verified() -> HashMap<String, LiveSessionEntry> {
+    live_pi_sessions()
+        .into_iter()
+        .filter(|(_, entry)| pid_looks_like_pi(entry.pid))
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+pub fn pid_looks_like_pi(pid: u32) -> bool {
+    let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    let args: Vec<String> = raw
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).to_string())
+        .collect();
+    crate::core::process_map::provider_from_cmdline(&args)
+        .map(|p| matches!(p, crate::core::process_map::Provider::Pi))
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn pid_looks_like_pi(_pid: u32) -> bool {
+    true
+}
+
 /// All live entries (any session id), including ones whose payload lacks a
 /// session id (still booting). Consumers pick what they need.
 pub fn read_live_sessions() -> impl Iterator<Item = LiveSessionEntry> {
