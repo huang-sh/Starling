@@ -315,6 +315,12 @@ Agent 过滤：`--agent claude`、`--agent codex` 或 `--agent pi`。
 
 默认终端视图由 npm CLI wrapper 渲染，数据来自 Rust core 输出的 JSON。`--json` 会返回原始 monitor snapshot，适合脚本、VS Code 扩展或其他前端使用。
 
+VS Code 扩展还会把这份 snapshot 渲染成实时仪表盘视图（统计卡片、带上下文进度条和 token 趋势图的会话卡片、含聊天尾部和会话操作的抽屉）：
+
+<p align="center">
+  <img src="assets/Starling-monitor.png" alt="VS Code 中的 Starling Monitor 仪表盘" width="720">
+</p>
+
 ### Run Records
 
 `starling run` 用于在 Starling 跟踪下启动 Agent。run record 记录的是启动历史，它和当前 session state 是两件事：

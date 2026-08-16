@@ -314,6 +314,12 @@ Sort modes: `activity` (default), `recent`, `tokens`, `created`, `memory`, `cpu`
 
 The default terminal view is rendered by the npm CLI wrapper from JSON emitted by the Rust core. `--json` returns the raw monitor snapshot for scripts, the VS Code extension, or other frontends.
 
+The VS Code extension also renders this snapshot as a live dashboard webview (stat cards, session cards with context meters and token sparklines, per-session drawer with chat tail and actions):
+
+<p align="center">
+  <img src="assets/Starling-monitor.png" alt="Starling Monitor dashboard in VS Code" width="720">
+</p>
+
 ### Run Records
 
 `starling run` launches agents under Starling tracking. The run record is separate from session state:
