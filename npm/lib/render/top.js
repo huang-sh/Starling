@@ -1,0 +1,335 @@
+import { ansi } from "./ansi.js";
+import { colorStatus, formatClock, meta, relativeTime, statusDot, terminalWidth, truncate, visible, } from "./ui.js";
+import { monitorRows, normalizeMonitorSnapshot, } from "../protocol.js";
+export { normalizeMonitorSnapshot };
+export function renderTopSnapshot(input, options = {}) {
+    const snapshot = normalizeMonitorSnapshot(input);
+    const rows = monitorRows(snapshot);
+    const width = terminalWidth(options.width);
+    const nowMs = options.now?.getTime() ?? Date.now();
+    const lines = [];
+    const displayRows = snapshot.rows_ordered ? rows : sortTopRows(rows);
+    lines.push(renderDashboard(snapshot, displayRows, width, nowMs));
+    lines.push("");
+    if (rows.length === 0) {
+        lines.push(ansi.yellow("No agent sessions to display."));
+        lines.push(ansi.dim("Tip: start or pin an agent session, or remove filters."));
+        return lines.join("\n");
+    }
+    lines.push(renderMonitorTitle(displayRows.length, snapshot.pinned_total, snapshot.recent_total));
+    lines.push(renderMonitorList(displayRows, width, nowMs));
+    return lines.join("\n");
+}
+export function renderTopWatchFrame(input, options = {}) {
+    const when = options.now ?? new Date();
+    const width = terminalWidth(options.width);
+    return [
+        `${ansi.bold("Starling monitor")} ${ansi.gray(`refresh 3s  ${formatClock(when)}  Ctrl-C to exit`)}`,
+        renderTopSnapshot(input, { ...options, width }),
+    ].join("\n");
+}
+function renderSummary(snapshot) {
+    const parts = [`${snapshot.pinned_total} pinned`];
+    if (snapshot.recent_total > 0)
+        parts.push(`${snapshot.recent_total} unpinned`);
+    parts.push(`${snapshot.active} active`);
+    return parts.join(" · ");
+}
+function renderDashboard(snapshot, rows, width, nowMs) {
+    const statusCounts = countStatuses(rows);
+    const tokenIn = rows.reduce((sum, row) => sum + row.tokens_in, 0);
+    const tokenOut = rows.reduce((sum, row) => sum + row.tokens_out, 0);
+    const tokenCache = rows.reduce((sum, row) => sum + row.tokens_cache, 0);
+    const skillCount = rows.reduce((sum, row) => sum + row.skill_count, 0);
+    const newest = rows.reduce((max, row) => Math.max(max, row.last_activity_ms), 0);
+    const running = statusCounts.get("running") ?? 0;
+    const stale = statusCounts.get("stale_running") ?? 0;
+    const waiting = statusCounts.get("waiting") ?? 0;
+    const aborted = statusCounts.get("aborted") ?? 0;
+    const failure = statusCounts.get("failure") ?? 0;
+    const idle = statusCounts.get("idle") ?? 0;
+    const stopped = statusCounts.get("stopped") ?? 0;
+    const title = ansi.bold("Starling top");
+    const clock = ansi.gray(formatClock(new Date(nowMs)));
+    const summary = ansi.gray(renderSummary(snapshot));
+    const right = `${clock}  ${summary}`;
+    const gap = Math.max(1, width - visible(title) - visible(right));
+    const statusLine = statusChips(statusCounts);
+    return [
+        `${title}${" ".repeat(gap)}${right}`,
+        meta([
+            `tasks ${rows.length} total, ${snapshot.active} active, ${running} running, ${stale} stale, ${waiting} waiting, ${failure} failure, ${idle} idle, ${stopped} stopped`,
+            aborted > 0 ? `${aborted} aborted` : false,
+            `tokens ${compactNumber(tokenIn)}/${compactNumber(tokenOut)}/${compactNumber(tokenCache)}`,
+            `last ${relativeTime(newest, nowMs) || "-"}`,
+            statusLine || false,
+            skillCount > 0 ? `skills ${skillCount}` : false,
+        ]),
+    ].join("\n");
+}
+function renderMonitorTitle(shown, pinnedTotal, recentTotal) {
+    if (recentTotal > 0) {
+        return ansi.bold(`Sessions (${shown}; ${pinnedTotal} pinned, ${recentTotal} unpinned)`);
+    }
+    if (shown < pinnedTotal)
+        return ansi.bold(`Pinned (${shown} of ${pinnedTotal})`);
+    return ansi.bold(`Pinned (${pinnedTotal})`);
+}
+function renderMonitorList(rows, width, nowMs) {
+    const columns = topColumns(width, rows.some((row) => row.skill_count > 0));
+    const header = [
+        ["SID", columns.session],
+        ["S", columns.status],
+        ["AGT", columns.agent],
+        ["MODEL", columns.model],
+        ["PID", columns.pid],
+        ["CPU", columns.cpu],
+        ["MEM", columns.mem],
+        ["CTX", columns.ctx],
+        ["TOK", columns.tokens],
+        ["AGE", columns.age],
+    ];
+    if (columns.skill > 0)
+        header.push(["SKILLS", columns.skill]);
+    header.push(["TASK", columns.task]);
+    const lines = [
+        ansi.inverse(header.map(([label, col]) => padVisible(ansi.bold(label), col)).join(" ")),
+    ];
+    rows.forEach((row, index) => {
+        lines.push(formatMonitorRow(row, columns, nowMs, index));
+    });
+    return lines.join("\n");
+}
+function formatMonitorRow(row, columns, nowMs, index) {
+    const task = rowTask(row, columns.skill === 0);
+    const cells = [
+        padVisible(sessionCell(row), columns.session),
+        padVisible(statusLetter(row.status), columns.status),
+        padVisible(agentCell(row.provider), columns.agent),
+        padVisible(shortModel(row.model), columns.model),
+        padVisible(pidCell(row.pid), columns.pid),
+        padVisible(cpuCell(row.cpu_pct), columns.cpu),
+        padVisible(memCell(row.mem_kb), columns.mem),
+        padVisible(ctxCell(row.ctx_pct, columns.ctx), columns.ctx),
+        padVisible(tokenCell(row), columns.tokens),
+        padVisible(relativeTime(row.last_activity_ms, nowMs) || "-", columns.age),
+    ];
+    if (columns.skill > 0)
+        cells.push(padVisible(skillCell(row), columns.skill));
+    cells.push(padVisible(taskCell(task, row), columns.task));
+    const line = cells.join(" ");
+    if (index % 2 === 1)
+        return ansi.dim(line);
+    return line;
+}
+function rowTask(row, includeSkill) {
+    const primary = row.current_task.trim() ||
+        (row.last_tool ? `${row.last_tool}×${row.tool_count}` : "") ||
+        row.title ||
+        "";
+    const skill = includeSkill ? formatSkillSummary(row) : "";
+    if (primary && skill)
+        return `${skill} · ${primary}`;
+    return primary || skill || "-";
+}
+function skillCell(row) {
+    return row.skill_count > 0 ? String(row.skill_count) : ansi.gray("-");
+}
+function formatSkillSummary(row) {
+    return row.skill_count > 0 ? `skills×${row.skill_count}` : "";
+}
+function shortSessionId(id) {
+    if (!id)
+        return "-";
+    return id.length <= 13 ? id : id.slice(0, 13);
+}
+function sortTopRows(rows) {
+    return [...rows].sort((a, b) => {
+        const statusDelta = statusRank(a.status) - statusRank(b.status);
+        if (statusDelta !== 0)
+            return statusDelta;
+        return b.last_activity_ms - a.last_activity_ms;
+    });
+}
+function statusRank(status) {
+    switch (status) {
+        case "running":
+            return 0;
+        case "stale_running":
+            return 1;
+        case "waiting":
+            return 2;
+        case "failure":
+            return 3;
+        case "aborted":
+            return 4;
+        case "idle":
+            return 5;
+        case "stopped":
+            return 6;
+        case "unknown":
+            return 7;
+        default:
+            return 8;
+    }
+}
+function activeRank(status) {
+    switch (status) {
+        case "running":
+        case "waiting":
+            return 0;
+        default:
+            return 9;
+    }
+}
+function compactNumber(value) {
+    if (!Number.isFinite(value) || value <= 0)
+        return "0";
+    if (value >= 1_000_000)
+        return `${(value / 1_000_000).toFixed(1)}M`;
+    if (value >= 1_000)
+        return `${Math.round(value / 1_000)}k`;
+    return String(value);
+}
+function topColumns(width, hasSkill) {
+    const showSkill = hasSkill && width >= 136;
+    const fixed = width >= 126
+        ? { session: 14, status: 1, agent: 6, model: 13, pid: 7, cpu: 6, mem: 8, ctx: 12, tokens: 16, age: 8 }
+        : width >= 104
+            ? { session: 13, status: 1, agent: 5, model: 11, pid: 7, cpu: 6, mem: 7, ctx: 10, tokens: 13, age: 7 }
+            : { session: 12, status: 1, agent: 6, model: 9, pid: 7, cpu: 7, mem: 6, ctx: 6, tokens: 11, age: 6 };
+    const skill = showSkill ? 6 : 0;
+    const fixedSum = Object.values(fixed).reduce((sum, col) => sum + col, 0) + skill;
+    const fixedColumns = Object.keys(fixed).length + (showSkill ? 1 : 0);
+    const used = fixedSum + fixedColumns;
+    return { ...fixed, skill, task: Math.max(12, width - used - 1) };
+}
+function padVisible(value, width) {
+    const clipped = visible(value) <= width ? value : truncate(stripAnsi(value), width);
+    return `${clipped}${" ".repeat(Math.max(0, width - visible(clipped)))}`;
+}
+function stripAnsi(value) {
+    return value.replace(/\x1b\[[0-9;]*m/g, "");
+}
+function shortModel(model) {
+    if (!model)
+        return "-";
+    const low = model.toLowerCase();
+    if (low.includes("opus"))
+        return low.includes("4-6") || low.includes("4.6") ? "opus-4.6" : "opus-4";
+    if (low.includes("sonnet"))
+        return low.includes("4-6") || low.includes("4.6") ? "son-4.6" : "son-4";
+    if (low.includes("haiku"))
+        return "haiku";
+    if (low.includes("gpt-5"))
+        return model.length > 10 ? model.replace("gpt-", "g") : model;
+    return model.length > 11 ? `${model.slice(0, 10)}…` : model;
+}
+function pidCell(pid) {
+    if (!pid || pid <= 0)
+        return "-";
+    return String(pid);
+}
+function sessionCell(row) {
+    const id = shortSessionId(row.session_id);
+    const marker = row.pinned ? ansi.cyan("*") : ansi.gray(" ");
+    return `${marker}${id}`;
+}
+function agentCell(provider) {
+    if (provider === "claude")
+        return ansi.magenta("claude");
+    if (provider === "codex")
+        return ansi.green("codex");
+    if (provider === "pi")
+        return ansi.cyan("pi");
+    return provider || "-";
+}
+function statusLetter(status) {
+    switch (status) {
+        case "waiting":
+            return ansi.blue("W");
+        case "running":
+            return ansi.cyan("R");
+        case "stale_running":
+            return ansi.yellow("~");
+        case "aborted":
+            return ansi.yellow("X");
+        case "failure":
+            return ansi.red("!");
+        case "idle":
+            return ansi.green("I");
+        case "stopped":
+            return ansi.gray("S");
+        default:
+            return ansi.gray("?");
+    }
+}
+function cpuCell(value) {
+    if (!Number.isFinite(value) || value <= 0)
+        return ansi.gray("-");
+    const text = `${value.toFixed(value < 10 ? 1 : 0)}%`;
+    if (value >= 80)
+        return ansi.red(text);
+    if (value >= 30)
+        return ansi.yellow(text);
+    return ansi.green(text);
+}
+function memCell(value) {
+    if (!Number.isFinite(value) || value <= 0)
+        return ansi.gray("-");
+    return formatMem(value);
+}
+function ctxCell(value, width) {
+    if (!Number.isFinite(value) || value < 0)
+        return ansi.gray("-");
+    const text = `${value.toFixed(0)}%`;
+    const barWidth = Math.max(2, width - visible(text) - 1);
+    const cell = `${tinyBar(value, barWidth)} ${text}`;
+    if (value >= 90)
+        return ansi.red(ansi.bold(cell));
+    if (value >= 70)
+        return ansi.yellow(cell);
+    return ansi.cyan(cell);
+}
+function tokenCell(row) {
+    return `${compactNumber(row.tokens_in)}/${compactNumber(row.tokens_out)}/${ansi.gray(compactNumber(row.tokens_cache))}`;
+}
+function taskCell(task, row) {
+    if (row.status === "waiting")
+        return ansi.blue(task);
+    if (row.status === "running")
+        return ansi.cyan(task);
+    if (row.status === "stale_running")
+        return ansi.yellow(task);
+    if (row.status === "aborted")
+        return ansi.yellow(task);
+    if (row.status === "failure")
+        return ansi.red(task);
+    return task;
+}
+function tinyBar(value, width) {
+    const clamped = Math.max(0, Math.min(100, value));
+    const filled = Math.round((clamped / 100) * width);
+    return `${"▮".repeat(filled)}${ansi.gray("·".repeat(Math.max(0, width - filled)))}`;
+}
+function formatMem(kb) {
+    const mb = kb / 1024;
+    if (!Number.isFinite(mb) || mb <= 0)
+        return "0M";
+    if (mb < 1024)
+        return `${mb.toFixed(mb < 10 ? 1 : 0)}M`;
+    return `${(mb / 1024).toFixed(2)}G`;
+}
+function countStatuses(rows) {
+    const counts = new Map();
+    for (const row of rows)
+        counts.set(row.status, (counts.get(row.status) ?? 0) + 1);
+    return counts;
+}
+function statusChips(counts) {
+    const statuses = ["running", "stale_running", "waiting", "aborted", "failure", "idle", "unknown"];
+    return statuses
+        .filter((status) => (counts.get(status) ?? 0) > 0)
+        .map((status) => `${statusDot(status)} ${colorStatus(status)} ${counts.get(status)}`)
+        .join(ansi.gray("  "));
+}

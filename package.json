@@ -1,0 +1,24 @@
+{
+  "name": "starling-root",
+  "version": "0.2.1",
+  "private": true,
+  "description": "Starling CLI — Rust development orchestration root",
+  "type": "module",
+  "scripts": {
+    "build:ts": "tsc -p tsconfig.json",
+    "build": "scripts/build.sh",
+    "build:debug": "scripts/build.sh --debug",
+    "dev": "scripts/build.sh --debug && node npm/bin/starling.js",
+    "test": "npm run test:js && npm run test:rust",
+    "test:js": "npm run build:ts && node --test npm/test/*.test.mjs",
+    "test:rust": "cd rust && cargo test",
+    "run": "node npm/bin/starling.js",
+    "install:skill": "node scripts/install-agent-skills.js"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.82.0",
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}

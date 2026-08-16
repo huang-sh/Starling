@@ -1,0 +1,40 @@
+{
+  "name": "starling-ai",
+  "version": "0.2.1",
+  "description": "Launch, switch, and organize Claude Code, Codex, and Pi sessions with model profiles, catalogs, project views, and VS Code integration.",
+  "license": "MIT",
+  "bin": {
+    "starling": "bin/starling.js"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "bin/starling.js",
+    "lib/*.js",
+    "lib/agent-host/",
+    "lib/chat/",
+    "lib/render/",
+    "lib/tui/",
+    "scripts/install-agent-skills.js",
+    "skills/"
+  ],
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.82.0"
+  },
+  "optionalDependencies": {
+    "starling-darwin-arm64": "0.2.1",
+    "starling-darwin-x64": "0.2.1",
+    "starling-linux-arm64": "0.2.1",
+    "starling-linux-x64-musl": "0.2.1",
+    "starling-linux-x64": "0.2.1"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install-agent-skills.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/huang-sh/Starling"
+  }
+}
