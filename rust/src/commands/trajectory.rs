@@ -576,7 +576,7 @@ pub fn project(path: &Path, provider: &str, full: bool, max_records: usize) -> R
                         started_at: ts,
                         completed_at: ts,
                         status: "complete",
-                        input: if full { Some(shorten(&text, DETAIL_LIMIT)) } else { None },
+                        input: if full { Some(detail_text(&text, DETAIL_LIMIT)) } else { None },
                         output: None,
                         usage: None,
                         metadata: Map::new(),
@@ -622,15 +622,15 @@ pub fn project(path: &Path, provider: &str, full: bool, max_records: usize) -> R
                                 } else {
                                     shorten(&t, SUMMARY_LIMIT)
                                 };
-                                ("reasoning", "thinking", summary, Some(shorten(&t, DETAIL_LIMIT)), None)
+                                ("reasoning", "thinking", summary, Some(detail_text(&t, DETAIL_LIMIT)), None)
                             }
                             Block::Text(t) => {
-                                ("assistant", "message", shorten(&t, SUMMARY_LIMIT), Some(shorten(&t, DETAIL_LIMIT)), None)
+                                ("assistant", "message", shorten(&t, SUMMARY_LIMIT), Some(detail_text(&t, DETAIL_LIMIT)), None)
                             }
                             Block::ToolCall { id: cid, name, args } => {
                                 tool_calls += 1;
                                 let summary = format!("{} {}", name, shorten(&args, 60));
-                                ("tool", "", shorten(summary.trim(), SUMMARY_LIMIT), Some(shorten(&args, DETAIL_LIMIT)), Some((cid, name)))
+                                ("tool", "", shorten(summary.trim(), SUMMARY_LIMIT), Some(detail_text(&args, DETAIL_LIMIT)), Some((cid, name)))
                             }
                         };
                         current_step = current_step.max(1);
@@ -676,7 +676,7 @@ pub fn project(path: &Path, provider: &str, full: bool, max_records: usize) -> R
                         if let Some(record) = drafts.get_mut(pos) {
                             record.completed_at = ts;
                             record.status = if error { "error" } else { "complete" };
-                            record.output = if full { Some(shorten(&output, DETAIL_LIMIT)) } else { None };
+                            record.output = if full { Some(detail_text(&output, DETAIL_LIMIT)) } else { None };
                             if error {
                                 record.summary = shorten(&format!("{} · error", record.summary), SUMMARY_LIMIT);
                             }
@@ -697,7 +697,7 @@ pub fn project(path: &Path, provider: &str, full: bool, max_records: usize) -> R
                             completed_at: ts,
                             status: if error { "error" } else { "complete" },
                             input: None,
-                            output: if full { Some(shorten(&output, DETAIL_LIMIT)) } else { None },
+                            output: if full { Some(detail_text(&output, DETAIL_LIMIT)) } else { None },
                             usage: None,
                             metadata: Map::new(),
                             turn: current_turn,
@@ -719,7 +719,7 @@ pub fn project(path: &Path, provider: &str, full: bool, max_records: usize) -> R
                         started_at: ts,
                         completed_at: ts,
                         status: "complete",
-                        input: if full { Some(shorten(&summary, DETAIL_LIMIT)) } else { None },
+                        input: if full { Some(detail_text(&summary, DETAIL_LIMIT)) } else { None },
                         output: None,
                         usage: None,
                         metadata,
@@ -903,6 +903,18 @@ fn shorten(text: &str, limit: usize) -> String {
         flat
     } else {
         let cut: String = flat.chars().take(limit).collect();
+        format!("{}…", cut.trim_end())
+    }
+}
+
+/// Detail text (input/output) keeps its structure — newlines are what makes
+/// markdown renderable downstream; only truncate, never flatten. The webview
+/// inspector renders this with the same marked pipeline as pi's TUI export.
+fn detail_text(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        text.to_string()
+    } else {
+        let cut: String = text.chars().take(limit).collect();
         format!("{}…", cut.trim_end())
     }
 }

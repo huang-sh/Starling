@@ -104,6 +104,7 @@ fn pi_chat_passthrough_args(session: Option<&str>, title: Option<&str>) -> Resul
 }
 
 fn chat_pi(cmd_args: &ChatCommand, session: Option<&str>) -> Result<()> {
+    sweep_stale_launch_artifacts();
     // Validate caller-controlled selectors before resolving runtime
     // dependencies, while this path is still side-effect free.
     let passthrough_args = pi_chat_passthrough_args(session, cmd_args.title.as_deref())?;
@@ -485,6 +486,7 @@ fn launch(
     cmd_args: &RunCommand,
     passthrough_args: &[String],
 ) -> Result<()> {
+    sweep_stale_launch_artifacts();
     let run_id = uuid::Uuid::new_v4().to_string();
     let start_ms = now_ms();
     let started_at = now_iso();
@@ -1834,6 +1836,84 @@ mod tests {
                 "SessionEnd",
             ]
         );
+    }
+
+    #[test]
+    #[test]
+    fn claude_model_prefers_anthropic_model_over_tier_aliases() {
+        let settings = serde_json::json!({
+            "env": {
+                "ANTHROPIC_MODEL": "kimi-k2",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.2",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.1"
+            }
+        });
+        assert_eq!(
+            claude_model_from_settings(&settings).as_deref(),
+            Some("kimi-k2")
+        );
+    }
+
+    #[test]
+    fn sweep_deletes_stale_artifacts_and_keeps_live_runs() {
+        let root = std::env::temp_dir().join(format!(
+            "starling-sweep-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let starling_home = root.join("starling");
+        let codex_home = root.join("codex");
+        let run_id = "0198c0de-0000-4000-8000-000000000001";
+        let live_run_id = "0198c0de-0000-4000-8000-000000000002";
+        let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 24 * 3600);
+
+        let hooks = starling_home.join("run-hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        for name in [format!("{run_id}.jsonl"), format!("{live_run_id}.settings.json")] {
+            std::fs::write(hooks.join(&name), "{}").unwrap();
+            set_mtime(&hooks.join(&name), stale);
+        }
+        std::fs::write(hooks.join("unrelated.txt"), "keep").unwrap();
+
+        let run_home = starling_home.join("run-homes").join(format!("codex-{run_id}"));
+        std::fs::create_dir_all(run_home.join("sessions")).unwrap();
+        std::fs::write(run_home.join("config.toml"), "model = \"x\""
+        ).unwrap();
+        set_mtime(&run_home, stale);
+
+        let profiles = codex_home;
+        std::fs::create_dir_all(&profiles).unwrap();
+        let profile_config = profiles.join(format!("starling-{run_id}.config.toml"));
+        std::fs::write(&profile_config, "model = \"x\""
+        ).unwrap();
+        set_mtime(&profile_config, stale);
+        let user_config = profiles.join("config.toml");
+        std::fs::write(&user_config, "model = \"user\""
+        ).unwrap();
+        set_mtime(&user_config, stale);
+
+        sweep_stale_launch_artifacts_in(
+            &starling_home,
+            &profiles,
+            std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 24 * 3600),
+            &|id| id == live_run_id,
+        );
+
+        assert!(!hooks.join(format!("{run_id}.jsonl")).exists());
+        assert!(hooks.join(format!("{live_run_id}.settings.json")).exists());
+        assert!(hooks.join("unrelated.txt").exists());
+        assert!(!run_home.join("config.toml").exists());
+        assert!(!profile_config.exists());
+        assert!(user_config.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn set_mtime(path: &Path, when: std::time::SystemTime) {
+        // Read-only handle: owner may set timestamps without write access, and
+        // directories cannot be opened for writing at all.
+        let file = std::fs::File::open(path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(when))
+            .unwrap();
     }
 
     #[test]
@@ -3442,6 +3522,13 @@ fn prepare_launch_with_pi_permissions(
         }
         RunProvider::Codex => {
             if let Some(home) = codex_resume_home_from_args(&passthrough_args) {
+                if let Some(setting) = setting {
+                    eprintln!(
+                        "{}: --setting '{}' is ignored when resuming a session that lives in a per-run CODEX_HOME",
+                        "warning".yellow(),
+                        setting
+                    );
+                }
                 envs.push(("CODEX_HOME".into(), home.to_string_lossy().to_string()));
             } else if (attach_hook || setting.is_some())
                 && !has_codex_profile_arg(&passthrough_args)
@@ -3470,6 +3557,13 @@ fn prepare_launch_with_pi_permissions(
                 hook_file = hook.hook_file;
                 cleanup_files.push(hook.profile_path);
             } else if attach_hook || setting.is_some() {
+                if let Some(setting) = setting {
+                    eprintln!(
+                        "{}: --setting '{}' is merged as the base config; your own --profile argument still applies on top and wins conflicts",
+                        "warning".yellow(),
+                        setting
+                    );
+                }
                 let base_config = if let Some(profile) = setting {
                     let path = default_codex_settings_dir().join(format!("{profile}.toml"));
                     ensure_file(&path, "Codex profile")?;
@@ -4687,7 +4781,9 @@ fn create_claude_hook_settings(
     let mcp_config_path = dir.join(format!("{run_id}.mcp.json"));
     let mut settings = if let Some(path) = base_settings {
         let raw = std::fs::read_to_string(path)?;
-        serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| serde_json::json!({}))
+        serde_json::from_str::<Value>(&raw).map_err(|error| {
+            anyhow::anyhow!("invalid Claude profile {}: {error}", path.display())
+        })?
     } else {
         serde_json::json!({})
     };
@@ -4702,10 +4798,10 @@ fn create_claude_hook_settings(
         let config = serde_json::json!({
             "mcpServers": mcp_servers_to_claude_json(&mcp_servers)
         });
-        std::fs::write(&mcp_config_path, serde_json::to_string_pretty(&config)?)?;
-        Some(mcp_config_path)
+        write_private_file(&mcp_config_path, &serde_json::to_string_pretty(&config)?)?;
+        Some(mcp_config_path.clone())
     };
-    std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+    write_private_file(&settings_path, &serde_json::to_string_pretty(&settings)?)?;
     Ok(ClaudeHookSettings {
         settings_path,
         mcp_config_path,
@@ -4721,7 +4817,10 @@ fn has_claude_model_arg(args: &[String]) -> bool {
 
 fn claude_model_from_settings(settings: &Value) -> Option<String> {
     let env = settings.get("env").and_then(|v| v.as_object())?;
+    // ANTHROPIC_MODEL is the user's explicit default-model intent. Check it
+    // first so a derived --model cannot silently override it with a tier alias.
     for key in [
+        "ANTHROPIC_MODEL",
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
         "ANTHROPIC_DEFAULT_OPUS_MODEL",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -4839,7 +4938,7 @@ fn create_codex_hook_home(
     } else {
         None
     };
-    std::fs::write(dir.join("config.toml"), config)?;
+    write_private_file(&dir.join("config.toml"), &config)?;
 
     copy_if_exists(
         &default_codex_home().join("auth.json"),
@@ -4905,7 +5004,7 @@ fn create_codex_profile_launch(
         None
     };
 
-    std::fs::write(&profile_path, config)?;
+    write_private_file(&profile_path, &config)?;
     Ok(CodexProfileLaunch {
         profile_name,
         profile_path,
@@ -5629,6 +5728,132 @@ fn cleanup_files(paths: &[PathBuf]) {
 fn cleanup_launch_artifacts(prepared: &PreparedLaunch) {
     cleanup_temp_dir(prepared.temp_dir.as_deref());
     cleanup_files(&prepared.cleanup_files);
+}
+
+/// Write a launch-artifact file with owner-only permissions. These files can
+/// carry provider API keys (mcp.json, codex config.toml) and must not be
+/// world-readable.
+fn write_private_file(path: &Path, contents: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(contents.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)?;
+    }
+    Ok(())
+}
+
+/// ponytail: best-effort startup sweep, no retention index. SIGKILLed or
+/// rebooted-off runs leak hook files, run-homes (containing auth.json
+/// copies), and codex profile configs into user dirs; on-demand cleanup only
+/// runs on graceful exit. Upgrade path: a retention table in ~/.starling if
+/// artifact volume ever matters.
+const STALE_LAUNCH_ARTIFACT_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+
+fn sweep_stale_launch_artifacts() {
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(STALE_LAUNCH_ARTIFACT_MAX_AGE_SECS))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    sweep_stale_launch_artifacts_in(
+        &default_starling_home(),
+        &default_codex_home(),
+        cutoff,
+        &|run_id| {
+            find_run(run_id)
+                .map(|run| matches!(run.status, RunStatus::Running))
+                .unwrap_or(false)
+        },
+    );
+}
+
+fn sweep_stale_launch_artifacts_in(
+    starling_home: &Path,
+    codex_home: &Path,
+    cutoff: std::time::SystemTime,
+    run_is_active: &dyn Fn(&str) -> bool,
+) {
+    sweep_dir_artifacts(&starling_home.join("run-hooks"), cutoff, run_is_active, hook_artifact_run_id);
+    sweep_dir_artifacts(&starling_home.join("run-homes"), cutoff, run_is_active, run_home_run_id);
+    sweep_dir_artifacts(codex_home, cutoff, run_is_active, codex_profile_config_run_id);
+}
+
+fn sweep_dir_artifacts(
+    dir: &Path,
+    cutoff: std::time::SystemTime,
+    run_is_active: &dyn Fn(&str) -> bool,
+    run_id_of: fn(&str) -> Option<String>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().into_string().ok() else {
+            continue;
+        };
+        let Some(run_id) = run_id_of(&name) else {
+            continue;
+        };
+        if run_is_active(&run_id) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let stale = metadata
+            .modified()
+            .map(|mtime| mtime < cutoff)
+            .unwrap_or(false);
+        if !stale {
+            continue;
+        }
+        if metadata.is_dir() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        } else {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// `~/.starling/run-hooks/<run_id>.jsonl|.settings.json|.mcp.json`
+fn hook_artifact_run_id(name: &str) -> Option<String> {
+    let candidate = name.split('.').next()?;
+    plausible_run_id(candidate).then(|| candidate.to_string())
+}
+
+/// `~/.starling/run-homes/codex-<run_id>/`
+fn run_home_run_id(name: &str) -> Option<String> {
+    let candidate = name.strip_prefix("codex-")?;
+    plausible_run_id(candidate).then(|| candidate.to_string())
+}
+
+/// `~/.codex/starling-<run_id>.config.toml`
+fn codex_profile_config_run_id(name: &str) -> Option<String> {
+    let candidate = name
+        .strip_prefix("starling-")?
+        .strip_suffix(".config.toml")?;
+    plausible_run_id(candidate).then(|| candidate.to_string())
+}
+
+fn plausible_run_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes[8] == b'-'
+        && bytes[13] == b'-'
+        && bytes[18] == b'-'
+        && bytes[23] == b'-'
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_hexdigit() || *b == b'-')
 }
 
 fn update_run_pid(run_id: &str, pid: u32) {

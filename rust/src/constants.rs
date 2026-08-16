@@ -442,7 +442,9 @@ pub fn default_pi_settings_dir() -> PathBuf {
 }
 
 pub fn default_codex_home() -> PathBuf {
-    home_dir().join(".codex")
+    // Delegate so CODEX_HOME is honored everywhere; the previous hard-coded
+    // ~/.codex made runs ignore a customized Codex home entirely.
+    resolve_codex_home()
 }
 
 /// `CLAUDE_CONFIG_DIR` if set (env-expanded), else `~/.claude`.

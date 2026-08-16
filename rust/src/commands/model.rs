@@ -152,14 +152,18 @@ fn summarize_claude_json(path: &std::path::Path, scope: &str, name: &str) -> Mod
             Ok(s) => {
                 let v: serde_json::Value =
                     serde_json::from_str(&s).unwrap_or(serde_json::Value::Null);
-                // Try top-level "model" first, then env.ANTHROPIC_DEFAULT_SONNET_MODEL.
+                // Try top-level "model" first, then env.ANTHROPIC_MODEL, then
+                // the sonnet tier alias — mirrors claude_model_from_settings.
                 let model = v
                     .get("model")
                     .and_then(|m| m.as_str())
                     .map(String::from)
                     .unwrap_or_else(|| {
                         v.get("env")
-                            .and_then(|e| e.get("ANTHROPIC_DEFAULT_SONNET_MODEL"))
+                            .and_then(|e| {
+                                e.get("ANTHROPIC_MODEL")
+                                    .or_else(|| e.get("ANTHROPIC_DEFAULT_SONNET_MODEL"))
+                            })
                             .and_then(|m| m.as_str())
                             .unwrap_or("")
                             .to_string()
