@@ -751,7 +751,26 @@ fn is_pid_alive_platform(pid: u32) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn is_pid_alive_platform(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    // OpenProcess returns null for a dead pid. A live system pid we cannot
+    // open (e.g. services) still proves liveness via ERROR_ACCESS_DENIED, so
+    // only ERROR_INVALID_PARAMETER (which also covers stale pids) counts as
+    // dead. PIDs are reused on Windows, but every caller treats liveness as a
+    // best-effort heuristic.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if !handle.is_null() {
+        unsafe { CloseHandle(handle) };
+        return true;
+    }
+    let err = unsafe { GetLastError() };
+    err == ERROR_ACCESS_DENIED
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn is_pid_alive_platform(_pid: u32) -> bool {
     false
 }

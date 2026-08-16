@@ -1,7 +1,8 @@
 //! Filesystem helpers — atomic JSON writes, JSON reads. Mirrors src/utils/fs.ts.
 
-use std::fs::{self, Permissions};
+use std::fs::{self};
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -53,8 +54,10 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, data: &T) -> Result<()> {
     file.sync_all().ok();
     drop(file);
 
-    // chmod 0600 to match the TS implementation
-    if let Err(e) = fs::set_permissions(&tmp_path, Permissions::from_mode(0o600)) {
+    // chmod 0600 to match the TS implementation (POSIX only; Windows has no
+    // equivalent permission bits on files)
+    #[cfg(unix)]
+    if let Err(e) = fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600)) {
         // Best-effort; not worth failing the write
         let _ = e;
     }

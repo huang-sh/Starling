@@ -69,29 +69,35 @@ else
   TARGET_DIR="${RUST_DIR}/target/${BUILD_PROFILE}"
 fi
 
+# Determine the vendor target triple. Use the explicit --target if provided,
+# otherwise fall back to the host's default (rustc -vV).
+HOST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
+if [ -z "$TARGET" ]; then
+  TARGET="${HOST_TARGET}"
+fi
+
+# Windows binaries carry an .exe suffix.
+BIN_NAME="starling"
+case "${TARGET}" in
+  *windows*) BIN_NAME="starling.exe" ;;
+esac
+
 echo "Building starling (${BUILD_PROFILE})…"
 cargo build "${CARGO_ARGS[@]}"
 
-if [ ! -f "${TARGET_DIR}/starling" ]; then
-  echo "Build succeeded but binary not found at ${TARGET_DIR}/starling" >&2
+if [ ! -f "${TARGET_DIR}/${BIN_NAME}" ]; then
+  echo "Build succeeded but binary not found at ${TARGET_DIR}/${BIN_NAME}" >&2
   exit 1
-fi
-
-# Determine the vendor target triple. Use the explicit --target if provided,
-# otherwise fall back to the host's default (rustc -vV).
-if [ -z "$TARGET" ]; then
-  TARGET="$(rustc -vV | sed -n 's/^host: //p')"
 fi
 
 STAGE_DIR="${VENDOR_DIR}/${TARGET}/bin"
 mkdir -p "${STAGE_DIR}"
-cp -f "${TARGET_DIR}/starling" "${STAGE_DIR}/starling"
-chmod +x "${STAGE_DIR}/starling"
+cp -f "${TARGET_DIR}/${BIN_NAME}" "${STAGE_DIR}/${BIN_NAME}"
+chmod +x "${STAGE_DIR}/${BIN_NAME}"
 
-echo "Staged binary: ${STAGE_DIR}/starling"
-HOST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
+echo "Staged binary: ${STAGE_DIR}/${BIN_NAME}"
 if [ "${TARGET}" = "${HOST_TARGET}" ]; then
-  "${STAGE_DIR}/starling" --version
+  "${STAGE_DIR}/${BIN_NAME}" --version
 else
   echo "Skipping staged binary execution for non-host target ${TARGET} on ${HOST_TARGET}"
 fi
