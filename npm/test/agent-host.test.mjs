@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
@@ -110,14 +111,14 @@ test("parses Rust-compatible Pi arguments without exposing Pi CLI mode", () => {
   ], "/root");
 
   assert.deepEqual(parsed, {
-    cwd: "/root/project",
+    cwd: path.resolve("/root", "project"),
     sessionPath: undefined,
     sessionId: "session-1",
     name: "Named",
     provider: "anthropic",
     model: "claude-test",
     thinking: "high",
-    extensions: ["/root/project/gate.mjs"],
+    extensions: [path.resolve("/root", "project", "gate.mjs")],
     noExtensions: true,
   });
   assert.throws(
@@ -165,7 +166,7 @@ test("serves the existing Pi RPC command surface through an injected adapter", a
 
   assert.equal(await running, 0);
   assert.equal(diagnostics.length, 0);
-  assert.equal(adapter.options.sessionPath, "/sessions/existing.jsonl");
+  assert.equal(adapter.options.sessionPath, path.normalize("/sessions/existing.jsonl"));
   assert.equal(response(output, "state").data.sessionId, "fake-session");
   assert.deepEqual(response(output, "messages").data.messages, [
     { role: "user", content: "history" },

@@ -75,7 +75,7 @@ test("postinstall installs agent skills and adds idempotent Claude status hooks 
     const command = starlingHooks[0].hooks[0].command;
     assert.match(command, /top hook --provider claude/);
     assert.match(command, new RegExp(`--event ${event}`));
-    assert.match(command, /npm\/bin\/starling\.js|bin\/starling\.js/);
+    assert.match(command, /npm[\/\\]bin[\/\\]starling\.js|bin[\/\\]starling\.js/);
   }
 
   assert.ok(

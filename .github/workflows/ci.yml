@@ -73,3 +73,51 @@ jobs:
           name: ci-logs
           path: ci-logs/*.log
           if-no-files-found: ignore
+
+  build-test-windows:
+    name: Build and test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.91.1
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Check TypeScript renderer
+        run: npm run build:ts
+
+      - name: Check npm launcher syntax
+        run: node --check npm/bin/starling.js
+
+      - name: Run JavaScript renderer tests
+        run: npm run test:js
+
+      # The full cargo test suite is not run here yet: a number of tests use
+      # POSIX-only fixtures (POSIX absolute paths, canonicalize verbatim-prefix
+      # expectations, spawning `sh`). Windows coverage is compile + smoke for
+      # now; porting those fixtures is follow-up work.
+      - name: Build Rust binary
+        working-directory: rust
+        shell: bash
+        run: cargo build --release --locked
+
+      - name: Smoke test binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./rust/target/release/starling.exe --version
+          node npm/bin/starling.js --version
