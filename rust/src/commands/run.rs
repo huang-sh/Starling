@@ -1514,6 +1514,13 @@ mod tests {
     use crate::types::TokenUsage;
     use std::io::Write;
 
+    /// Canonicalize a fixture path the same way the launch pipeline reports
+    /// it: Windows `canonicalize()` returns a `\\?\`-prefixed verbatim path,
+    /// which the product strips for Pi/Node compatibility.
+    fn canon(path: &Path) -> PathBuf {
+        crate::constants::pi_node_compatible_path(&std::fs::canonicalize(path).unwrap())
+    }
+
     fn meta(first_prompt: &str, custom_title: Option<&str>) -> SessionMeta {
         SessionMeta {
             session_id: "019edf66-d8f0-71d0-9283-e75d6da02af4".into(),
@@ -2255,8 +2262,7 @@ requires_openai_auth = true
             prepared.args,
             vec![
                 "--session".to_string(),
-                std::fs::canonicalize(&session_file)
-                    .unwrap()
+                canon(&session_file)
                     .to_string_lossy()
                     .to_string()
             ]
@@ -2345,8 +2351,7 @@ requires_openai_auth = true
             prepared.args,
             vec![
                 "--session".to_string(),
-                std::fs::canonicalize(sessions.join("2026-07-24T00-00-00-000Z_Continue_ID.jsonl"))
-                    .unwrap()
+                canon(&sessions.join("2026-07-24T00-00-00-000Z_Continue_ID.jsonl"))
                     .to_string_lossy()
                     .to_string()
             ]
@@ -2454,8 +2459,7 @@ requires_openai_auth = true
             prepared.args,
             vec![
                 "--session".to_string(),
-                std::fs::canonicalize(transcript)
-                    .unwrap()
+                canon(&transcript)
                     .to_string_lossy()
                     .to_string()
             ]
@@ -2506,7 +2510,7 @@ requires_openai_auth = true
         assert_eq!(&prepared.args[0], "--session");
         assert_eq!(
             Path::new(&prepared.args[1]),
-            std::fs::canonicalize(&transcript).unwrap()
+            canon(&transcript)
         );
         assert!(!prepared.args.iter().any(|arg| arg == "--session-id"));
         std::fs::remove_dir_all(root).ok();
@@ -2566,7 +2570,7 @@ requires_openai_auth = true
             .args
             .iter()
             .any(|arg| matches!(arg.as_str(), "--continue" | "-c")));
-        let canonical = std::fs::canonicalize(&transcript).unwrap();
+        let canonical = canon(&transcript);
         assert_eq!(Path::new(&prepared.args[1]), canonical);
         assert_eq!(Path::new(&prepared.args[3]), canonical);
         std::fs::remove_dir_all(root).ok();
@@ -2615,7 +2619,7 @@ requires_openai_auth = true
         assert_eq!(&prepared.args[3], "--session");
         assert_eq!(
             Path::new(&prepared.args[4]),
-            std::fs::canonicalize(&transcript).unwrap()
+            canon(&transcript)
         );
         std::fs::remove_dir_all(root).ok();
     }
@@ -2672,7 +2676,7 @@ requires_openai_auth = true
         assert_eq!(&prepared.args[2], "--session");
         assert_eq!(
             Path::new(&prepared.args[3]),
-            std::fs::canonicalize(&transcript).unwrap()
+            canon(&transcript)
         );
         std::fs::remove_dir_all(root).ok();
     }
@@ -2721,7 +2725,7 @@ requires_openai_auth = true
         assert_eq!(&prepared.args[0], "--session");
         assert_eq!(
             Path::new(&prepared.args[1]),
-            std::fs::canonicalize(&transcript).unwrap()
+            canon(&transcript)
         );
         assert_eq!(prepared.args.last().map(String::as_str), Some("--model"));
         std::fs::remove_dir_all(root).ok();
@@ -2770,7 +2774,7 @@ requires_openai_auth = true
         assert_eq!(&prepared.args[1], "--session");
         assert_eq!(
             Path::new(&prepared.args[2]),
-            std::fs::canonicalize(&transcript).unwrap()
+            canon(&transcript)
         );
         std::fs::remove_dir_all(root).ok();
     }
@@ -2885,7 +2889,7 @@ requires_openai_auth = true
         assert_eq!(target.project_path, normalize_project_path(&header_project));
         assert_eq!(
             Path::new(target.transcript_path.as_deref().unwrap()),
-            std::fs::canonicalize(&transcript).unwrap()
+            canon(&transcript)
         );
         std::fs::remove_dir_all(root).ok();
     }
@@ -2939,8 +2943,7 @@ requires_openai_auth = true
         assert_eq!(
             target.transcript_path.as_deref(),
             Some(
-                std::fs::canonicalize(&logically_new)
-                    .unwrap()
+                canon(&logically_new)
                     .to_string_lossy()
                     .as_ref()
             )
@@ -2997,7 +3000,7 @@ requires_openai_auth = true
         assert_eq!(target.session_id, "NestedDirect");
         assert_eq!(
             Path::new(target.transcript_path.as_deref().unwrap()),
-            std::fs::canonicalize(&direct).unwrap()
+            canon(&direct)
         );
         std::fs::remove_dir_all(root).ok();
     }
@@ -3051,7 +3054,7 @@ requires_openai_auth = true
         assert_eq!(target.session_id, "TargetBeyondLegacyCap");
         assert_eq!(
             Path::new(target.transcript_path.as_deref().unwrap()),
-            std::fs::canonicalize(&target_path).unwrap()
+            canon(&target_path)
         );
         std::fs::remove_dir_all(root).ok();
     }
@@ -3114,7 +3117,7 @@ requires_openai_auth = true
         assert_eq!(target.session_id, "ContinueMtimeNew");
         assert_eq!(
             Path::new(target.transcript_path.as_deref().unwrap()),
-            std::fs::canonicalize(&mtime_new).unwrap()
+            canon(&mtime_new)
         );
         std::fs::remove_dir_all(root).ok();
     }
@@ -3236,11 +3239,14 @@ requires_openai_auth = true
         let error = pi_chat_passthrough_args(Some("relative/session.jsonl"), None).unwrap_err();
         assert!(error.to_string().contains("absolute Pi transcript path"));
 
-        let args =
-            pi_chat_passthrough_args(Some("/tmp/session.jsonl"), Some("Chat title")).unwrap();
+        // An absolute path is platform-specific ("/tmp/…" is not absolute on
+        // Windows), so build one from the platform temp dir.
+        let session = std::env::temp_dir().join("session.jsonl");
+        let session_arg = session.to_string_lossy().to_string();
+        let args = pi_chat_passthrough_args(Some(session_arg.as_str()), Some("Chat title")).unwrap();
         assert_eq!(
             args,
-            vec!["--name", "Chat title", "--session", "/tmp/session.jsonl"]
+            vec!["--name", "Chat title", "--session", session_arg.as_str()]
         );
     }
 

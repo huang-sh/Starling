@@ -778,13 +778,20 @@ mod tests {
         let path = unique_test_runs_path("dead-node-lock");
         crate::core::fs_utils::ensure_parent_dir(&path).expect("create test parent");
         let lock_path = runs_lock_path(&path);
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg("exit 0")
-            .spawn()
-            .expect("spawn short-lived owner");
+        // `sh` may not exist on Windows (and MSYS sh pids can linger as
+        // openable handles after exit), so spawn the platform shell instead.
+        let mut child = if cfg!(windows) {
+            Command::new("cmd").arg("/C").arg("exit 0").spawn()
+        } else {
+            Command::new("sh").arg("-c").arg("exit 0").spawn()
+        }
+        .expect("spawn short-lived owner");
         let dead_pid = child.id();
         assert!(child.wait().expect("wait for owner").success());
+        // On Windows the process object lives while any handle is open:
+        // `wait()` returns but the Child still owns the handle, so drop it to
+        // complete the "reap" before asserting the pid is dead.
+        drop(child);
         assert!(!is_pid_alive(dead_pid));
         let owner = serde_json::json!({
             "token": "node-dead-owner",

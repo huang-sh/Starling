@@ -106,18 +106,26 @@ jobs:
       - name: Run JavaScript renderer tests
         run: npm run test:js
 
-      # The full cargo test suite is not run here yet: a number of tests use
-      # POSIX-only fixtures (POSIX absolute paths, canonicalize verbatim-prefix
-      # expectations, spawning `sh`). Windows coverage is compile + smoke for
-      # now; porting those fixtures is follow-up work.
-      - name: Build Rust binary
+      - name: Run Rust tests
         working-directory: rust
         shell: bash
-        run: cargo build --release --locked
-
-      - name: Smoke test binaries
-        shell: bash
+        env:
+          STARLING_HOME: ${{ runner.temp }}/starling-home
+          STARLING_CONFIG: ${{ runner.temp }}/starling-store.json
+          STARLING_RUNS: ${{ runner.temp }}/starling-runs.json
         run: |
-          set -euo pipefail
-          ./rust/target/release/starling.exe --version
-          node npm/bin/starling.js --version
+          set +e
+          mkdir -p ../ci-logs
+          mkdir -p "$STARLING_HOME"
+          cargo test -- --test-threads=1 > ../ci-logs/cargo-test.log 2>&1
+          status=$?
+          cat ../ci-logs/cargo-test.log
+          exit "$status"
+
+      - name: Upload CI logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs-windows
+          path: ci-logs/*.log
+          if-no-files-found: ignore

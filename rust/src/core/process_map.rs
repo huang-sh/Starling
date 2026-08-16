@@ -465,8 +465,10 @@ fn resolve_session_root(
 
 /// Claude encodes cwd as `-a-b-c` for `/a/b/c`.
 pub fn encode_claude_cwd(cwd: &str) -> String {
-    let parts: Vec<&str> = cwd.split('/').filter(|s| !s.is_empty()).collect();
-    format!("-{}", parts.join("-"))
+    // Claude Code replaces path separators (and Windows drive colons) with
+    // dashes without collapsing runs: "/home/u" → "-home-u",
+    // "C:\Users\me" → "C--Users-me".
+    cwd.replace(['/', '\\', ':'], "-")
 }
 
 /// Pi encodes a resolved cwd as `--a-b-c--` for `/a/b/c`.
@@ -2000,12 +2002,18 @@ mod tests {
         ))
     }
 
+    /// Embed a filesystem path inside a JSON string literal. Windows paths
+    /// contain backslashes, which must be escaped to stay valid JSON.
+    fn json_path(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "\\\\")
+    }
+
     fn write_pi_session(path: &Path, session_id: &str, cwd: &Path) {
         std::fs::write(
             path,
             format!(
                 "{{\"type\":\"session\",\"version\":3,\"id\":\"{session_id}\",\"timestamp\":\"2026-07-24T12:34:56.789Z\",\"cwd\":\"{}\"}}\n",
-                cwd.to_string_lossy()
+                json_path(cwd)
             ),
         )
         .unwrap();
@@ -2155,7 +2163,7 @@ mod tests {
             &hook_file,
             format!(
                 "{{\"session_id\":\"5735a325-4a0e-4bf8-8358-f664a645c194\",\"transcript_path\":\"{}\",\"cwd\":\"/work/project\"}}\n",
-                transcript.to_string_lossy()
+                json_path(&transcript)
             ),
         )
         .unwrap();
@@ -2385,13 +2393,16 @@ mod tests {
         assert!(filter_cwd);
 
         let mut env = HashMap::new();
+        // An absolute path is platform-specific ("/tmp/…" resolves against
+        // the current drive on Windows), so build one from the temp dir.
+        let env_sessions = std::env::temp_dir().join("pi-env-sessions");
         env.insert(
             "PI_CODING_AGENT_SESSION_DIR".into(),
-            "/tmp/pi-env-sessions".into(),
+            env_sessions.to_string_lossy().to_string(),
         );
         let (root, custom, filter_cwd) =
             resolve_session_root(Provider::Pi, &home, &env, &[], Some(&cwd));
-        assert_eq!(root, PathBuf::from("/tmp/pi-env-sessions"));
+        assert_eq!(root, env_sessions);
         assert!(custom);
         assert!(filter_cwd);
 
@@ -2422,7 +2433,7 @@ mod tests {
         ];
         let (root, custom, filter_cwd) =
             resolve_session_root(Provider::Pi, &home, &env, &consumed_session_dir, Some(&cwd));
-        assert_eq!(root, PathBuf::from("/tmp/pi-env-sessions"));
+        assert_eq!(root, env_sessions);
         assert!(custom);
         assert!(filter_cwd);
 
@@ -2431,7 +2442,7 @@ mod tests {
         let invalid_args = vec!["pi".into(), "--session-dir=ignored".into()];
         let (root, custom, filter_cwd) =
             resolve_session_root(Provider::Pi, &home, &env, &invalid_args, Some(&cwd));
-        assert_eq!(root, PathBuf::from("/tmp/pi-env-sessions"));
+        assert_eq!(root, env_sessions);
         assert!(custom);
         assert!(filter_cwd);
 
@@ -2614,8 +2625,8 @@ mod tests {
             &hook,
             format!(
                 "{{\"event\":\"session_start\",\"payload\":{{\"sessionId\":\"HookedSession_01\",\"transcriptPath\":\"{}\",\"cwd\":\"{}\"}}}}\nnot-json\n",
-                transcript.to_string_lossy(),
-                cwd.to_string_lossy()
+                json_path(&transcript),
+                json_path(&cwd)
             ),
         )
         .unwrap();
@@ -2821,7 +2832,7 @@ mod tests {
         let logically_newer = local.join("newer-activity.jsonl");
         let newer_header = format!(
             "{{\"type\":\"session\",\"version\":3,\"id\":\"Activity_Newer\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"cwd\":\"{}\"}}\n",
-            cwd.to_string_lossy()
+            json_path(&cwd)
         );
         std::fs::write(
             &logically_newer,
@@ -2834,7 +2845,7 @@ mod tests {
         let newer_mtime = local.join("newer-mtime.jsonl");
         let older_header = format!(
             "{{\"type\":\"session\",\"version\":3,\"id\":\"Activity_Older\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"cwd\":\"{}\"}}\n",
-            cwd.to_string_lossy()
+            json_path(&cwd)
         );
         std::fs::write(
             &newer_mtime,
