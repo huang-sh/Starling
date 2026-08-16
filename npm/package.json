@@ -17,7 +17,8 @@
     "lib/chat/",
     "lib/render/",
     "scripts/install-agent-skills.js",
-    "skills/"
+    "skills/",
+    "vendor/pi-reporter.ts"
   ],
   "dependencies": {
     "@earendil-works/pi-coding-agent": ">=0.82.0"

@@ -7,6 +7,7 @@ pub mod fs_utils;
 pub mod id;
 pub mod mcp_config;
 pub mod model_config;
+pub mod live_sessions;
 pub mod osc_state;
 pub mod process_map;
 pub mod process_metrics;

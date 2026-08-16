@@ -44,12 +44,45 @@ try {
     }
   }
 
+  installPiReporterExtension();
+
   if (process.env.STARLING_INSTALL_CLAUDE_HOOK !== "0") {
     installClaudeDefaultHooks();
   }
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   console.warn(`[starling] Could not finish postinstall setup: ${message}`);
+}
+
+function installPiReporterExtension() {
+  // npm package layout keeps it at <root>/vendor/pi-reporter.mjs; the dev
+  // repo mirrors it under npm/vendor/ next to the staged binaries.
+  const candidates = [
+    join(packageRoot, "vendor", "pi-reporter.ts"),
+    join(packageRoot, "npm", "vendor", "pi-reporter.ts"),
+  ];
+  const extSource = candidates.find((path) => existsSync(path));
+  const extTarget = join(installHome, ".pi", "agent", "extensions", "starling-reporter.ts");
+  if (!extSource) {
+    return;
+  }
+  if (process.env.STARLING_INSTALL_PI_REPORTER === "0") {
+    console.log(`[starling] Pi reporter extension install skipped (STARLING_INSTALL_PI_REPORTER=0)`);
+    return;
+  }
+  try {
+    if (existsSync(extTarget)) {
+      const current = readFileSync(extTarget, "utf8");
+      const next = readFileSync(extSource, "utf8");
+      if (current === next) return;
+    }
+    mkdirSync(dirname(extTarget), { recursive: true });
+    copyFileSync(extSource, extTarget);
+    console.log(`[starling] Installed Pi reporter extension: ${extTarget}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[starling] Could not install Pi reporter extension: ${message}`);
+  }
 }
 
 function installClaudeDefaultHooks() {

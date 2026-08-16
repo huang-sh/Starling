@@ -1660,10 +1660,22 @@ fn build_snapshot(
         }
     }
 
-    // 3) Attach pid from running-agent detection
+    // 3) Attach pid from running-agent detection.
+    // Tier-1 truth first: the global Pi reporter extension writes
+    // pid↔session directly from inside every pi process (including manual
+    // `pi --session ...` launches whose cmdline carries no session id).
+    let live_reported = crate::core::live_sessions::live_pi_sessions();
     let detected = detect_running_sessions();
     for row in rows.iter_mut() {
         let row_key = canonical_session_id(&row.session_id, Some(&row.provider));
+        if row.pid.is_none() {
+            if let Some(entry) = live_reported.get(&row.session_id) {
+                row.pid = Some(entry.pid);
+                if row.file_path.is_none() {
+                    row.file_path = entry.transcript_path.clone();
+                }
+            }
+        }
         let info = detected
             .get(&row.session_id)
             .and_then(|bucket| select_detected_for_row(row, bucket))
@@ -1692,6 +1704,35 @@ fn build_snapshot(
         // Include running sessions that are not pinned and not in the recent
         // slice only when unpinned sessions are in scope.
         let mut seen: HashSet<String> = rows.iter().map(row_session_key).collect();
+        // Reporter-only sessions (manual pi launches with no run record and
+        // no index entry yet) join as rows directly.
+        for entry in live_reported.values() {
+            if entry.session_id.is_empty() {
+                continue;
+            }
+            let sid_key = monitor_session_key(
+                "pi",
+                &entry.session_id,
+                entry.cwd.as_deref().unwrap_or_default(),
+                entry.transcript_path.as_deref(),
+            );
+            if seen.contains(&sid_key) {
+                continue;
+            }
+            seen.insert(sid_key);
+            rows.push(Row {
+                session_id: entry.session_id.clone(),
+                provider: "pi".into(),
+                model: entry.model.clone().unwrap_or_default(),
+                project: entry.cwd.clone().unwrap_or_default(),
+                title: "running session".to_string(),
+                pinned: false,
+                catalog: None,
+                file_path: entry.transcript_path.clone(),
+                pid: Some(entry.pid),
+                transcript_missing: false,
+            });
+        }
         for (sid, infos) in detected {
             for info in infos {
                 let project = info.project_path.clone().unwrap_or_default();
