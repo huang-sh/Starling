@@ -341,6 +341,95 @@ fn walk_dirs(dir: &Path, provider: Provider, out: &mut Vec<IndexedSessionDirecto
     }
 }
 
+/// Time-gated incremental refresh for read paths (`starling top` etc.).
+///
+/// The tree-mtime staleness check is unusable as a gate: any active session
+/// transcript keeps roots "newer" forever. Instead: refresh only when the
+/// index is older than `max_age_ms` (one stat), and then incrementally —
+/// stat-walk all roots (cheap) but parse only files newer than the index's
+/// built_at; drop entries whose files vanished.
+pub fn refresh_session_index_if_aging(max_age_ms: u64) -> bool {
+    let existing = load_session_index();
+    let built_ms = existing
+        .as_ref()
+        .and_then(|idx| {
+            chrono::DateTime::parse_from_rfc3339(&idx.built_at)
+                .ok()
+                .map(|dt| dt.timestamp_millis().max(0) as u64)
+        })
+        .unwrap_or(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if built_ms > 0 && now_ms.saturating_sub(built_ms) <= max_age_ms {
+        return false;
+    }
+    refresh_session_index_incrementally(built_ms);
+    true
+}
+
+fn refresh_session_index_incrementally(built_ms: u64) {
+    let mut fresh: Vec<SessionMeta> = Vec::new();
+    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (provider, root) in provider_roots(None) {
+        walk_collect_fresh(&root, provider, built_ms, &mut fresh, &mut seen_paths);
+    }
+    let mut sessions: Vec<SessionMeta> = load_session_index()
+        .map(|idx| {
+            idx.sessions
+                .into_iter()
+                .filter(|s| seen_paths.contains(&s.file_path))
+                .collect()
+        })
+        .unwrap_or_default();
+    sessions.retain(|s| !fresh.iter().any(|f| f.file_path == s.file_path));
+    sessions.extend(fresh);
+    let directories = collect_session_directory_entries(None);
+    write_session_index(sessions, directories);
+}
+
+/// Stat-walk the tree; parse only files modified after `newer_than_ms`, but
+/// record every jsonl path so vanished transcripts can be pruned.
+fn walk_collect_fresh(
+    dir: &Path,
+    provider: Provider,
+    newer_than_ms: u64,
+    fresh: &mut Vec<SessionMeta>,
+    seen_paths: &mut std::collections::HashSet<String>,
+) {
+    let rd = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.file_name().map(|n| n == "subagents").unwrap_or(false) {
+            continue;
+        }
+        let md = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if md.is_dir() {
+            walk_collect_fresh(&path, provider, newer_than_ms, fresh, seen_paths);
+        } else if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+            seen_paths.insert(path.to_string_lossy().to_string());
+            let mtime_ms = md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            if mtime_ms > newer_than_ms {
+                if let Some(meta) = parse_session_file(&path, provider) {
+                    fresh.push(meta);
+                }
+            }
+        }
+    }
+}
+
 /// True when the index file doesn't exist or any root is newer than built_at.
 pub fn is_session_index_stale(provider: Option<Provider>) -> bool {
     let path = session_index_path();

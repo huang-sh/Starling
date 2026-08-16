@@ -1,5 +1,8 @@
 //! `starling top` — live monitor.
 
+/// Max age of the session index before `top` refreshes it incrementally.
+const MONITOR_INDEX_MAX_AGE_MS: u64 = 5 * 60 * 1000;
+
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -505,6 +508,9 @@ struct Row {
     catalog: Option<String>,
     file_path: Option<String>,
     pid: Option<u32>,
+    /// Transcript verified missing on disk. Live-pid rows stay visible as
+    /// "orphaned"; dead unpinned rows are dropped entirely.
+    transcript_missing: bool,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -592,7 +598,18 @@ impl From<&Row> for RowJson {
             cpu,
             background_task_count,
         );
-        let status_realtime = inferred.realtime;
+        let status = if r.transcript_missing && r.pid.is_some() {
+            // Live process but its transcript is gone (deleted under the
+            // agent, or an unmappable zombie) — it cannot be resumed.
+            "orphaned".to_string()
+        } else {
+            inferred.status
+        };
+        let status_realtime = if status == "orphaned" {
+            false
+        } else {
+            inferred.realtime
+        };
         let status_source = if status_realtime {
             "realtime".to_string()
         } else {
@@ -616,7 +633,7 @@ impl From<&Row> for RowJson {
             title: r.title.clone(),
             provider: r.provider.clone(),
             model: effective_model(&live, r, model_state.as_ref()),
-            status: inferred.status,
+            status,
             status_source,
             status_realtime,
             status_signal: inferred.signal,
@@ -1500,6 +1517,13 @@ fn build_snapshot(
 ) -> Result<Vec<Row>> {
     reconcile_stale_runs();
     let _ = prune_stale_osc_state(now_ms());
+    // Truth-first: the index is a cache. Refresh it when it ages past the
+    // gate (one stat); the refresh is incremental (stat-walk + parse only
+    // newer files), so a live session writing its transcript cannot pin the
+    // index stale the way a tree-mtime check would.
+    let _ = crate::core::session_index::refresh_session_index_if_aging(
+        MONITOR_INDEX_MAX_AGE_MS,
+    );
 
     // Resolve catalog filter (if any) → space id
     let target_space_id = if let Some(c) = catalog_filter {
@@ -1582,6 +1606,7 @@ fn build_snapshot(
                 catalog,
                 file_path: None, // resolved via index below
                 pid: None,
+                transcript_missing: false,
             }
         })
         .collect();
@@ -1627,6 +1652,7 @@ fn build_snapshot(
                         catalog: bookmark.and_then(|(_, catalog)| catalog.clone()),
                         file_path: Some(s.file_path.clone()),
                         pid: None,
+                        transcript_missing: false,
                     }
                 })
                 .collect();
@@ -1686,6 +1712,7 @@ fn build_snapshot(
                     catalog: None,
                     file_path: info.file_path,
                     pid: info.pid,
+                    transcript_missing: false,
                 });
             }
         }
@@ -1704,7 +1731,27 @@ fn build_snapshot(
         agent_filter,
     );
 
-    sort_and_truncate_rows(&mut rows, session_limit, sort);
+    // Truth check: a session is displayable only if its transcript exists.
+    // Uniform rule — transcript exists ⇔ the file is on disk OR the id is in
+    // the just-refreshed index. No per-id rescans: the index was rebuilt above
+    // when roots were newer, and a transcript created after that makes roots
+    // newer again, so the stale check self-heals on the next snapshot.
+    // Live-pid rows whose transcript is gone stay visible as "orphaned" (an
+    // unresumable live process); dead unpinned rows are dropped so caches
+    // can't resurrect phantom sessions.
+    let index_ids: HashSet<String> = load_session_index()
+        .map(|idx| idx.sessions.into_iter().map(|s| s.session_id).collect())
+        .unwrap_or_default();
+    for row in rows.iter_mut() {
+        let on_disk = row
+            .file_path
+            .as_deref()
+            .map(|p| std::path::Path::new(p).exists())
+            .unwrap_or(false);
+        row.transcript_missing = !on_disk && !index_ids.contains(&row.session_id);
+    }
+    rows.retain(|r| !r.transcript_missing || r.pid.is_some() || r.pinned);
+        sort_and_truncate_rows(&mut rows, session_limit, sort);
 
     Ok(rows)
 }
@@ -1945,6 +1992,7 @@ fn row_from_running_run(run: &RunRecord, indexed_sessions: &[SessionMeta]) -> Op
         catalog: None,
         file_path,
         pid: Some(pid),
+        transcript_missing: false,
     })
 }
 
@@ -2063,6 +2111,7 @@ mod session_identity_tests {
             catalog: None,
             file_path: Some(file.into()),
             pid: None,
+            transcript_missing: false,
         }
     }
 
@@ -2252,6 +2301,7 @@ mod session_identity_tests {
             catalog: None,
             file_path: Some("/sessions/pi-session.jsonl".into()),
             pid: None,
+            transcript_missing: false,
         }];
         merge_running_run_fallbacks(
             &mut rows,
