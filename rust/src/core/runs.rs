@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::{default_runs_path, now_iso, RUNS_VERSION};
 use crate::core::fs_utils::{atomic_write_json, read_json};
-use crate::core::process_map::map_processes_to_sessions;
+use crate::core::process_map::{is_pid_runnable, map_processes_to_sessions};
 use crate::types::{Bookmark, RunRecord, RunsFile};
 
 // Re-export RunStatus so callers don't need crate::types::RunStatus
@@ -394,7 +394,11 @@ pub fn reconcile_stale_runs() -> usize {
                 continue;
             }
             if let Some(pid) = run.pid {
-                if !is_pid_alive(pid) {
+                // Runnable, not merely alive: a suspended (T-state) orphan —
+                // e.g. a TUI Ctrl-Z'd and its terminal closed — can never make
+                // progress again, so its run must not stay "running" forever
+                // (that is what kept monitor showing a phantom idle session).
+                if !is_pid_runnable(pid) {
                     run.status = RunStatus::Crashed;
                     run.ended_at = Some(now.clone());
                     changed += 1;
