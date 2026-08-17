@@ -759,8 +759,12 @@ fn is_pid_alive_platform(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn is_pid_alive_platform(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER};
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, STILL_ACTIVE, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
 
     // OpenProcess returns null for a dead pid. A live system pid we cannot
     // open (e.g. services) still proves liveness via ERROR_ACCESS_DENIED, so
@@ -769,8 +773,14 @@ fn is_pid_alive_platform(pid: u32) -> bool {
     // best-effort heuristic.
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if !handle.is_null() {
+        // A handle can still be granted for an exited-but-unreaped process
+        // (job objects, conhost, WMI keep references). Treat anything with a
+        // completed exit code as dead; STILL_ACTIVE(259) collision is the
+        // known ceiling of this heuristic.
+        let mut exit_code: u32 = 0;
+        let got_code = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
         unsafe { CloseHandle(handle) };
-        return true;
+        return got_code == 0 || exit_code == STILL_ACTIVE;
     }
     let err = unsafe { GetLastError() };
     err == ERROR_ACCESS_DENIED

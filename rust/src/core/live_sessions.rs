@@ -131,8 +131,10 @@ pub fn read_live_sessions() -> impl Iterator<Item = LiveSessionEntry> {
 #[cfg(unix)]
 fn is_pid_alive(pid: u32) -> bool {
     // kill(pid, 0): 0 = alive, ESRCH = gone. EPERM (alive, not ours) is fine.
+    // errno via last_os_error: __errno_location is glibc-only and breaks
+    // macOS builds; the std wrapper hits the same TLS errno portably.
     let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    rc == 0 || unsafe { *libc::__errno_location() } == libc::EPERM
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(not(unix))]

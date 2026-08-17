@@ -1918,7 +1918,21 @@ mod tests {
     fn set_mtime(path: &Path, when: std::time::SystemTime) {
         // Read-only handle: owner may set timestamps without write access, and
         // directories cannot be opened for writing at all.
+        #[cfg(not(windows))]
         let file = std::fs::File::open(path).unwrap();
+        // Windows SetFileTime needs FILE_WRITE_ATTRIBUTES access; the
+        // FILE_FLAG_BACKUP_SEMANTICS flag is what lets the same open cover
+        // directories (fixtures set mtimes on both files and dirs).
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        };
         file.set_times(std::fs::FileTimes::new().set_modified(when))
             .unwrap();
     }
@@ -4578,7 +4592,11 @@ fn normalize_project_path(path: &Path) -> String {
             .unwrap_or_else(|_| path.to_path_buf())
     };
     if let Ok(canonical) = std::fs::canonicalize(&absolute) {
-        return canonical.to_string_lossy().to_string();
+        // Windows canonicalize() yields a \\?\-prefixed verbatim path, which
+        // would never equal a session-header cwd (plain drive spelling) and
+        // made every local session look cross-project. Node-compatible
+        // spelling keeps the comparison (and hints) consistent.
+        return pi_node_compatible_path(&canonical).to_string_lossy().to_string();
     }
 
     let mut normalized = PathBuf::new();
