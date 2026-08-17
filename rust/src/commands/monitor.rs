@@ -15,9 +15,7 @@ use serde_json::Value;
 
 use crate::cli::{MonitorAgent, MonitorCommand, MonitorSort, TopAction, TopCommand};
 use crate::core::catalog_resolver::{catalog_path, resolve_catalog_reference};
-use crate::core::discovery::{
-    canonical_session_id, match_session_id, session_scope_key, Provider as DiscoveryProvider,
-};
+use crate::core::discovery::{canonical_session_id, session_scope_key};
 use crate::core::osc_state::{
     clear_osc_state, normalize_status, prune_stale_osc_state, recent_context_state,
     recent_model_state, recent_osc_state, status_from_osc0_title, status_from_osc94_progress,
@@ -1804,15 +1802,52 @@ fn build_snapshot(
         row.transcript_missing = !on_disk && !index_ids.contains(&row.session_id);
     }
     rows.retain(|r| !r.transcript_missing || r.pid.is_some() || r.pinned);
-        sort_and_truncate_rows(&mut rows, session_limit, sort);
+    sort_and_truncate_rows(&mut rows, session_limit, sort);
 
     Ok(rows)
 }
 
 fn enrich_rows_from_index(rows: &mut [Row], sessions: &[SessionMeta]) {
+    // Cost control: pin sets can reach thousands of rows and the index holds
+    // thousands of sessions; a per-row linear scan made `starling top` spend
+    // seconds here (1109 pins × 2241 sessions × key allocs). One HashMap on
+    // the primary key makes the common path O(rows + sessions).
+    let by_key: HashMap<String, &SessionMeta> = sessions
+        .iter()
+        .map(|meta| (meta_session_key(meta), meta))
+        .collect();
+    // Secondary bucket by bare session id: pinned rows start with empty
+    // project/file, so their composite key cannot match — a full linear
+    // fallback per row was O(pins × sessions). Buckets keep the fallback
+    // O(pins + tiny_bucket).
+    let by_sid: HashMap<&str, Vec<&SessionMeta>> = {
+        let mut m: HashMap<&str, Vec<&SessionMeta>> = HashMap::new();
+        for meta in sessions {
+            m.entry(meta.session_id.as_str()).or_default().push(meta);
+        }
+        m
+    };
     for row in rows {
-        let Some(meta) = find_indexed_session(sessions, row) else {
-            continue;
+        let meta = match by_key.get(&row_session_key(row)).copied() {
+            Some(m) => m,
+            None => {
+                // Exact-id bucket with the same provider disambiguation the
+                // old linear scan applied; pins store full ids, so prefix
+                // matching is unnecessary here.
+                let candidates: Vec<&&SessionMeta> = by_sid
+                    .get(row.session_id.as_str())
+                    .map(|bucket| {
+                        bucket
+                            .iter()
+                            .filter(|m| row.provider.is_empty() || m.provider == row.provider)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if candidates.len() != 1 {
+                    continue;
+                }
+                *candidates[0]
+            }
         };
         row.session_id = meta.session_id.clone();
         if row.provider.is_empty() {
@@ -1835,28 +1870,6 @@ fn enrich_rows_from_index(rows: &mut [Row], sessions: &[SessionMeta]) {
             row.file_path = Some(meta.file_path.clone());
         }
     }
-}
-
-fn find_indexed_session<'a>(sessions: &'a [SessionMeta], row: &Row) -> Option<&'a SessionMeta> {
-    let key = row_session_key(row);
-    if let Some(meta) = sessions
-        .iter()
-        .find(|session| meta_session_key(session) == key)
-    {
-        return Some(meta);
-    }
-    let matches: Vec<&SessionMeta> = sessions
-        .iter()
-        .filter(|session| {
-            (row.provider.is_empty() || session.provider == row.provider)
-                && match_session_id(
-                    &session.session_id,
-                    &row.session_id,
-                    discovery_provider(&session.provider),
-                )
-        })
-        .collect();
-    (matches.len() == 1).then(|| matches[0])
 }
 
 fn dedupe_rows_by_session_id(rows: &mut Vec<Row>) {
@@ -2142,15 +2155,6 @@ fn select_detected_for_row<'a>(
     }
     let matching: Vec<&DetectedSession> = candidates.iter().filter(provider_matches).collect();
     (matching.len() == 1).then(|| matching[0])
-}
-
-fn discovery_provider(provider: &str) -> Option<DiscoveryProvider> {
-    match provider {
-        "claude" => Some(DiscoveryProvider::Claude),
-        "codex" => Some(DiscoveryProvider::Codex),
-        "pi" => Some(DiscoveryProvider::Pi),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

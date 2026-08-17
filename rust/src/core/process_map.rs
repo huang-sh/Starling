@@ -824,6 +824,10 @@ pub struct ResolverCache {
     pub recent_jsonl_flat: HashMap<PathBuf, Option<(PathBuf, u64)>>,
     pub recent_pi_jsonl_by_cwd: HashMap<(PathBuf, PathBuf), Option<(PathBuf, u64)>>,
     pub file_index: HashMap<PathBuf, Option<HashMap<String, PathBuf>>>,
+    /// Session index parsed once per process scan (outer Option = not yet
+    /// loaded, inner = index present). Stops `find_session_file_by_id`'s
+    /// fast path from re-parsing the whole index JSON per call.
+    pub session_index: Option<Option<crate::core::session_index::SessionIndex>>,
 }
 
 /// Walk /proc once and produce (agent candidates, child map).
@@ -970,13 +974,36 @@ fn find_file_recursive(dir: &Path, target: &str, depth: u32) -> Option<PathBuf> 
 pub fn find_session_file_by_id(
     root: &Path,
     session_id: &str,
-    cache: Option<&mut ResolverCache>,
+    mut cache: Option<&mut ResolverCache>,
 ) -> Option<PathBuf> {
     let target = session_id.trim();
     if target.is_empty() {
         return None;
     }
     let target_file = format!("{}.jsonl", target.to_ascii_lowercase());
+
+    // Fast path: the session index already knows every transcript path
+    // (codex nests sessions 3 levels deep; directory recursion cost ~0.5s
+    // per unresolved codex process on large homes). The parsed index is
+    // memoized in the cache for the scan's lifetime. Path must live under
+    // the requested root so provider homes stay disjoint.
+    let indexed_hit = cache.as_deref_mut().and_then(|c| {
+        let slot = c
+            .session_index
+            .get_or_insert_with(crate::core::session_index::load_session_index);
+        slot.as_ref().and_then(|index| {
+            index
+                .sessions
+                .iter()
+                .find(|s| s.session_id.eq_ignore_ascii_case(target))
+                .map(|s| PathBuf::from(&s.file_path))
+        })
+    });
+    if let Some(hit) = indexed_hit {
+        if hit.starts_with(root) {
+            return Some(hit);
+        }
+    }
 
     if let Some(c) = cache {
         let needs_build = !c.file_index.contains_key(root);
@@ -1263,52 +1290,16 @@ fn read_pi_process_session_info(path: &Path) -> Option<PiProcessSessionInfo> {
         break (id.to_string(), PathBuf::from(cwd), header_timestamp_ms);
     };
 
-    // Keep using the same buffered reader so bytes fetched past the header are
-    // not lost when the 1 MiB-limited header view is removed.
-    let mut reader = header_reader.into_inner();
-    let mut last_activity_ms: Option<i64> = None;
-    loop {
-        let mut physical_line = Vec::new();
-        let bytes_read = reader.read_until(b'\n', &mut physical_line).ok()?;
-        if bytes_read == 0 {
-            break;
-        }
-        let line = String::from_utf8_lossy(&physical_line);
-        let Ok(entry) = serde_json::from_str::<Value>(line.trim()) else {
-            continue;
-        };
-        if entry.get("type").and_then(Value::as_str) != Some("message") {
-            continue;
-        }
-        let Some(message) = entry.get("message").and_then(Value::as_object) else {
-            continue;
-        };
-        let role = message.get("role").and_then(Value::as_str);
-        if !matches!(role, Some("user" | "assistant")) || !message.contains_key("content") {
-            continue;
-        }
-        let activity_ms = message
-            .get("timestamp")
-            .and_then(pi_process_json_timestamp_ms)
-            .or_else(|| {
-                entry
-                    .get("timestamp")
-                    .and_then(Value::as_str)
-                    .and_then(pi_process_iso_timestamp_ms)
-            });
-        if let Some(activity_ms) = activity_ms {
-            last_activity_ms = Some(last_activity_ms.unwrap_or(0).max(activity_ms));
-        }
-    }
-
+    // Cost control: this used to parse the ENTIRE transcript line by line
+    // only to derive last-activity for recency ordering. The session-header
+    // timestamp, falling back to the file mtime, carries the same
+    // wall-clock signal for zero parsing; large transcripts made `starling
+    // top` spend seconds per process here (O(bytes × processes)).
     Some(PiProcessSessionInfo {
         session_id,
         project_path,
         file_path: path.to_path_buf(),
-        logical_modified_ms: last_activity_ms
-            .filter(|timestamp| *timestamp > 0)
-            .or(header_timestamp_ms)
-            .unwrap_or(file_mtime_ms),
+        logical_modified_ms: header_timestamp_ms.unwrap_or(file_mtime_ms),
     })
 }
 
