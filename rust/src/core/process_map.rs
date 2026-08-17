@@ -780,7 +780,7 @@ fn is_pid_alive_platform(pid: u32) -> bool {
         let mut exit_code: u32 = 0;
         let got_code = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
         unsafe { CloseHandle(handle) };
-        return got_code == 0 || exit_code == STILL_ACTIVE;
+        return got_code == 0 || exit_code == STILL_ACTIVE as u32;
     }
     let err = unsafe { GetLastError() };
     err == ERROR_ACCESS_DENIED
