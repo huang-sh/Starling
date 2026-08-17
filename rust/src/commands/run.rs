@@ -4248,9 +4248,28 @@ fn resolve_pi_path_lexically(input: &str, base: &Path) -> PathBuf {
 }
 
 fn pi_session_cwd_matches(session_cwd: &str, launch_project: &Path) -> bool {
-    !session_cwd.is_empty()
-        && resolve_pi_path_lexically(session_cwd, launch_project)
-            == resolve_pi_path_lexically(&launch_project.to_string_lossy(), launch_project)
+    if session_cwd.is_empty() {
+        return false;
+    }
+    let session_path = resolve_pi_path_lexically(session_cwd, launch_project);
+    let launch_path = resolve_pi_path_lexically(&launch_project.to_string_lossy(), launch_project);
+    if session_path == launch_path {
+        return true;
+    }
+    // Windows aliases break the lexical comparison for one physical
+    // directory: TEMP is commonly an 8.3 short name (RUNNER~1) that session
+    // headers keep, while the launch cwd is canonicalized to the long
+    // spelling (runneradmin); drive-letter case differs the same way.
+    // Canonicalize both sides when they exist to compare resolved spellings.
+    match (
+        std::fs::canonicalize(&session_path),
+        std::fs::canonicalize(&launch_path),
+    ) {
+        (Ok(session_canonical), Ok(launch_canonical)) => {
+            pi_node_compatible_path(&session_canonical) == pi_node_compatible_path(&launch_canonical)
+        }
+        _ => false,
+    }
 }
 
 fn pi_local_session_infos(
