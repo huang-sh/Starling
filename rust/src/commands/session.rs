@@ -25,7 +25,7 @@ use crate::core::session_index::{
 };
 use crate::core::store::{
     find_bookmark, find_bookmark_for_session, list_bookmarks, list_spaces, remove_bookmark,
-    update_bookmark, BookmarkPatch,
+    update_bookmark, BookmarkFilter, BookmarkPatch,
 };
 use crate::types::RunRecord;
 use crate::types::{Bookmark, SessionMeta};
@@ -630,18 +630,29 @@ fn delete_cmd(session_id: &str, yes: bool, json: bool) -> Result<()> {
     let meta = match resolve_session_meta(session_id) {
         Some(m) => m,
         None => {
-            eprintln!("{}: session not found: {}", "error".red(), session_id);
-            std::process::exit(1);
+            // Stale-pin cleanup: the session is gone from disk AND the index,
+            // but pins may still reference it. Delete must still remove those
+            // pins — otherwise the row is undeletable from every frontend.
+            let removed = remove_pins_referencing(session_id);
+            if removed.is_empty() {
+                eprintln!("{}: session not found: {}", "error".red(), session_id);
+                std::process::exit(1);
+            }
+            return report_stale_pin_removal("session.delete", session_id, &removed, json);
         }
     };
     let file_path = std::path::Path::new(&meta.file_path);
     if !file_path.exists() {
-        eprintln!(
-            "{}: session file not found: {}",
-            "error".red(),
-            meta.file_path
-        );
-        std::process::exit(1);
+        // Resolved (e.g. via pin metadata) but the transcript is already
+        // gone: deleting now means cleaning up the leftover pin and index
+        // entry, not failing.
+        remove_session_from_index(&meta.session_id);
+        let mut removed = Vec::new();
+        if let Some(b) = find_bookmark_for_session(&meta.provider, &meta.session_id, &meta.project_path) {
+            remove_bookmark(&b.id);
+            removed.push(b);
+        }
+        return report_stale_pin_removal("session.delete", session_id, &removed, json);
     }
     if let Err(e) = std::fs::remove_file(file_path) {
         eprintln!("{}: failed to delete session file: {}", "error".red(), e);
@@ -670,6 +681,61 @@ fn delete_cmd(session_id: &str, yes: bool, json: bool) -> Result<()> {
     println!("  File: {}", meta.file_path);
     if let Some(b) = &bookmark {
         println!("{}", format!("  Removed pin: {}", b.id).normal());
+    }
+    Ok(())
+}
+
+/// Remove every pin whose session id canonically matches `session_id`,
+/// regardless of provider — a stale pin's transcript is gone, so provider
+/// disambiguation is moot and the caller asked for deletion.
+fn remove_pins_referencing(session_id: &str) -> Vec<crate::types::Bookmark> {
+    let target = canonical_session_id(session_id, None);
+    let hits: Vec<crate::types::Bookmark> = list_bookmarks(BookmarkFilter::default())
+        .into_iter()
+        .filter(|b| {
+            b.session_id == session_id
+                || canonical_session_id(&b.session_id, Some(&b.provider)) == target
+        })
+        .collect();
+    hits.iter().for_each(|b| {
+        remove_bookmark(&b.id);
+    });
+    hits
+}
+
+fn report_stale_pin_removal(
+    command: &str,
+    requested: &str,
+    removed: &[crate::types::Bookmark],
+    json: bool,
+) -> Result<()> {
+    let ids: Vec<&str> = removed.iter().map(|b| b.id.as_str()).collect();
+    let message = if removed.is_empty() {
+        format!(
+            "Session file already gone for {}; no pin metadata found",
+            short_session_id(requested)
+        )
+    } else {
+        format!(
+            "Removed {} stale pin(s) for {}; session file already gone",
+            removed.len(),
+            short_session_id(requested)
+        )
+    };
+    if json {
+        return super::print_json_result(
+            command,
+            &message,
+            serde_json::json!({
+                "session_id": requested,
+                "removed_pins": ids,
+                "file_deleted": false,
+            }),
+        );
+    }
+    println!("{}", message.green());
+    for id in ids {
+        println!("{}", format!("  Removed pin: {}", id).normal());
     }
     Ok(())
 }
