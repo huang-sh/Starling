@@ -114,15 +114,16 @@ function findStarlingExecutable() {
   // 1. Dev/local package fallback. In `npm link` development, a globally
   // installed optional dependency may still exist next to the symlinked root
   // package; prefer the local staged binary so changes from scripts/build.sh
-  // are picked up immediately.
+  // are picked up immediately. Cargo target dirs come first so an in-tree
+  // `cargo build` beats the last staged snapshot.
   const devTargetTriples = compatibleTargetTriples(targetTriple);
   const devCandidates = [
-    ...devTargetTriples.map((triple) =>
-      path.join(__dirname, "..", "vendor", triple, "bin", BINARY_NAME),
-    ),
     // direct cargo target dir (in-tree development)
     path.join(__dirname, "..", "..", "rust", "target", "release", BINARY_NAME),
     path.join(__dirname, "..", "..", "rust", "target", "debug", BINARY_NAME),
+    ...devTargetTriples.map((triple) =>
+      path.join(__dirname, "..", "vendor", triple, "bin", BINARY_NAME),
+    ),
   ];
   for (const candidate of devCandidates) {
     if (existsSync(candidate)) {
