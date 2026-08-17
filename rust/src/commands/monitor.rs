@@ -235,6 +235,12 @@ fn record_agent_hook_event(
         .or_else(|| value.get("hookEventName").and_then(|v| v.as_str()))
         .or(event.as_deref())
         .unwrap_or("AgentHook");
+    // Auto-archive on session start: same cwd-named-catalog behavior codex
+    // gets via `starling hook`, delivered through the hooks the postinstall
+    // already registers for Claude — no extra configuration needed.
+    if event == "SessionStart" {
+        crate::commands::pin::archive_session_from_hook(&raw, false);
+    }
     let context_usage = context_window_usage_from_hook(&value);
     let model = model_from_hook(&value);
     let status = status_from_agent_hook_event(event, &value);

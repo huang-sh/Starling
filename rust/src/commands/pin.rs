@@ -192,14 +192,24 @@ pub fn hook_run(json: bool) -> Result<()> {
     if std::io::Read::read_to_string(&mut std::io::stdin(), &mut raw).is_err() {
         return Ok(());
     }
+    archive_session_from_hook(&raw, json);
+    Ok(())
+}
+
+/// Shared archive path for Claude-compatible SessionStart events: pin the
+/// session into a catalog named after the payload cwd. Extracted from stdin
+/// reading so `top hook` (claude) and `hook` (codex) share one implementation.
+// ponytail: catalog name is the cwd basename — distinct projects sharing a
+// basename land in one catalog; switch to hierarchical paths if that bites.
+pub(crate) fn archive_session_from_hook(raw: &str, json: bool) {
     let Ok(payload) = serde_json::from_str::<serde_json::Value>(raw.trim()) else {
-        return Ok(());
+        return;
     };
     let Some(session_id) = payload.get("session_id").and_then(|v| v.as_str()) else {
-        return Ok(());
+        return;
     };
     if session_id.trim().is_empty() {
-        return Ok(());
+        return;
     }
     let cwd = payload
         .get("cwd")
@@ -210,7 +220,7 @@ pub fn hook_run(json: bool) -> Result<()> {
         .and_then(|n| n.to_str())
         .map(|n| n.to_string())
     else {
-        return Ok(());
+        return;
     };
     // pin::run exits the process on lookup failure; probe first so the
     // hook can stay best-effort (a not-yet-flushed transcript is skippable,
@@ -221,7 +231,7 @@ pub fn hook_run(json: bool) -> Result<()> {
             "error".red(),
             short_session_id(session_id)
         );
-        return Ok(());
+        return;
     }
     // Ensure the catalog exists (quietly), then pin into it. `pin --to`
     // already no-ops when the bookmark is present and assigned.
@@ -237,7 +247,7 @@ pub fn hook_run(json: bool) -> Result<()> {
             true,
         ) {
             eprintln!("{}: starling hook: {}", "error".red(), e);
-            return Ok(());
+            return;
         }
     }
     match run(
@@ -248,10 +258,9 @@ pub fn hook_run(json: bool) -> Result<()> {
         false,
         json,
     ) {
-        Ok(()) => Ok(()),
+        Ok(()) => {}
         Err(e) => {
             eprintln!("{}: starling hook: {}", "error".red(), e);
-            Ok(())
         }
     }
 }
