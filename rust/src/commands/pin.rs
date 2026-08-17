@@ -202,10 +202,26 @@ pub fn hook_run(json: bool) -> Result<()> {
 // ponytail: catalog name is the cwd basename — distinct projects sharing a
 // basename land in one catalog; switch to hierarchical paths if that bites.
 pub(crate) fn archive_session_from_hook(raw: &str, json: bool) {
+    // Flight recorder: claude swallows hook stderr, so append a one-line
+    // trace to <starling-home>/logs/hook.log for diagnosis (best-effort).
+    let trace = |msg: &str| {
+        use std::io::Write;
+        let home = crate::constants::default_starling_home().join("logs");
+        let _ = std::fs::create_dir_all(&home);
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(home.join("hook.log"))
+        {
+            let _ = f.write_all(format!("{} {}\n", crate::constants::now_iso(), msg).as_bytes());
+        }
+    };
     let Ok(payload) = serde_json::from_str::<serde_json::Value>(raw.trim()) else {
+        trace("parse-failed");
         return;
     };
     let Some(session_id) = payload.get("session_id").and_then(|v| v.as_str()) else {
+        trace("no-session-id");
         return;
     };
     if session_id.trim().is_empty() {
@@ -224,34 +240,45 @@ pub(crate) fn archive_session_from_hook(raw: &str, json: bool) {
     };
     // pin::run exits the process on lookup failure; probe first so the
     // hook can stay best-effort. Claude fires SessionStart BEFORE creating
-    // the transcript, so discovery cannot see the session yet — but the
-    // payload carries transcript_path: pre-create the file so the pin has
-    // something to attach to (claude appends to it; an empty touch is the
-    // same state it would be in anyway). The next event retries naturally.
-    if crate::commands::session::resolve_session_meta(session_id).is_none() {
-        let precreated = payload
-            .get("transcript_path")
-            .and_then(|v| v.as_str())
-            .filter(|p| !p.trim().is_empty())
-            .map(std::path::PathBuf::from)
-            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
-            .and_then(|p| {
-                std::fs::create_dir_all(p.parent()?).ok()?;
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&p)
-                    .ok()
-                    .map(|_| p)
-            });
-        if precreated.is_none() {
-            eprintln!(
-                "{}: starling hook: session not resolvable yet: {}",
-                "error".red(),
-                short_session_id(session_id)
-            );
-            return;
+    // the transcript, and resolving an unknown id costs ~9s of full provider
+    // scan — over the 5s hook timeout, which is exactly why live sessions
+    // got killed before archiving. Pre-create from the payload path FIRST
+    // (claude appends to it; an empty touch is the state it would be in
+    // anyway), so the subsequent resolve finds the file instantly. Only
+    // when no transcript_path exists do we fall back to the (slow) resolve,
+    // and skip on failure — the next event retries naturally.
+    let transcript_path = payload
+        .get("transcript_path")
+        .and_then(|v| v.as_str())
+        .filter(|p| !p.trim().is_empty())
+        .map(std::path::PathBuf::from);
+    let mut precreated = false;
+    if let Some(p) = transcript_path.as_ref().filter(|p| {
+        p.extension().and_then(|e| e.to_str()) == Some("jsonl")
+    }) {
+        if !p.exists() {
+            precreated = std::fs::create_dir_all(p.parent().unwrap_or(std::path::Path::new("/")))
+                .ok()
+                .and_then(|_| {
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(p)
+                        .ok()
+                })
+                .is_some();
+        } else {
+            precreated = true;
         }
+    }
+    if !precreated && crate::commands::session::resolve_session_meta(session_id).is_none() {
+        trace(&format!("unresolvable sid={session_id} cwd={cwd}"));
+        eprintln!(
+            "{}: starling hook: session not resolvable yet: {}",
+            "error".red(),
+            short_session_id(session_id)
+        );
+        return;
     }
     // Ensure the catalog exists (quietly), then pin into it. `pin --to`
     // already no-ops when the bookmark is present and assigned.
@@ -278,8 +305,9 @@ pub(crate) fn archive_session_from_hook(raw: &str, json: bool) {
         false,
         json,
     ) {
-        Ok(()) => {}
+        Ok(()) => trace(&format!("pinned sid={session_id}")),
         Err(e) => {
+            trace(&format!("pin-failed sid={session_id} err={e}"));
             eprintln!("{}: starling hook: {}", "error".red(), e);
         }
     }
