@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -36,7 +37,7 @@ test("describes bundled Pi as Node executable plus CLI entry", () => {
 test("derives bundled Pi CLI from its public rpc-entry export", () => {
   assert.equal(
     piCliPathFromRpcEntry("/pkg/dist/rpc-entry.js"),
-    "/pkg/dist/cli.js",
+    path.join(path.dirname("/pkg/dist/rpc-entry.js"), "cli.js"),
   );
 });
 

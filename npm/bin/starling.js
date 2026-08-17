@@ -30,7 +30,12 @@ const PLATFORM_PACKAGE_BY_TARGET = {
   "aarch64-unknown-linux-gnu": "starling-linux-arm64",
   "x86_64-apple-darwin": "starling-darwin-x64",
   "aarch64-apple-darwin": "starling-darwin-arm64",
+  "x86_64-pc-windows-msvc": "starling-win32-x64",
+  "aarch64-pc-windows-msvc": "starling-win32-arm64",
 };
+
+const IS_WINDOWS = process.platform === "win32";
+const BINARY_NAME = IS_WINDOWS ? "starling.exe" : "starling";
 
 const { platform, arch } = process;
 
@@ -56,6 +61,18 @@ switch (platform) {
         break;
       case "arm64":
         targetTriple = "aarch64-apple-darwin";
+        break;
+      default:
+        break;
+    }
+    break;
+  case "win32":
+    switch (arch) {
+      case "x64":
+        targetTriple = "x86_64-pc-windows-msvc";
+        break;
+      case "arm64":
+        targetTriple = "aarch64-pc-windows-msvc";
         break;
       default:
         break;
@@ -101,11 +118,11 @@ function findStarlingExecutable() {
   const devTargetTriples = compatibleTargetTriples(targetTriple);
   const devCandidates = [
     ...devTargetTriples.map((triple) =>
-      path.join(__dirname, "..", "vendor", triple, "bin", "starling"),
+      path.join(__dirname, "..", "vendor", triple, "bin", BINARY_NAME),
     ),
     // direct cargo target dir (in-tree development)
-    path.join(__dirname, "..", "..", "rust", "target", "release", "starling"),
-    path.join(__dirname, "..", "..", "rust", "target", "debug", "starling"),
+    path.join(__dirname, "..", "..", "rust", "target", "release", BINARY_NAME),
+    path.join(__dirname, "..", "..", "rust", "target", "debug", BINARY_NAME),
   ];
   for (const candidate of devCandidates) {
     if (existsSync(candidate)) {
@@ -122,7 +139,7 @@ function findStarlingExecutable() {
         vendorRoot,
         triple,
         "bin",
-        "starling",
+        BINARY_NAME,
       );
       if (existsSync(candidate)) {
         return candidate;

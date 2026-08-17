@@ -35,7 +35,14 @@ case "${TARGET}" in
   aarch64-unknown-linux-musl) PLATFORM=linux; ARCH=arm64; LIBC=musl ;;
   x86_64-apple-darwin) PLATFORM=darwin; ARCH=x64 ;;
   aarch64-apple-darwin) PLATFORM=darwin; ARCH=arm64 ;;
+  x86_64-pc-windows-msvc) PLATFORM=win32; ARCH=x64 ;;
   *) echo "ERROR: Unsupported target: ${TARGET}" >&2; exit 1 ;;
+esac
+
+# Windows binaries carry an .exe suffix.
+case "${TARGET}" in
+  *-windows-*) BIN_NAME="starling.exe" ;;
+  *) BIN_NAME="starling" ;;
 esac
 
 if [[ "${PLATFORM}" == "linux" && "${ARCH}" == "x64" && "${LIBC:-}" == "musl" ]]; then
@@ -44,7 +51,7 @@ else
   PKG_NAME="starling-${PLATFORM}-${ARCH}"
 fi
 VERSION=$(grep -m1 '^version' rust/Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')
-BINARY="rust/target/${TARGET}/release/starling"
+BINARY="rust/target/${TARGET}/release/${BIN_NAME}"
 
 if [[ ! -f "${BINARY}" ]]; then
   echo ">> Building ${TARGET}..."
@@ -55,8 +62,10 @@ STAGE="dist/${PKG_NAME}"
 echo ">> Staging into ${STAGE}/"
 rm -rf "${STAGE}"
 mkdir -p "${STAGE}/vendor/${TARGET}/bin"
-cp "${BINARY}" "${STAGE}/vendor/${TARGET}/bin/starling"
-chmod +x "${STAGE}/vendor/${TARGET}/bin/starling"
+cp "${BINARY}" "${STAGE}/vendor/${TARGET}/bin/${BIN_NAME}"
+if [[ "${BIN_NAME}" != "starling.exe" ]]; then
+  chmod +x "${STAGE}/vendor/${TARGET}/bin/${BIN_NAME}"
+fi
 
 # Generate package.json via node to keep quoting clean.
 PKG_NAME="${PKG_NAME}" VERSION="${VERSION}" PLATFORM="${PLATFORM}" ARCH="${ARCH}" LIBC="${LIBC:-}" STAGE="${STAGE}" node -e '

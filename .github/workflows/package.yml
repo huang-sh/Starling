@@ -51,6 +51,11 @@ jobs:
             target: aarch64-apple-darwin
             artifact: starling-darwin-arm64
             libc: ""
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: starling-win32-x64
+            libc: ""
 
     steps:
       - name: Checkout
@@ -139,7 +144,8 @@ jobs:
 
       - name: Build and stage native binary
         if: matrix.libc != 'glibc'
-        run: npm run build -- --target=${{ matrix.target }}
+        shell: bash
+        run: bash scripts/build.sh --target=${{ matrix.target }}
 
       - name: Verify GNU x64 on GLIBC 2.31
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -151,6 +157,7 @@ jobs:
             /workspace/npm/vendor/${{ matrix.target }}/bin/starling --version
 
       - name: Test staged binary
+        shell: bash
         run: |
           set -euo pipefail
           case "${{ matrix.target }}" in
@@ -160,12 +167,17 @@ jobs:
             x86_64-unknown-linux-musl)
               ./npm/vendor/${{ matrix.target }}/bin/starling --version
               ;;
+            x86_64-pc-windows-msvc)
+              ./npm/vendor/${{ matrix.target }}/bin/starling.exe --version
+              npm run run -- --version
+              ;;
             *)
               npm run run -- --version
               ;;
           esac
 
       - name: Pack native npm package
+        shell: bash
         run: scripts/stage_npm_packages.sh ${{ matrix.target }}
 
       - name: Upload native package

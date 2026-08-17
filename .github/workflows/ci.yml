@@ -73,3 +73,59 @@ jobs:
           name: ci-logs
           path: ci-logs/*.log
           if-no-files-found: ignore
+
+  build-test-windows:
+    name: Build and test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.91.1
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Check TypeScript renderer
+        run: npm run build:ts
+
+      - name: Check npm launcher syntax
+        run: node --check npm/bin/starling.js
+
+      - name: Run JavaScript renderer tests
+        run: npm run test:js
+
+      - name: Run Rust tests
+        working-directory: rust
+        shell: bash
+        env:
+          STARLING_HOME: ${{ runner.temp }}/starling-home
+          STARLING_CONFIG: ${{ runner.temp }}/starling-store.json
+          STARLING_RUNS: ${{ runner.temp }}/starling-runs.json
+        run: |
+          set +e
+          mkdir -p ../ci-logs
+          mkdir -p "$STARLING_HOME"
+          cargo test -- --test-threads=1 > ../ci-logs/cargo-test.log 2>&1
+          status=$?
+          cat ../ci-logs/cargo-test.log
+          exit "$status"
+
+      - name: Upload CI logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs-windows
+          path: ci-logs/*.log
+          if-no-files-found: ignore
