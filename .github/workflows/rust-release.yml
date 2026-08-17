@@ -269,6 +269,12 @@ jobs:
             pkg="starling-${triple}"
             src="artifacts/${pkg}"
             [[ -d "${src}" ]] || { echo "❌ Missing artifact for ${pkg}"; exit 1; }
+            # Idempotent re-runs: a platform package already at this version
+            # (e.g. win32 added after the first 0.4.0 run) is skipped, not an error.
+            if npm view "${pkg}@${VERSION}" version >/dev/null 2>&1; then
+              echo "⏭️ ${pkg}@${VERSION} already published; skipping"
+              continue
+            fi
             mkdir -p "publish/${pkg}"
             tar -xzf "${src}/${pkg}-${VERSION}.tar.gz" -C "publish/${pkg}"
             # Verify checksum
@@ -286,6 +292,11 @@ jobs:
         run: |
           set -euo pipefail
           cd npm
+          # Skip the meta-package when this exact version is already on npm.
+          if npm view "starling-ai@${VERSION}" version >/dev/null 2>&1; then
+            echo "⏭️ starling-ai@${VERSION} already published; skipping"
+            exit 0
+          fi
           # Sync version + optionalDependencies versions
           node -e "
           const fs = require('fs');
