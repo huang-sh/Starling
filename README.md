@@ -13,7 +13,7 @@ Launch, switch, and organize Claude Code, Codex, and Pi sessions with model prof
 Current release: **0.4.0**
 
 - npm: [`starling-ai`](https://www.npmjs.com/package/starling-ai)
-- GitHub Release: [`rust-v0.4.0`](https://github.com/huang-sh/Starling/releases/tag/rust-v0.4.0)
+- GitHub Release: [`v0.4.0`](https://github.com/huang-sh/Starling/releases/tag/v0.4.0)
 - VS Code extension: [`huangsh.starling-ai`](https://marketplace.visualstudio.com/items?itemName=huangsh.starling-ai)
 
 ## Features
@@ -59,7 +59,7 @@ GNU Linux packages are built against a GLIBC 2.31 baseline and the x64 binary is
 The same native archives and sha256 files are attached to the GitHub release:
 
 ```text
-https://github.com/huang-sh/Starling/releases/tag/rust-v0.4.0
+https://github.com/huang-sh/Starling/releases/tag/v0.4.0
 ```
 
 The npm install step also installs the bundled Starling skill to:

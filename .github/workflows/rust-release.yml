@@ -1,6 +1,6 @@
 # Release workflow for the Rust port of Starling.
 #
-# Trigger: push a tag matching `rust-v*.*.*` (e.g. `rust-v0.1.0`).
+# Trigger: push a tag matching `v*.*.*` (e.g. `v0.1.0`).
 #
 # Matrix-builds pre-built native binaries for Linux and macOS targets, stages each into a
 # platform-specific npm tarball (starling-linux-x64, starling-darwin-arm64, …)
@@ -11,7 +11,7 @@ name: rust-release
 on:
   push:
     tags:
-      - "rust-v*.*.*"
+      - "v*.*.*"
   workflow_dispatch:
 
 permissions:
@@ -41,8 +41,8 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            [[ "${GITHUB_REF_NAME}" =~ ^rust-v([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?)$ ]] \
-              || { echo "❌ Tag '${GITHUB_REF_NAME}' doesn't match rust-v*.*.*"; exit 1; }
+            [[ "${GITHUB_REF_NAME}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?)$ ]] \
+              || { echo "❌ Tag '${GITHUB_REF_NAME}' doesn't match v*.*.*"; exit 1; }
             version="${BASH_REMATCH[1]}"
           else
             # workflow_dispatch: read from Cargo.toml
