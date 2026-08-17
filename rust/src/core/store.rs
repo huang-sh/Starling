@@ -63,6 +63,10 @@ fn fresh_store() -> Store {
 
 /// Load the store, applying migrations and ensuring default spaces exist.
 /// Writes back if any migration was applied.
+/// Description stamped on catalogs the auto-archive hook creates; also the
+/// backfill marker that identifies legacy auto pins (origin predates the field).
+pub const AUTO_ARCHIVE_CATALOG_DESCRIPTION: &str = "Auto-created from agent working directory";
+
 pub fn load_store() -> Store {
     let path = store_path();
     let loaded: Option<Store> = read_json(&path);
@@ -166,6 +170,31 @@ pub fn load_store() -> Store {
             updated_at: now,
         });
         migrated = true;
+    }
+
+    // --- Migration: origin backfill for legacy auto-archive pins ---
+    // Pins created by the cwd-named auto-archive before the `origin` field
+    // existed carry an empty origin. Catalogs the hook auto-creates carry a
+    // fixed description marker; a legacy empty-origin pin in one of those
+    // catalogs was auto-archived. Runs once — later loads see origin set.
+    let auto_catalog_ids: std::collections::HashSet<String> = store
+        .spaces
+        .iter()
+        .filter(|s| s.description == AUTO_ARCHIVE_CATALOG_DESCRIPTION)
+        .map(|s| s.id.clone())
+        .collect();
+    if !auto_catalog_ids.is_empty() {
+        for bookmark in store.bookmarks.iter_mut() {
+            if bookmark.origin.is_empty()
+                && bookmark
+                    .space_ids
+                    .iter()
+                    .any(|sid| auto_catalog_ids.contains(sid))
+            {
+                bookmark.origin = "auto".into();
+                migrated = true;
+            }
+        }
     }
 
     if migrated {
@@ -518,6 +547,7 @@ mod tests {
                 project_path: "/p".into(),
                 first_prompt: "hi".into(),
                 notes: vec![],
+                origin: String::new(),
                 space_ids: vec!["cat_0001".into()],
                 created_at: now_iso(),
                 updated_at: now_iso(),
@@ -545,6 +575,7 @@ mod tests {
                     project_path: project.into(),
                     first_prompt: String::new(),
                     notes: vec![],
+                    origin: String::new(),
                     space_ids: vec![],
                     created_at: now_iso(),
                     updated_at: now_iso(),
@@ -570,6 +601,7 @@ mod tests {
                 project_path: "/p".into(),
                 first_prompt: "".into(),
                 notes: vec![],
+                origin: String::new(),
                 space_ids: vec![],
                 created_at: now_iso(),
                 updated_at: now_iso(),
@@ -619,6 +651,7 @@ mod tests {
                 project_path: "/p".into(),
                 first_prompt: "".into(),
                 notes: vec![],
+                origin: String::new(),
                 space_ids: vec!["cat_0099".into(), "cat_0100".into()],
                 created_at: now_iso(),
                 updated_at: now_iso(),

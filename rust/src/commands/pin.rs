@@ -301,7 +301,7 @@ pub(crate) fn archive_session_from_hook(raw: &str, json: bool) {
     ) {
         if let Err(e) = crate::commands::catalog::create(
             &catalog_name,
-            Some("Auto-created from agent working directory".to_string()),
+            Some(crate::core::store::AUTO_ARCHIVE_CATALOG_DESCRIPTION.to_string()),
             None,
             None,
             true,

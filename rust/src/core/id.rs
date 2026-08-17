@@ -61,6 +61,7 @@ mod tests {
             project_path: "/p".into(),
             first_prompt: "".into(),
             notes: vec![],
+            origin: String::new(),
             space_ids: vec![],
             created_at: "t".into(),
             updated_at: "t".into(),

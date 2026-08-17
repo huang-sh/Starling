@@ -352,6 +352,7 @@ mod tests {
             project_path: "/tmp/project".to_string(),
             first_prompt: String::new(),
             notes: Vec::new(),
+            origin: String::new(),
             space_ids: space_ids.into_iter().map(str::to_string).collect(),
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
