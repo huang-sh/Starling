@@ -63,8 +63,15 @@ pub fn handle(cmd: SessionCommand) -> Result<()> {
         SessionCommand::Delete {
             session_id,
             yes,
+            stale,
             json,
-        } => delete_cmd(&session_id, yes, json),
+        } => {
+            if stale {
+                delete_stale_pins(json)
+            } else {
+                delete_cmd(&session_id, yes, json)
+            }
+        }
         SessionCommand::Index(sub) => handle_index(sub),
         SessionCommand::Catalog(sub) => handle_session_catalog(sub),
     }
@@ -682,6 +689,43 @@ fn delete_cmd(session_id: &str, yes: bool, json: bool) -> Result<()> {
     if let Some(b) = &bookmark {
         println!("{}", format!("  Removed pin: {}", b.id).normal());
     }
+    Ok(())
+}
+
+/// Remove every pin whose transcript is gone, in one store rewrite.
+/// A session counts as present when its id is in the session index (the
+/// index is built from a full scan of every provider root, so an id absent
+/// from it has no transcript on disk).
+fn delete_stale_pins(json: bool) -> Result<()> {
+    let index_ids: std::collections::HashSet<String> = load_session_index()
+        .map(|idx| idx.sessions.into_iter().map(|s| s.session_id).collect())
+        .unwrap_or_default();
+    let mut store = crate::core::store::load_store();
+    let before = store.bookmarks.len();
+    store.bookmarks.retain(|b| {
+        let sid = canonical_session_id(&b.session_id, Some(&b.provider));
+        index_ids.contains(&b.session_id) || index_ids.contains(&sid)
+    });
+    let removed = before - store.bookmarks.len();
+    if removed > 0 {
+        if let Err(e) = crate::core::store::save_store(&store) {
+            eprintln!("{}: failed to save store: {}", "error".red(), e);
+            std::process::exit(1);
+        }
+    }
+    let message = if removed == 0 {
+        "No stale pins found".to_string()
+    } else {
+        format!("Removed {} stale pin(s) whose session files are gone", removed)
+    };
+    if json {
+        return super::print_json_result(
+            "session.delete --stale",
+            &message,
+            serde_json::json!({ "removed_pins": removed as u64 }),
+        );
+    }
+    println!("{}", message.green());
     Ok(())
 }
 

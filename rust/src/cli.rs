@@ -219,6 +219,10 @@ pub enum SessionCommand {
         /// Confirm deletion
         #[arg(short = 'y', long)]
         yes: bool,
+        /// Remove every pin whose session file no longer exists (session_id
+        /// is ignored)
+        #[arg(long)]
+        stale: bool,
         /// Output as JSON
         #[arg(long)]
         json: bool,
