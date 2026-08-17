@@ -204,7 +204,8 @@ starling session delete <session-id> --yes
 ### Trajectory
 
 <p align="center">
-  <img src="assets/Starling-trajectory.png" alt="Starling trajectory 台账" width="720">
+  <img src="assets/Starling-trajectory.png" alt="VS Code 扩展中的 Starling trajectory 台账" width="720">
+  <br><em>上图为 VS Code 扩展中的 trajectory 可视化。</em>
 </p>
 
 把 Pi、Claude Code、Codex 会话投影成 turn 粒度的台账：

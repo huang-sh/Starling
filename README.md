@@ -203,7 +203,8 @@ starling session delete <session-id> --yes
 ### Trajectory
 
 <p align="center">
-  <img src="assets/Starling-trajectory.png" alt="Starling trajectory ledger" width="720">
+  <img src="assets/Starling-trajectory.png" alt="Starling trajectory ledger in the VS Code extension" width="720">
+  <br><em>Trajectory ledger as visualized by the VS Code extension.</em>
 </p>
 
 Project any Pi, Claude Code, or Codex session into a turn-aware ledger:
