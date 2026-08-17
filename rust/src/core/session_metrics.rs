@@ -941,6 +941,12 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
     let mut activity_signal: Option<String> = None;
     let mut activity_since_ms: u64 = 0;
     let mut latest_entry_ms: u64 = 0;
+    // Only message/tool work counts as session "activity" for the running
+    // heuristic: a freshly created transcript (pi `session` header, claude
+    // mode/snapshot lines) is creation, not work — crediting it (directly or
+    // via the mtime fallback) made brand-new idle sessions show "running"
+    // for the whole 20s grace window.
+    let mut saw_work_entry = false;
     let mut current_task = String::new();
     let mut context_window_override: Option<u64> = None;
     let mut token_history: Vec<u64> = Vec::new();
@@ -1043,6 +1049,9 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
             || entry_type == Some("function_call_output")
             || is_codex_function_output
             || (is_pi_message && matches!(nested_message_role, Some("user") | Some("toolResult")));
+        if is_assistant || is_user || is_codex_event {
+            saw_work_entry = true;
+        }
 
         let mut tool_uses: Vec<(Option<String>, String, Value)> = Vec::new();
         if is_codex_event {
@@ -1434,10 +1443,15 @@ fn reduce_entries(entries: &[JsonlEntry], last_activity_ms: u64, truncated: bool
         inferred_compaction_count
     };
 
+    // Only fall back to file mtime when the transcript contains work entries
+    // that simply lack timestamps; a header-only fresh transcript yields 0 so
+    // "recent transcript activity" cannot fire for mere creation.
     let effective_last_activity_ms = if latest_entry_ms > 0 {
         latest_entry_ms
-    } else {
+    } else if saw_work_entry {
         last_activity_ms
+    } else {
+        0
     };
     let mut skill_usage_entries = skill_usage
         .into_values()
