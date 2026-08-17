@@ -223,15 +223,35 @@ pub(crate) fn archive_session_from_hook(raw: &str, json: bool) {
         return;
     };
     // pin::run exits the process on lookup failure; probe first so the
-    // hook can stay best-effort (a not-yet-flushed transcript is skippable,
-    // the next event retries).
+    // hook can stay best-effort. Claude fires SessionStart BEFORE creating
+    // the transcript, so discovery cannot see the session yet — but the
+    // payload carries transcript_path: pre-create the file so the pin has
+    // something to attach to (claude appends to it; an empty touch is the
+    // same state it would be in anyway). The next event retries naturally.
     if crate::commands::session::resolve_session_meta(session_id).is_none() {
-        eprintln!(
-            "{}: starling hook: session not resolvable yet: {}",
-            "error".red(),
-            short_session_id(session_id)
-        );
-        return;
+        let precreated = payload
+            .get("transcript_path")
+            .and_then(|v| v.as_str())
+            .filter(|p| !p.trim().is_empty())
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+            .and_then(|p| {
+                std::fs::create_dir_all(p.parent()?).ok()?;
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&p)
+                    .ok()
+                    .map(|_| p)
+            });
+        if precreated.is_none() {
+            eprintln!(
+                "{}: starling hook: session not resolvable yet: {}",
+                "error".red(),
+                short_session_id(session_id)
+            );
+            return;
+        }
     }
     // Ensure the catalog exists (quietly), then pin into it. `pin --to`
     // already no-ops when the bookmark is present and assigned.
