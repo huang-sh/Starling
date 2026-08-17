@@ -35,7 +35,7 @@ case "${TARGET}" in
   aarch64-unknown-linux-musl) PLATFORM=linux; ARCH=arm64; LIBC=musl ;;
   x86_64-apple-darwin) PLATFORM=darwin; ARCH=x64 ;;
   aarch64-apple-darwin) PLATFORM=darwin; ARCH=arm64 ;;
-  x86_64-pc-windows-msvc) PLATFORM=win32; ARCH=x64 ;;
+  x86_64-pc-windows-msvc) PLATFORM=win32; ARCH=x64; PKG_SUFFIX="windows-x64" ;;
   *) echo "ERROR: Unsupported target: ${TARGET}" >&2; exit 1 ;;
 esac
 
@@ -45,7 +45,9 @@ case "${TARGET}" in
   *) BIN_NAME="starling" ;;
 esac
 
-if [[ "${PLATFORM}" == "linux" && "${ARCH}" == "x64" && "${LIBC:-}" == "musl" ]]; then
+if [[ -n "${PKG_SUFFIX:-}" ]]; then
+  PKG_NAME="starling-${PKG_SUFFIX}"
+elif [[ "${PLATFORM}" == "linux" && "${ARCH}" == "x64" && "${LIBC:-}" == "musl" ]]; then
   PKG_NAME="starling-${PLATFORM}-${ARCH}-musl"
 else
   PKG_NAME="starling-${PLATFORM}-${ARCH}"
