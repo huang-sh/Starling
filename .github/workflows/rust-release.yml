@@ -265,7 +265,7 @@ jobs:
           NPM_TAG: ${{ needs.tag-check.outputs.npm_tag }}
         run: |
           set -euo pipefail
-          for triple in linux-x64 linux-x64-musl linux-arm64 darwin-x64 darwin-arm64 win32-x64; do
+          for triple in linux-x64 linux-x64-musl linux-arm64 darwin-x64 darwin-arm64 windows-x64; do
             pkg="starling-${triple}"
             src="artifacts/${pkg}"
             [[ -d "${src}" ]] || { echo "❌ Missing artifact for ${pkg}"; exit 1; }
