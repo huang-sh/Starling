@@ -24,6 +24,18 @@ pub fn run(
     current: bool,
     json: bool,
 ) -> Result<()> {
+    run_with_origin(session_id, title, tags, to, current, json, "manual")
+}
+
+pub(crate) fn run_with_origin(
+    session_id: Option<String>,
+    title: Option<String>,
+    tags: Option<String>,
+    to: Option<String>,
+    current: bool,
+    json: bool,
+    origin: &str,
+) -> Result<()> {
     if session_id.is_none() && !current {
         eprintln!(
             "{}: pass a session id, or use --current for the most recent",
@@ -119,6 +131,7 @@ pub fn run(
             project_path: meta.project_path.clone(),
             first_prompt: meta.first_prompt.clone(),
             notes: vec![],
+            origin: origin.to_string(),
             space_ids: vec![],
             created_at: crate::constants::now_iso(),
             updated_at: crate::constants::now_iso(),
@@ -297,13 +310,14 @@ pub(crate) fn archive_session_from_hook(raw: &str, json: bool) {
             return;
         }
     }
-    match run(
+    match run_with_origin(
         Some(session_id.to_string()),
         None,
         None,
         Some(catalog_name),
         false,
         json,
+        "auto",
     ) {
         Ok(()) => trace(&format!("pinned sid={session_id}")),
         Err(e) => {

@@ -21,6 +21,11 @@ pub struct Bookmark {
     pub first_prompt: String,
     pub notes: Vec<Note>,
     pub space_ids: Vec<String>,
+    /// How the pin was created: "manual" (starling pin / session meta) or
+    /// "auto" (cwd-named auto-archive from agent hooks). Absent = manual
+    /// for stores predating the field.
+    #[serde(default)]
+    pub origin: String,
     pub created_at: String,
     pub updated_at: String,
 }

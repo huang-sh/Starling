@@ -684,17 +684,20 @@ impl MonitorSnapshot {
     fn from_rows(rows: &[Row]) -> Self {
         let all: Vec<RowJson> = rows.iter().map(RowJson::from).collect();
         let active = all.iter().filter(|r| is_active_status(&r.status)).count();
-        let pinned: Vec<RowJson> = all.iter().filter(|r| r.pinned).cloned().collect();
-        let recent: Vec<RowJson> = all.iter().filter(|r| !r.pinned).cloned().collect();
+        let pinned_total = all.iter().filter(|r| r.pinned).count();
         MonitorSnapshot {
             schema_version: 1,
             generated_at_ms: now_ms(),
-            pinned_total: pinned.len(),
-            recent_total: recent.len(),
+            pinned_total,
+            recent_total: all.len() - pinned_total,
             active,
             rows: all,
-            pinned,
-            recent,
+            // Legacy fields: consumers read `rows` and fall back to these
+            // only on old CLI builds. Serializing every row three times
+            // tripled payload size (≈6MB/frame at 500 rows); empty arrays
+            // keep the schema shape without the duplication.
+            pinned: Vec::new(),
+            recent: Vec::new(),
         }
     }
 }

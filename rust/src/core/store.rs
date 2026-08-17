@@ -267,6 +267,7 @@ fn apply_patch(source: &Bookmark, patch: BookmarkPatch) -> Bookmark {
             .unwrap_or_else(|| source.first_prompt.clone()),
         notes: patch.notes.unwrap_or_else(|| source.notes.clone()),
         space_ids: patch.space_ids.unwrap_or_else(|| source.space_ids.clone()),
+        origin: source.origin.clone(),
         created_at: source.created_at.clone(),
         updated_at: now_iso(),
     }

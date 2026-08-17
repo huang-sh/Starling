@@ -1538,17 +1538,25 @@ struct CacheEntry {
 
 static CACHE: Lazy<Mutex<HashMap<PathBuf, CacheEntry>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
-/// Sessions whose transcripts are candidates for live metrics. Once this
-/// many cached entries accumulate, the map is dropped wholesale — a blunt
-/// reset that also evicts sessions that scrolled out of view. The watch
-/// loop used to clear every iteration, which re-parsed every transcript
-/// each second; mtime+size keying invalidates changed files on its own.
-const CACHE_RESET_CAPACITY: usize = 512;
+/// Sessions whose transcripts are candidates for live metrics. When the
+/// map grows past this, the OLDEST HALF is evicted (by cached mtime) —
+/// a cliff-free trim that keeps the hot working set. The watch loop used
+/// to clear every iteration, which re-parsed every transcript each
+/// second; mtime+size keying invalidates changed files on its own.
+const CACHE_SOFT_CAPACITY: usize = 512;
 
 pub fn clear_session_metrics_cache() {
     if let Ok(mut c) = CACHE.lock() {
-        if c.len() >= CACHE_RESET_CAPACITY {
-            c.clear();
+        if c.len() >= CACHE_SOFT_CAPACITY {
+            let mut keys: Vec<(u64, PathBuf)> = c
+                .iter()
+                .map(|(path, entry)| (entry.mtime_ms, path.clone()))
+                .collect();
+            keys.sort_unstable();
+            let evict = c.len() - CACHE_SOFT_CAPACITY / 2;
+            for (_, path) in keys.into_iter().take(evict) {
+                c.remove(&path);
+            }
         }
     }
 }

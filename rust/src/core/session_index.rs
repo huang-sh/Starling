@@ -93,10 +93,31 @@ pub fn session_index_path() -> PathBuf {
 
 pub fn load_session_index() -> Option<SessionIndex> {
     let path = session_index_path();
+    // Memoize: the index is a multi-MB JSON that monitor parses 2-3× per
+    // frame; mtime-keyed reuse makes repeat loads a stat. Rebuild/refresh
+    // bumps the file, invalidating naturally.
+    static MEMO: once_cell::sync::Lazy<
+        std::sync::Mutex<Option<(u64, Option<SessionIndex>)>>,
+    > = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
+    let mtime = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64);
+    if let (Some(mtime), Ok(guard)) = (mtime, MEMO.lock()) {
+        if let Some((cached_mtime, cached)) = guard.as_ref() {
+            if *cached_mtime == mtime {
+                return cached.clone();
+            }
+        }
+    }
     let raw = std::fs::read_to_string(&path).ok()?;
     let parsed: SessionIndex = serde_json::from_str(&raw).ok()?;
     if parsed.version != SESSION_INDEX_VERSION {
         return None;
+    }
+    if let (Some(mtime), Ok(mut guard)) = (mtime, MEMO.lock()) {
+        *guard = Some((mtime, Some(parsed.clone())));
     }
     Some(parsed)
 }

@@ -1410,6 +1410,7 @@ fn assign_session_to_catalog(
             first_prompt,
             notes: vec![],
             space_ids: vec![],
+            origin: "manual".to_string(),
             created_at: now_iso(),
             updated_at: now_iso(),
         };

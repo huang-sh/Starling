@@ -476,6 +476,7 @@ fn ensure_session_bookmark(
         first_prompt: meta.first_prompt.clone(),
         notes: vec![],
         space_ids: vec![],
+        origin: "manual".to_string(),
         created_at: now_iso(),
         updated_at: now_iso(),
     };
