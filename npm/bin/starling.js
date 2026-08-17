@@ -30,8 +30,8 @@ const PLATFORM_PACKAGE_BY_TARGET = {
   "aarch64-unknown-linux-gnu": "starling-linux-arm64",
   "x86_64-apple-darwin": "starling-darwin-x64",
   "aarch64-apple-darwin": "starling-darwin-arm64",
-  "x86_64-pc-windows-msvc": "starling-win32-x64",
-  "aarch64-pc-windows-msvc": "starling-win32-arm64",
+  "x86_64-pc-windows-msvc": "starling-windows-x64",
+  "aarch64-pc-windows-msvc": "starling-windows-arm64",
 };
 
 const IS_WINDOWS = process.platform === "win32";

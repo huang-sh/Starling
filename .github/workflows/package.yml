@@ -54,7 +54,7 @@ jobs:
           - name: windows-x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: starling-win32-x64
+            artifact: starling-windows-x64
             libc: ""
 
     steps:
