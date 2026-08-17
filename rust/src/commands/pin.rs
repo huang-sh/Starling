@@ -244,13 +244,20 @@ pub(crate) fn archive_session_from_hook(raw: &str, json: bool) {
         .get("cwd")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let Some(catalog_name) = std::path::Path::new(cwd)
+    let Some(file_name) = std::path::Path::new(cwd)
         .file_name()
         .and_then(|n| n.to_str())
-        .map(|n| n.to_string())
     else {
         return;
     };
+    // Hidden directories (dotfiles like /data20T/.tmp, ~/.cache) make poor
+    // catalog names and are usually scratch/tooling cwds — skip auto-archive
+    // there entirely rather than littering the catalog tree.
+    if file_name.starts_with('.') {
+        trace(&format!("skip hidden cwd={cwd}"));
+        return;
+    }
+    let catalog_name = file_name.to_string();
     // pin::run exits the process on lookup failure; probe first so the
     // hook can stay best-effort. Claude fires SessionStart BEFORE creating
     // the transcript, and resolving an unknown id costs ~9s of full provider
