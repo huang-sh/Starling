@@ -94,7 +94,7 @@ fn parse_tags(tags: Option<String>) -> Vec<String> {
         .collect()
 }
 
-fn create(
+pub(crate) fn create(
     name: &str,
     description: Option<String>,
     tags: Option<String>,

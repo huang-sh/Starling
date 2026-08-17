@@ -50,6 +50,15 @@ pub enum Command {
         json: bool,
     },
 
+    /// Internal: Claude-compatible hook endpoint — reads JSON from stdin and
+    /// auto-archives the session to a catalog named after its cwd
+    #[command(hide = true)]
+    Hook {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Create, list, and organize catalogs of sessions
     #[command(subcommand, alias = "space", alias = "sp", alias = "cat")]
     Catalog(CatalogCommand),

@@ -178,8 +178,80 @@ pub fn run(
     Ok(())
 }
 
-// Silence unused
-#[allow(dead_code)]
-fn _anchor_filters() -> Vec<Bookmark> {
-    list_bookmarks(BookmarkFilter::default())
+/// Claude-compatible hook endpoint: read the event JSON from stdin and
+/// archive the session into a catalog named after its working directory.
+/// Designed for `codex` config.toml hooks (`codex_hooks = true`), where
+/// SessionStart delivers {session_id, cwd, ...}. Also works with Claude
+/// Code settings.json hooks, whose payload carries the same fields.
+/// Best-effort: failures print to stderr and exit 0 so the host agent is
+/// never disturbed.
+// ponytail: catalog name is the cwd basename — distinct projects sharing a
+// basename land in one catalog; switch to hierarchical paths if that bites.
+pub fn hook_run(json: bool) -> Result<()> {
+    let mut raw = String::new();
+    if std::io::Read::read_to_string(&mut std::io::stdin(), &mut raw).is_err() {
+        return Ok(());
+    }
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(raw.trim()) else {
+        return Ok(());
+    };
+    let Some(session_id) = payload.get("session_id").and_then(|v| v.as_str()) else {
+        return Ok(());
+    };
+    if session_id.trim().is_empty() {
+        return Ok(());
+    }
+    let cwd = payload
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let Some(catalog_name) = std::path::Path::new(cwd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.to_string())
+    else {
+        return Ok(());
+    };
+    // pin::run exits the process on lookup failure; probe first so the
+    // hook can stay best-effort (a not-yet-flushed transcript is skippable,
+    // the next event retries).
+    if crate::commands::session::resolve_session_meta(session_id).is_none() {
+        eprintln!(
+            "{}: starling hook: session not resolvable yet: {}",
+            "error".red(),
+            short_session_id(session_id)
+        );
+        return Ok(());
+    }
+    // Ensure the catalog exists (quietly), then pin into it. `pin --to`
+    // already no-ops when the bookmark is present and assigned.
+    if !matches!(
+        resolve_catalog_reference(&catalog_name),
+        crate::core::catalog_resolver::CatalogResolution::Found(_)
+    ) {
+        if let Err(e) = crate::commands::catalog::create(
+            &catalog_name,
+            Some("Auto-created from agent working directory".to_string()),
+            None,
+            None,
+            true,
+        ) {
+            eprintln!("{}: starling hook: {}", "error".red(), e);
+            return Ok(());
+        }
+    }
+    match run(
+        Some(session_id.to_string()),
+        None,
+        None,
+        Some(catalog_name),
+        false,
+        json,
+    ) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            eprintln!("{}: starling hook: {}", "error".red(), e);
+            Ok(())
+        }
+    }
 }

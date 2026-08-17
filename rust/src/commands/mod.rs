@@ -28,6 +28,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             current,
             json,
         } => pin::run(session_id, title, tags, to, current, json),
+        Command::Hook { json } => pin::hook_run(json),
         Command::Catalog(c) => catalog::handle(c),
         Command::Project(c) => project::handle(c),
         Command::Run(c) => run::handle(c),
