@@ -33,7 +33,7 @@ use crate::core::session_metrics::{
 use crate::core::store::{list_bookmarks, list_spaces, BookmarkFilter};
 use crate::types::{Bookmark, RunProvider, RunRecord, SessionMeta};
 
-const WATCH_INTERVAL_MS: u64 = 1000;
+const WATCH_INTERVAL_MS: u64 = 500;
 const EDGE_RUNNING_LEASE_MS: u64 = 15 * 1000;
 const HOOK_RUNNING_STALE_MS: u64 = 30 * 60 * 1000;
 const LIVE_RUNNING_STALE_MS: u64 = 30 * 60 * 1000;

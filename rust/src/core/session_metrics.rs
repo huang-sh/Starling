@@ -1532,14 +1532,24 @@ fn read_tail_entries(path: &Path, size: u64) -> Vec<JsonlEntry> {
 
 struct CacheEntry {
     mtime_ms: u64,
+    size: u64,
     result: SessionLive,
 }
 
 static CACHE: Lazy<Mutex<HashMap<PathBuf, CacheEntry>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// Sessions whose transcripts are candidates for live metrics. Once this
+/// many cached entries accumulate, the map is dropped wholesale — a blunt
+/// reset that also evicts sessions that scrolled out of view. The watch
+/// loop used to clear every iteration, which re-parsed every transcript
+/// each second; mtime+size keying invalidates changed files on its own.
+const CACHE_RESET_CAPACITY: usize = 512;
+
 pub fn clear_session_metrics_cache() {
     if let Ok(mut c) = CACHE.lock() {
-        c.clear();
+        if c.len() >= CACHE_RESET_CAPACITY {
+            c.clear();
+        }
     }
 }
 
@@ -1566,7 +1576,7 @@ pub fn get_session_live_metrics(path: &Path) -> SessionLive {
     {
         let cache = CACHE.lock().unwrap();
         if let Some(c) = cache.get(path) {
-            if c.mtime_ms == mtime {
+            if c.mtime_ms == mtime && c.size == size {
                 return c.result.clone();
             }
         }
@@ -1600,6 +1610,7 @@ pub fn get_session_live_metrics(path: &Path) -> SessionLive {
             path.to_path_buf(),
             CacheEntry {
                 mtime_ms: mtime,
+                size,
                 result: result.clone(),
             },
         );
