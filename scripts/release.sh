@@ -21,7 +21,7 @@ sed -i.bak -E "s/^version = \"[^\"]+\"/version = \"${VERSION}\"/" rust/Cargo.tom
 # a stale lock entry there fails the release).
 (cd rust && cargo update --workspace --quiet)
 
-git add rust/Cargo.toml
+git add rust/Cargo.toml rust/Cargo.lock
 git commit -m "release: v${VERSION}"
 git tag "v${VERSION}"
 echo ">> v${VERSION} committed and tagged. Push with: git push && git push --tags"
