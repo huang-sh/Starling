@@ -241,7 +241,8 @@ fn record_agent_hook_event(
     // gets via `starling hook`, delivered through the hooks the postinstall
     // already registers for Claude — no extra configuration needed.
     if event == "SessionStart" {
-        crate::commands::pin::archive_session_from_hook(&raw, false);
+        let provider = provider.trim().to_lowercase();
+        crate::commands::pin::archive_session_from_hook(&raw, &provider, false);
     }
     let context_usage = context_window_usage_from_hook(&value);
     let model = model_from_hook(&value);

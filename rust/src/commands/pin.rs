@@ -205,7 +205,19 @@ pub fn hook_run(json: bool) -> Result<()> {
     if std::io::Read::read_to_string(&mut std::io::stdin(), &mut raw).is_err() {
         return Ok(());
     }
-    archive_session_from_hook(&raw, json);
+    // Claude's native hook payloads carry no provider field; the Pi reporter
+    // sets provider: "pi". The provider decides transcript pre-creation
+    // (see archive_session_from_hook).
+    let provider = serde_json::from_str::<serde_json::Value>(raw.trim())
+        .ok()
+        .and_then(|value| {
+            value
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "claude".to_string());
+    archive_session_from_hook(&raw, &provider, json);
     Ok(())
 }
 
@@ -214,7 +226,7 @@ pub fn hook_run(json: bool) -> Result<()> {
 /// reading so `top hook` (claude) and `hook` (codex) share one implementation.
 // ponytail: catalog name is the cwd basename — distinct projects sharing a
 // basename land in one catalog; switch to hierarchical paths if that bites.
-pub(crate) fn archive_session_from_hook(raw: &str, json: bool) {
+pub(crate) fn archive_session_from_hook(raw: &str, provider: &str, json: bool) {
     // Flight recorder: claude swallows hook stderr, so append a one-line
     // trace to <starling-home>/logs/hook.log for diagnosis (best-effort).
     let trace = |msg: &str| {
@@ -273,8 +285,15 @@ pub(crate) fn archive_session_from_hook(raw: &str, json: bool) {
         .filter(|p| !p.trim().is_empty())
         .map(std::path::PathBuf::from);
     let mut precreated = false;
+    // Pre-creation is a Claude-only optimization: Claude fires SessionStart
+    // before creating its transcript and later APPENDS to whatever exists.
+    // Pi creates its transcript lazily with O_EXCL ("wx") on the first
+    // assistant message — touching the file here makes pi fail with EEXIST
+    // on its first persist. Pi sessions archive via the reporter at
+    // agent_end instead, when the transcript already exists.
+    let may_precreate = provider != "pi";
     if let Some(p) = transcript_path.as_ref().filter(|p| {
-        p.extension().and_then(|e| e.to_str()) == Some("jsonl")
+        may_precreate && p.extension().and_then(|e| e.to_str()) == Some("jsonl")
     }) {
         if !p.exists() {
             precreated = std::fs::create_dir_all(p.parent().unwrap_or(std::path::Path::new("/")))
@@ -331,5 +350,38 @@ pub(crate) fn archive_session_from_hook(raw: &str, json: bool) {
             trace(&format!("pin-failed sid={session_id} err={e}"));
             eprintln!("{}: starling hook: {}", "error".red(), e);
         }
+    }
+}
+
+#[cfg(test)]
+mod archive_hook_tests {
+    use super::archive_session_from_hook;
+
+    fn payload(transcript: &str, provider: Option<&str>) -> String {
+        let provider_json = match provider {
+            Some(p) => format!("{p:?}"),
+            None => "null".to_string(),
+        };
+        format!(
+            r#"{{"session_id":"Sess_01","transcript_path":{transcript:?},"cwd":"/tmp/proj","provider":{provider_json}}}"#
+        )
+    }
+
+    // Pi owns its transcript: it creates the file lazily with O_EXCL on the
+    // first assistant message. Pre-creating an empty file here made every
+    // managed `starling run pi` fail its first persist with EEXIST.
+    #[test]
+    fn pi_hook_never_precreates_transcript() {
+        let dir = std::env::temp_dir().join(format!("starling-test-pi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("2026-08-19T09-54-12-531Z_01a01971.jsonl");
+
+        archive_session_from_hook(&payload(transcript.to_str().unwrap(), Some("pi")), "pi", false);
+        assert!(
+            !transcript.exists(),
+            "pi hook must not touch the transcript before pi creates it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
