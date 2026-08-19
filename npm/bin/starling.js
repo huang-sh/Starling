@@ -384,7 +384,7 @@ function configureBundledPi(childEnv) {
 }
 
 function configurePiSdkHost(childEnv) {
-  const hostEntry = path.join(__dirname, "..", "lib", "agent-host", "main.js");
+  const hostEntry = path.join(__dirname, "..", "lib", "agents", "pi", "main.js");
   if (!existsSync(hostEntry) || !nodeSupportsBundledPi(process.versions.node)) return;
   const defaults = bundledPiSdkEnvironment(process.execPath, hostEntry);
   if (!childEnv.STARLING_PI_SDK_HOST?.trim()) {

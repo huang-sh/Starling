@@ -1,11 +1,11 @@
-import { createExtensionUiBridge } from "../agent-host/extension-ui.js";
-import { createPiSdkAdapter, loadPiSdk } from "../agent-host/sdk-adapter.js";
+import { createExtensionUiBridge } from "../agents/pi/extension-ui.js";
+import { createPiSdkAdapter, loadPiSdk } from "../agents/pi/sdk-adapter.js";
 import {
   type AgentSdkSession,
   type JsonObject,
   errorMessage,
   isJsonObject,
-} from "../agent-host/types.js";
+} from "../agents/pi/types.js";
 import type {
   ChatSession,
   ChatSessionRequest,

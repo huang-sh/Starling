@@ -7,7 +7,7 @@ use colored::*;
 
 use crate::cli::*;
 use crate::constants::now_iso;
-use crate::core::catalog_resolver::{catalog_path, resolve_catalog_reference};
+use crate::core::catalog_resolver::resolve_catalog_reference;
 use crate::core::discovery::{
     canonical_session_id, find_pi_session_by_path, find_session_by_id, find_sessions,
     session_scope_key, Provider,
@@ -15,12 +15,12 @@ use crate::core::discovery::{
 use crate::core::format::format_session_table;
 use crate::core::id::{generate_bookmark_id, generate_note_id};
 use crate::core::runs::{
-    get_latest_run_for_session, get_run_status_for_session, reconcile_stale_runs, status_badge,
+    get_latest_run_for_session, get_run_status_for_session, reconcile_stale_runs,
     RunStatus,
 };
 use crate::core::session_display::short_session_id;
 use crate::core::session_index::{
-    clear_session_index, is_session_index_stale, load_session_index, lookup_indexed_sessions,
+    clear_session_index, load_session_index, lookup_indexed_sessions,
     rebuild_session_index, remove_session_from_index, session_index_path,
 };
 use crate::core::store::{

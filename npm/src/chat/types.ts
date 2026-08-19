@@ -2,7 +2,7 @@ import type {
   AgentHostLaunchOptions,
   AgentSdkAdapter,
   JsonObject,
-} from "../agent-host/types.js";
+} from "../agents/pi/types.js";
 
 /** A command accepted by an in-process Starling agent session. */
 export type ChatSessionRequest = JsonObject & { type: string };

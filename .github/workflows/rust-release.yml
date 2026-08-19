@@ -291,6 +291,11 @@ jobs:
           NPM_TAG: ${{ needs.tag-check.outputs.npm_tag }}
         run: |
           set -euo pipefail
+          # Build lib/ first: package.json "files" silently omits missing
+          # paths, so publishing without this step shipped a lib-less tarball
+          # (starling-ai@0.5.0 lost the SDK host this way).
+          npm ci --silent
+          npm run build:ts --silent
           cd npm
           # Skip the meta-package when this exact version is already on npm.
           if npm view "starling-ai@${VERSION}" version >/dev/null 2>&1; then

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::constants::{
     claude_session_roots, codex_session_roots, default_starling_home, now_iso, pi_session_roots,
 };
-use crate::core::fs_utils::{atomic_write_json, read_json};
+use crate::core::fs_utils::atomic_write_json;
 use crate::core::session::{
     extract_claude_session_meta, extract_codex_session_meta, extract_pi_session_meta,
     parse_jsonl_head,

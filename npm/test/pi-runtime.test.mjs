@@ -13,9 +13,9 @@ import {
 
 test("describes the Starling SDK host as Node executable plus host entry", () => {
   assert.deepEqual(
-    bundledPiSdkEnvironment("/opt/node", "/pkg/lib/agent-host/main.js"),
+    bundledPiSdkEnvironment("/opt/node", "/pkg/lib/agents/pi/main.js"),
     {
-      STARLING_PI_SDK_HOST: "/pkg/lib/agent-host/main.js",
+      STARLING_PI_SDK_HOST: "/pkg/lib/agents/pi/main.js",
       STARLING_PI_SDK_NODE: "/opt/node",
     },
   );

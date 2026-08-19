@@ -15,7 +15,6 @@ use chrono::{DateTime, Utc};
 use colored::*;
 use serde_json::{json, Map, Value};
 
-use crate::cli::*;
 use crate::core::discovery::{find_session_by_id, find_sessions};
 use crate::core::session::parse_jsonl_file;
 

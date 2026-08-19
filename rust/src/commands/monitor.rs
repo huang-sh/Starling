@@ -33,6 +33,8 @@ use crate::core::session_metrics::{
 use crate::core::store::{list_bookmarks, list_spaces, BookmarkFilter};
 use crate::types::{Bookmark, RunProvider, RunRecord, SessionMeta};
 
+mod hub;
+
 const WATCH_INTERVAL_MS: u64 = 500;
 const EDGE_RUNNING_LEASE_MS: u64 = 15 * 1000;
 const HOOK_RUNNING_STALE_MS: u64 = 30 * 60 * 1000;
@@ -82,7 +84,7 @@ fn render_monitor(cmd: MonitorCommand) -> Result<()> {
     let include_unpinned = include_unpinned_sessions(&cmd, catalog_filter);
 
     if cmd.json && cmd.watch {
-        return watch_json(catalog_filter, include_unpinned, limit, agent_filter, sort);
+        return hub::watch_json(catalog_filter, include_unpinned, limit, agent_filter, sort);
     }
 
     let rows = build_snapshot(catalog_filter, include_unpinned, limit, agent_filter, sort)?;
@@ -2559,42 +2561,6 @@ mod session_identity_tests {
     }
 }
 
-fn watch_json(
-    catalog_filter: Option<&str>,
-    include_unpinned: bool,
-    pinned_limit: usize,
-    agent_filter: Option<MonitorAgent>,
-    sort: MonitorSort,
-) -> Result<()> {
-    let interval_ms: u64 = WATCH_INTERVAL_MS;
-    install_ctrlc_handler();
-    reset_cpu_sampler();
-
-    while !ctrlc_flag() {
-        clear_session_metrics_cache();
-        let rows = build_snapshot(
-            catalog_filter,
-            include_unpinned,
-            pinned_limit,
-            agent_filter,
-            sort,
-        )?;
-        let json = serde_json::to_string(&MonitorSnapshot::from_rows(&rows))?;
-        if !write_stdout_line(&json)? {
-            break;
-        }
-
-        let mut remaining = interval_ms;
-        while remaining > 0 && !ctrlc_flag() {
-            let step = remaining.min(100);
-            std::thread::sleep(Duration::from_millis(step));
-            remaining = remaining.saturating_sub(step);
-        }
-    }
-
-    Ok(())
-}
-
 fn write_stdout_line(line: &str) -> Result<bool> {
     let mut stdout = io::stdout();
     match writeln!(stdout, "{line}") {
@@ -2683,7 +2649,7 @@ pub fn install_ctrlc_handler() {
         extern "C" fn handle_sigint(_sig: i32) {
             CTRL_C.store(true, Ordering::SeqCst);
         }
-        signal(2 /* SIGINT */, handle_sigint as usize);
+        signal(2 /* SIGINT */, handle_sigint as *const () as usize);
     }
 }
 

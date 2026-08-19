@@ -32,11 +32,11 @@ fn as_number(value: &Value) -> Option<f64> {
     }
 }
 
-fn as_usize_field(obj: &serde_json::Map<String, Value>, key: &str) -> Option<u64> {
+pub(crate) fn as_usize_field(obj: &serde_json::Map<String, Value>, key: &str) -> Option<u64> {
     obj.get(key).and_then(as_number).map(|f| f as u64)
 }
 
-fn merge_token_usage(target: &mut TokenUsage, source: &TokenUsage) {
+pub(crate) fn merge_token_usage(target: &mut TokenUsage, source: &TokenUsage) {
     if let Some(v) = source.input_tokens {
         target.input_tokens = Some(v);
     }
@@ -62,7 +62,7 @@ fn has_non_zero(usage: Option<&TokenUsage>) -> bool {
         .unwrap_or(false)
 }
 
-fn add_token_usage(target: &mut TokenUsage, source: &TokenUsage) {
+pub(crate) fn add_token_usage(target: &mut TokenUsage, source: &TokenUsage) {
     if let Some(v) = source.input_tokens {
         target.input_tokens = Some(target.input_tokens.unwrap_or(0) + v);
     }
@@ -197,7 +197,7 @@ pub fn extract_token_usage(entry: &JsonlEntry) -> Option<TokenUsage> {
     extract_token_usage_from_value(entry.value(), 0)
 }
 
-fn has_cumulative_token_usage(value: &Value, depth: u32) -> bool {
+pub(crate) fn has_cumulative_token_usage(value: &Value, depth: u32) -> bool {
     if depth > 16 {
         return false;
     }
@@ -253,7 +253,7 @@ pub fn parse_jsonl_file(path: &Path) -> Vec<JsonlEntry> {
     parse_jsonl_head(path, usize::MAX)
 }
 
-fn first_prompt_from_message(msg: &Value) -> String {
+pub(crate) fn first_prompt_from_message(msg: &Value) -> String {
     let content = match msg.get("content") {
         Some(c) => c,
         None => return String::new(),
@@ -275,7 +275,7 @@ fn first_prompt_from_message(msg: &Value) -> String {
     String::new()
 }
 
-fn basename_no_ext(path: &Path) -> String {
+pub(crate) fn basename_no_ext(path: &Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default()
@@ -372,313 +372,16 @@ fn extract_pi_entry_usage(entry: &JsonlEntry) -> Option<TokenUsage> {
     extract_pi_usage_from_object(usage)
 }
 
-/// Extract metadata from a Pi coding-agent v3 JSONL transcript.
-///
-/// Pi stores a session header followed by tree-shaped entries. Metadata is
-/// intentionally read defensively: unknown entry kinds are ignored, the latest
-/// valid session name/model wins, and custom session ID case is preserved.
-pub fn extract_pi_session_meta(
-    entries: &[JsonlEntry],
-    file_path: &Path,
-    modified_at: &str,
-) -> SessionMeta {
-    let mut session_id = String::new();
-    let mut model = String::new();
-    let mut project_path = String::new();
-    let mut first_prompt = String::new();
-    let mut custom_title: Option<String> = None;
-    let mut created_at = String::new();
-    let mut token_usage = TokenUsage {
-        input_tokens: None,
-        output_tokens: None,
-        total_tokens: None,
-        cache_tokens: None,
-    };
-    let mut has_token_usage = false;
-
-    for entry in entries {
-        let Some(obj) = entry.as_record() else {
-            continue;
-        };
-
-        match entry.type_str() {
-            Some("session") => {
-                if session_id.is_empty() {
-                    if let Some(id) = obj.get("id").and_then(Value::as_str) {
-                        if !id.is_empty() {
-                            session_id = id.to_string();
-                        }
-                    }
-                }
-                if project_path.is_empty() {
-                    if let Some(cwd) = obj.get("cwd").and_then(Value::as_str) {
-                        project_path = cwd.to_string();
-                    }
-                }
-                if created_at.is_empty() {
-                    if let Some(timestamp) = obj.get("timestamp").and_then(Value::as_str) {
-                        created_at = timestamp.to_string();
-                    }
-                }
-            }
-            Some("session_info") => {
-                // Pi treats a missing/empty name as an explicit title clear.
-                match obj.get("name") {
-                    Some(Value::String(name)) => {
-                        let name = name.trim();
-                        custom_title = (!name.is_empty()).then(|| name.to_string());
-                    }
-                    Some(Value::Null) | None => custom_title = None,
-                    _ => {}
-                }
-            }
-            Some("model_change") => {
-                if let Some(candidate) = obj.get("modelId").and_then(Value::as_str) {
-                    if !candidate.is_empty()
-                        && !candidate.starts_with('<')
-                        && candidate != "synthetic"
-                    {
-                        model = candidate.to_string();
-                    }
-                }
-            }
-            Some("message") => {
-                if let Some(message) = obj.get("message").and_then(Value::as_object) {
-                    let role = message.get("role").and_then(Value::as_str);
-                    if role == Some("user") && first_prompt.is_empty() {
-                        let prompt = pi_message_text(message);
-                        if !prompt.is_empty() {
-                            first_prompt = prompt;
-                        }
-                    }
-                    if role == Some("assistant") {
-                        if let Some(candidate) = message.get("model").and_then(Value::as_str) {
-                            if !candidate.is_empty()
-                                && !candidate.starts_with('<')
-                                && candidate != "synthetic"
-                            {
-                                model = candidate.to_string();
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        if let Some(usage) = extract_pi_entry_usage(entry) {
-            add_token_usage(&mut token_usage, &usage);
-            has_token_usage = true;
-        }
-    }
-
-    if session_id.is_empty() {
-        session_id = pi_session_id_from_filename(file_path);
-    }
-    if created_at.is_empty() {
-        created_at = modified_at.to_string();
-    }
-
-    SessionMeta {
-        session_id,
-        provider: "pi".into(),
-        model,
-        project_path,
-        first_prompt: first_prompt.chars().take(200).collect(),
-        custom_title,
-        file_path: file_path.to_string_lossy().to_string(),
-        created_at,
-        modified_at: modified_at.to_string(),
-        token_usage: has_token_usage.then_some(token_usage),
-    }
+pub fn extract_pi_session_meta(entries: &[JsonlEntry], file_path: &Path, modified_at: &str) -> SessionMeta {
+    crate::agents::pi::extract_session(entries, file_path, modified_at)
 }
 
-pub fn extract_claude_session_meta(
-    entries: &[JsonlEntry],
-    file_path: &Path,
-    modified_at: &str,
-) -> SessionMeta {
-    let mut session_id = String::new();
-    let mut model = String::new();
-    let mut project_path = String::new();
-    let mut first_prompt = String::new();
-    let mut custom_title = String::new();
-    let mut token_usage = TokenUsage {
-        input_tokens: None,
-        output_tokens: None,
-        total_tokens: None,
-        cache_tokens: None,
-    };
-    let mut has_token_usage = false;
-
-    for entry in entries {
-        let obj = entry.as_record();
-        if let Some(o) = obj {
-            if session_id.is_empty() {
-                if let Some(s) = o.get("sessionId").and_then(|v| v.as_str()) {
-                    session_id = s.to_string();
-                }
-            }
-            if entry.type_str() == Some("custom-title") {
-                if let Some(t) = o.get("customTitle").and_then(|v| v.as_str()) {
-                    let trimmed = t.trim();
-                    if !trimmed.is_empty() {
-                        custom_title = trimmed.to_string();
-                    }
-                }
-            }
-            if model.is_empty() {
-                let candidate = o.get("model").and_then(|v| v.as_str()).or_else(|| {
-                    o.get("message")
-                        .and_then(|m| m.get("model"))
-                        .and_then(|v| v.as_str())
-                });
-                if let Some(c) = candidate {
-                    if !c.starts_with('<') && c != "synthetic" {
-                        model = c.to_string();
-                    }
-                }
-            }
-            if project_path.is_empty() {
-                if let Some(cwd) = o.get("cwd").and_then(|v| v.as_str()) {
-                    project_path = cwd.to_string();
-                }
-            }
-            let t = entry.type_str();
-            if (t == Some("user") || t == Some("human")) && first_prompt.is_empty() {
-                if let Some(msg) = o.get("message") {
-                    let p = first_prompt_from_message(msg);
-                    if !p.is_empty() {
-                        first_prompt = p;
-                    }
-                }
-            }
-        }
-
-        if let Some(entry_usage) = extract_token_usage(entry) {
-            if has_cumulative_token_usage(entry.value(), 0) {
-                merge_token_usage(&mut token_usage, &entry_usage);
-            } else {
-                add_token_usage(&mut token_usage, &entry_usage);
-            }
-            has_token_usage = true;
-        }
-    }
-
-    if session_id.is_empty() {
-        session_id = basename_no_ext(file_path);
-    }
-
-    let truncated = first_prompt.chars().take(200).collect();
-    SessionMeta {
-        session_id,
-        provider: "claude".into(),
-        model,
-        project_path,
-        first_prompt: truncated,
-        custom_title: if custom_title.is_empty() {
-            None
-        } else {
-            Some(custom_title)
-        },
-        file_path: file_path.to_string_lossy().to_string(),
-        created_at: modified_at.to_string(),
-        modified_at: modified_at.to_string(),
-        token_usage: if has_token_usage {
-            Some(token_usage)
-        } else {
-            None
-        },
-    }
+pub fn extract_claude_session_meta(entries: &[JsonlEntry], file_path: &Path, modified_at: &str) -> SessionMeta {
+    crate::agents::claude::extract_session(entries, file_path, modified_at)
 }
 
-pub fn extract_codex_session_meta(
-    entries: &[JsonlEntry],
-    file_path: &Path,
-    modified_at: &str,
-) -> SessionMeta {
-    let mut session_id = String::new();
-    let mut model = String::new();
-    let mut project_path = String::new();
-    let mut first_prompt = String::new();
-    let mut token_usage = TokenUsage {
-        input_tokens: None,
-        output_tokens: None,
-        total_tokens: None,
-        cache_tokens: None,
-    };
-    let mut has_token_usage = false;
-
-    for entry in entries {
-        if let Some(o) = entry.as_record() {
-            if entry.type_str() == Some("session_meta") {
-                if let Some(p) = o.get("payload").and_then(|v| v.as_object()) {
-                    if session_id.is_empty() {
-                        if let Some(id) = p.get("id").and_then(|v| v.as_str()) {
-                            session_id = id.to_string();
-                        }
-                    }
-                    if project_path.is_empty() {
-                        if let Some(cwd) = p.get("cwd").and_then(|v| v.as_str()) {
-                            project_path = cwd.to_string();
-                        }
-                    }
-                    if model.is_empty() {
-                        if let Some(mp) = p.get("model_provider").and_then(|v| v.as_str()) {
-                            model = mp.to_string();
-                        }
-                    }
-                }
-            }
-            if entry.type_str() == Some("event_msg") {
-                if let Some(p) = o.get("payload").and_then(|v| v.as_object()) {
-                    if p.get("type").and_then(|v| v.as_str()) == Some("user_message") {
-                        if first_prompt.is_empty() {
-                            if let Some(c) = p.get("content").and_then(|v| v.as_str()) {
-                                first_prompt = c.to_string();
-                            }
-                        }
-                    }
-                }
-            }
-            if entry.type_str() == Some("turn_context") {
-                if let Some(p) = o.get("payload").and_then(|v| v.as_object()) {
-                    if model == "openai" {
-                        if let Some(m) = p.get("model").and_then(|v| v.as_str()) {
-                            model = m.to_string();
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(entry_usage) = extract_token_usage(entry) {
-            merge_token_usage(&mut token_usage, &entry_usage);
-            has_token_usage = true;
-        }
-    }
-
-    if session_id.is_empty() {
-        session_id = basename_no_ext(file_path);
-    }
-
-    let truncated = first_prompt.chars().take(200).collect();
-    SessionMeta {
-        session_id,
-        provider: "codex".into(),
-        model,
-        project_path,
-        first_prompt: truncated,
-        custom_title: None,
-        file_path: file_path.to_string_lossy().to_string(),
-        created_at: modified_at.to_string(),
-        modified_at: modified_at.to_string(),
-        token_usage: if has_token_usage {
-            Some(token_usage)
-        } else {
-            None
-        },
-    }
+pub fn extract_codex_session_meta(entries: &[JsonlEntry], file_path: &Path, modified_at: &str) -> SessionMeta {
+    crate::agents::codex::extract_session(entries, file_path, modified_at)
 }
 
 #[cfg(test)]

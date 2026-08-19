@@ -12,7 +12,7 @@
   "files": [
     "bin/starling.js",
     "lib/*.js",
-    "lib/agent-host/",
+    "lib/agents/pi/",
     "lib/chat/",
     "lib/render/",
     "scripts/install-agent-skills.js",

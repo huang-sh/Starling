@@ -5,14 +5,14 @@ import path, { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
-import { runAgentHost } from "../lib/agent-host/host.js";
+import { runAgentHost } from "../lib/agents/pi/host.js";
 import {
   MAX_JSONL_LINE_BYTES,
   attachStrictJsonlReader,
   serializeJsonLine,
-} from "../lib/agent-host/jsonl.js";
-import { createPiSdkAdapter } from "../lib/agent-host/sdk-adapter.js";
-import { parseAgentHostArgs } from "../lib/agent-host/types.js";
+} from "../lib/agents/pi/jsonl.js";
+import { createPiSdkAdapter } from "../lib/agents/pi/sdk-adapter.js";
+import { parseAgentHostArgs } from "../lib/agents/pi/types.js";
 
 class FakeSession {
   constructor(bindings) {

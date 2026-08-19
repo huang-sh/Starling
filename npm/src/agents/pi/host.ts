@@ -1,6 +1,6 @@
 import type { Readable } from "node:stream";
-import { createChatSession } from "../chat/session.js";
-import type { ChatSession } from "../chat/types.js";
+import { createChatSession } from "../../chat/session.js";
+import type { ChatSession } from "../../chat/types.js";
 import { attachStrictJsonlReader } from "./jsonl.js";
 import { createPiSdkAdapter } from "./sdk-adapter.js";
 import {

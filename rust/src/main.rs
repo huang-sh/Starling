@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use std::any::Any;
 
+mod agents;
 mod cli;
 mod commands;
 mod constants;
