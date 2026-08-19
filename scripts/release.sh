@@ -17,6 +17,9 @@ VERSION="${1:?Usage: scripts/release.sh <semver>}"
 }
 
 sed -i.bak -E "s/^version = \"[^\"]+\"/version = \"${VERSION}\"/" rust/Cargo.toml && rm rust/Cargo.toml.bak
+# Sync the workspace version into Cargo.lock (CI builds with --locked;
+# a stale lock entry there fails the release).
+(cd rust && cargo update --workspace --quiet)
 
 git add rust/Cargo.toml
 git commit -m "release: v${VERSION}"
