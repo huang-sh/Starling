@@ -1,4 +1,5 @@
 node_modules/
+npm/lib/
 npm/scripts/
 npm/skills/
 npm/vendor/
