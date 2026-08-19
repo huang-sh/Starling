@@ -35,6 +35,9 @@ use crate::types::{Bookmark, RunProvider, RunRecord, SessionMeta};
 
 mod hub;
 
+// The hub (Unix-socket shared watch transport) is Unix-only; on Windows
+// `top --json --watch` falls through to the per-process watch loop below.
+
 const WATCH_INTERVAL_MS: u64 = 500;
 const EDGE_RUNNING_LEASE_MS: u64 = 15 * 1000;
 const HOOK_RUNNING_STALE_MS: u64 = 30 * 60 * 1000;
@@ -84,7 +87,17 @@ fn render_monitor(cmd: MonitorCommand) -> Result<()> {
     let include_unpinned = include_unpinned_sessions(&cmd, catalog_filter);
 
     if cmd.json && cmd.watch {
-        return hub::watch_json(catalog_filter, include_unpinned, limit, agent_filter, sort);
+        #[cfg(unix)]
+        {
+            return hub::watch_json(
+                catalog_filter,
+                include_unpinned,
+                limit,
+                agent_filter,
+                sort,
+            );
+        }
+        // Windows: no Unix-socket hub; fall through to the plain watch loop.
     }
 
     let rows = build_snapshot(catalog_filter, include_unpinned, limit, agent_filter, sort)?;

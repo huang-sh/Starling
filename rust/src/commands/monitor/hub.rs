@@ -1,4 +1,8 @@
 //! Shared transport for `top --json --watch` on Unix.
+//!
+//! Windows has no Unix-domain sockets, so the hub is Unix-only; there the
+//! watch loop compiles to the direct per-process snapshot path instead.
+#![cfg(unix)]
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
