@@ -11,5 +11,6 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["npm/src/**/*.ts"]
+  "include": ["npm/src/**/*.ts"],
+  "exclude": ["npm/src/agents/pi/reporter.ts"]
 }
