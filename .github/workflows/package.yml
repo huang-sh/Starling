@@ -219,8 +219,9 @@ jobs:
 
       - name: Pack main npm package
         run: |
-          mkdir -p dist
-          npm pack ./npm --pack-destination dist
+          # npm/package.json intentionally carries no version (single-source:
+          # rust/Cargo.toml). scripts/pack.sh stamps it before npm pack.
+          scripts/pack.sh
 
       - name: Upload main npm package
         uses: actions/upload-artifact@v4
