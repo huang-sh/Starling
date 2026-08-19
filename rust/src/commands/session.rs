@@ -447,7 +447,10 @@ fn ensure_session_bookmark(
         .into_iter()
         .find(|b| {
             b.provider == meta.provider
-                && (meta.provider != "pi" || b.project_path == meta.project_path)
+                && (meta.provider != "pi"
+                    || b.project_path == meta.project_path
+                    || b.project_path.is_empty()
+                    || meta.project_path.is_empty())
                 && canonical_session_id(&b.session_id, Some(&b.provider))
                     == canonical_session_id(&meta.session_id, Some(&meta.provider))
         })
@@ -456,6 +459,13 @@ fn ensure_session_bookmark(
             &existing.id,
             BookmarkPatch {
                 session_id: Some(meta.session_id.clone()),
+                project_path: if existing.project_path.is_empty()
+                    && !meta.project_path.is_empty()
+                {
+                    Some(meta.project_path.clone())
+                } else {
+                    None
+                },
                 ..Default::default()
             },
         )

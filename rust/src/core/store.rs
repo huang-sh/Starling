@@ -235,14 +235,20 @@ pub fn find_bookmark_for_session(
     session_id: &str,
     project_path: &str,
 ) -> Option<Bookmark> {
-    let matches = load_store()
+    let mut matches = load_store()
         .bookmarks
         .into_iter()
         .filter(|bookmark| bookmark.provider == provider && bookmark.session_id == session_id);
     if provider == "pi" && !project_path.is_empty() {
+        // Pi ids are globally unique; project_path only disambiguates the
+        // same id used across projects. A bookmark with an UNKNOWN (empty)
+        // project_path must still match — auto-archive resolves meta before
+        // the transcript header exists and used to mint duplicates when this
+        // lookup missed on "" != "/real/path".
         matches
-            .filter(|bookmark| bookmark.project_path == project_path)
-            .next()
+            .clone()
+            .find(|bookmark| bookmark.project_path == project_path)
+            .or_else(|| matches.find(|bookmark| bookmark.project_path.is_empty()))
     } else {
         matches.into_iter().next()
     }
@@ -697,4 +703,37 @@ mod tests {
             assert_eq!(found.unwrap().id, "cat_0102");
         });
     }
+
+// Regression for the duplicate-bookmark bug: auto-archive resolves pi meta
+// with an EMPTY project_path (transcript header not written yet), while the
+// launch pin stored the real path. Exact-path matching missed and minted a
+// second bookmark for the same session. Empty paths must match by id.
+#[test]
+fn pi_bookmark_with_unknown_project_path_still_matches() {
+    with_temp_store(|| {
+        add_bookmark(Bookmark {
+            id: "starling_launch".into(),
+            provider: "pi".into(),
+            session_id: "01a01971".into(),
+            title: "launch pin".into(),
+            category: String::new(),
+            tags: vec![],
+            project_path: "/data20T/dev/openbiowiki".into(),
+            first_prompt: String::new(),
+            notes: vec![],
+            origin: "manual".into(),
+            space_ids: vec![],
+            created_at: now_iso(),
+            updated_at: now_iso(),
+        });
+
+        let hit = find_bookmark_for_session("pi", "01a01971", "");
+        assert!(
+            hit.is_some(),
+            "auto-archive meta with unknown path must find the launch bookmark"
+        );
+        assert_eq!(hit.unwrap().id, "starling_launch");
+    });
+}
+
 }

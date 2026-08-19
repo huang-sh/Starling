@@ -90,7 +90,12 @@ pub(crate) fn run_with_origin(
         .into_iter()
         .find(|b| {
             b.provider == meta.provider
-                && (meta.provider != "pi" || b.project_path == meta.project_path)
+                && (meta.provider != "pi"
+                    || b.project_path == meta.project_path
+                    // Unknown (empty) paths match any project: the id is
+                    // globally unique, the path is only a disambiguator.
+                    || b.project_path.is_empty()
+                    || meta.project_path.is_empty())
                 && canonical_session_id(&b.session_id, Some(&b.provider))
                     == canonical_session_id(&meta.session_id, Some(&meta.provider))
         })
@@ -99,6 +104,11 @@ pub(crate) fn run_with_origin(
             session_id: Some(meta.session_id.clone()),
             ..Default::default()
         };
+        // Backfill whichever side lacks the project path so the NEXT lookup
+        // hits the exact-match arm instead of the empty-path fallback.
+        if b.project_path.is_empty() && !meta.project_path.is_empty() {
+            patch.project_path = Some(meta.project_path.clone());
+        }
         if let Some(t) = title.as_deref() {
             patch.title = Some(t.to_string());
         }
