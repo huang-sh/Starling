@@ -7,6 +7,7 @@
 # npm pack honors the "files" whitelist, so staging the whole dir is safe.
 
 set -euo pipefail
+ROOT_DIR="$(pwd)"
 cd "$(dirname "$0")/.."
 
 VERSION=$(grep -m1 '^version' rust/Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')
@@ -27,5 +28,5 @@ VERSION="${VERSION}" STAGE="${STAGE}" node -e '
   fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
 '
 
-(cd "${STAGE}" && npm pack --silent)
+(cd "${STAGE}" && npm pack --silent --pack-destination "${ROOT_DIR}/dist")
 echo ">> Staged: dist/starling-ai-${VERSION}.tgz"
